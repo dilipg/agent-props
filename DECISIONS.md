@@ -1326,3 +1326,76 @@ does not any more; `set_step_actual` is on the Protocol.
 **Still open, and not a blocker:** nothing. R-32 keeps the `declared_bp_version` column and section 7
 now carries it; R-35 ratifies both list orderings and section 4 now states them; R-36 keeps substring
 `q`; R-38 ratifies the lineage grain. Every question M3's first round raised has a ruling.
+
+---
+
+## [M3, fix round 2] Correction: `set_step_actual` had two decision sites, and the second one always said yes
+The fix-round-1 entry above says "the `UPDATE` carries `WHERE actual IS NULL`, so a concurrent second
+writer cannot clobber, and the loop then re-reads and takes the identical-or-refuse decision on the
+stored value". **The first half was true and the second half described an intention, not the code.**
+What the code did after the conditional `UPDATE` was read the row back and return it whenever
+*some* actual was stored:
+
+```python
+written = self._step_row(run_id, node_id, iteration)
+if written.actual is not None:
+    return _step(written)
+```
+
+It never compared `written.actual` with the caller's argument. So the losing writer in a genuine race
+received a **successful `StepRecord` carrying the winner's value** and no exception — the exact
+opposite of the write-once contract R-33 exists to guarantee, and of what the method's own docstring
+promised. The review reproduced it against a real `SqlStore` on a real SQLite file: writer A stores
+`{"result": "X-from-A"}`, writer B calls with `{"result": "Y-from-B"}` having seen `actual=None`, and
+B gets a success whose `actual` is A's value.
+
+**Fixed by looping back to the top rather than by adding a second comparison**, which is what the
+reviewer preferred and is the right call: the comparison at the top of the loop is now the only place
+this method decides anything, so there are no longer two sites that have to stay in agreement. It is
+also the shape `upsert_step` already uses — its lost-race branch `continue`s and re-runs the full
+existing-row check rather than returning from the middle.
+
+Worth naming the pattern, because this is the second round in a row where the same class of defect
+appeared in the one place a working pattern was not reused: `seq` was the one allocation that did not
+copy `put_dataset`'s constraint-plus-retry, and `set_step_actual` was the one retry that returned
+from the middle instead of looping. Both were caught by a reviewer replaying the interleaving rather
+than reading the comment. The comment was wrong both times.
+
+## [M3, fix round 2] Three race tests added, closing the set
+The harness in `test_sql_allocation_races.py` tested the losing side of every allocation race except
+three. Now none:
+
+- **`set_step_actual`** — a stale reader with a *differing* actual must raise `StoreError`, and one
+  with an *identical* actual must still be the no-op. Verified as a real regression guard, not just
+  an assertion: with the fix-round-1 code restored, the test reports
+  `Failed: DID NOT RAISE StoreError`, and it passes against the fix.
+- **`put_skeleton`** — had no race test at all. Convergence here means last-write-wins on one row,
+  since a skeleton is an in-progress fill and re-filling a section is explicitly allowed (R-06), so
+  there is nothing to compare and nothing to refuse.
+- **`put_run`'s convergence** — the existing test covered only the other branch of the same
+  `except`, the unrelated foreign-key violation that must still surface. This one asserts the race
+  the retry exists for actually converges on one row.
+
+`put_skeleton` and `put_run` each gained a one-line existence-check helper (`_existing_skeleton`,
+`_existing_run`) for the same two reasons `_blueprint_row` has one: the read and the write it decides
+on stay in one transaction, and the losing side becomes reachable in a test. That the refactor was
+needed at all is a small piece of evidence for the general rule — an inline read inside a retry loop
+is a branch nobody can test.
+
+## [M3, fix round 2] How the race tests force a race, stated rather than implied
+Recorded because the M3 report's phrasing invited the wrong reading. Every race test monkeypatches
+**one** internal read to return a stale answer once — the allocation read, an existence check, or the
+step row — which is exactly what the loser of a real race sees. Nothing else is mocked: the `INSERT`
+or `UPDATE` that follows, the constraint that rejects it, the `IntegrityError` and the retry all run
+against a real file-backed SQLite database.
+
+What that proves is that the **recovery** is correct given a stale read. That a stale read is
+*reachable* is a separate claim, and it was established separately, by replaying the statement
+sequence on two interleaved real connections — which is how the review found the `seq` race and what
+ruling R-37 records. That reproduction was a throwaway script and is not in the diff; the report now
+says so instead of implying the harder proof is committed.
+
+Keeping the monkeypatch technique rather than promoting it to threads is deliberate: a threaded test
+of a race this narrow is either flaky or has to be forced into determinism by the same kind of hook,
+and the forced-stale-read version fails loudly and repeatably against a regression, as the
+`set_step_actual` check above demonstrates.
