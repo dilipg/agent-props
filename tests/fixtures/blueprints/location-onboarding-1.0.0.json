@@ -1,0 +1,259 @@
+{
+  "agent_id": "location-onboarding",
+  "version": "1.0.0",
+  "status": "published",
+  "description": "Onboards a new franchise location: intake, document collection, training assignment, compliance verification.",
+  "entry_node": "receive_request",
+
+  "entities": [
+    {
+      "id": "store",
+      "schema": {
+        "type": "object",
+        "required": ["id", "name", "city", "status"],
+        "properties": {
+          "id":     { "type": "string", "pattern": "^ST-[0-9]{4}$" },
+          "name":   { "type": "string" },
+          "city":   { "type": "string" },
+          "status": { "type": "string",
+                      "enum": ["pending_documents", "documents_complete", "active", "blocked"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "franchisee",
+      "schema": {
+        "type": "object",
+        "required": ["id", "name", "existing_locations"],
+        "properties": {
+          "id":                 { "type": "string", "pattern": "^FR-[0-9]{4}$" },
+          "name":               { "type": "string" },
+          "existing_locations": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    }
+  ],
+
+  "nodes": [
+    {
+      "id": "receive_request",
+      "tool_name": "delightree.onboarding.intake",
+      "kind": "tool_call",
+      "pool": false,
+      "notes": "The opening beat. Who is opening what, and where.",
+      "input_schema": {
+        "type": "object",
+        "required": ["request_id"],
+        "properties": { "request_id": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["store_id", "franchisee"],
+        "properties": {
+          "store_id":   { "type": "string" },
+          "franchisee": { "$ref": "entity:franchisee" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "fetch_store_profile",
+      "tool_name": "delightree.stores.get",
+      "kind": "tool_call",
+      "pool": false,
+      "notes": "First read of the store. Status here sets up whether the loop runs.",
+      "input_schema": {
+        "type": "object",
+        "required": ["store_id"],
+        "properties": { "store_id": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["store"],
+        "properties": { "store": { "$ref": "entity:store" } },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "check_docs",
+      "kind": "decision",
+      "pool": false,
+      "notes": "Pure decision. Reads store status, decides whether documents are outstanding.",
+      "input_schema": {
+        "type": "object",
+        "required": ["store"],
+        "properties": { "store": { "$ref": "entity:store" } },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["documents_complete", "outstanding"],
+        "properties": {
+          "documents_complete": { "type": "boolean" },
+          "outstanding":        { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "request_docs",
+      "tool_name": "delightree.docs.request",
+      "kind": "loop",
+      "pool": true,
+      "max_iterations": 3,
+      "notes": "Each iteration chases one outstanding document. Later iterations should show progress, not repetition.",
+      "input_schema": {
+        "type": "object",
+        "required": ["doc_type"],
+        "properties": { "doc_type": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["requested", "received"],
+        "properties": {
+          "requested": { "type": "array", "items": { "type": "string" } },
+          "received":  { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "recheck_store",
+      "tool_name": "delightree.stores.get",
+      "kind": "tool_call",
+      "pool": false,
+      "notes": "Second read of the store, after documents arrive. Same tool as the first read.",
+      "input_schema": {
+        "type": "object",
+        "required": ["store_id"],
+        "properties": { "store_id": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["store"],
+        "properties": { "store": { "$ref": "entity:store" } },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "assign_training",
+      "tool_name": "delightree.training.assign",
+      "kind": "tool_call",
+      "pool": false,
+      "notes": "Assigns onboarding modules. Count should reflect whether this is a first or repeat location.",
+      "input_schema": {
+        "type": "object",
+        "required": ["store_id", "franchisee_id"],
+        "properties": {
+          "store_id":      { "type": "string" },
+          "franchisee_id": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["assigned_modules"],
+        "properties": {
+          "assigned_modules": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "verify_compliance",
+      "tool_name": "delightree.compliance.check",
+      "kind": "tool_call",
+      "pool": false,
+      "notes": "The gate before completion. Non-compliance routes to escalation.",
+      "input_schema": {
+        "type": "object",
+        "required": ["store_id"],
+        "properties": { "store_id": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["compliant", "findings"],
+        "properties": {
+          "compliant": { "type": "boolean" },
+          "findings":  { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "complete",
+      "kind": "terminal",
+      "pool": false,
+      "notes": "Happy ending.",
+      "input_schema": { "type": "object", "additionalProperties": true },
+      "output_schema": {
+        "type": "object",
+        "required": ["onboarding_status"],
+        "properties": {
+          "onboarding_status": { "type": "string", "const": "complete" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "escalate",
+      "kind": "terminal",
+      "pool": false,
+      "notes": "Compliance failed. A human takes over.",
+      "input_schema": { "type": "object", "additionalProperties": true },
+      "output_schema": {
+        "type": "object",
+        "required": ["onboarding_status", "escalated_to"],
+        "properties": {
+          "onboarding_status": { "type": "string", "const": "escalated" },
+          "escalated_to":      { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  ],
+
+  "edges": [
+    { "from": "receive_request",    "to": "fetch_store_profile", "condition": null },
+    { "from": "fetch_store_profile","to": "check_docs",          "condition": null },
+    { "from": "check_docs",         "to": "request_docs",
+      "condition": { "==": [ { "var": "documents_complete" }, false ] } },
+    { "from": "check_docs",         "to": "assign_training",
+      "condition": { "==": [ { "var": "documents_complete" }, true ] } },
+    { "from": "request_docs",       "to": "recheck_store",       "condition": null },
+    { "from": "recheck_store",      "to": "check_docs",          "condition": null },
+    { "from": "assign_training",    "to": "verify_compliance",   "condition": null },
+    { "from": "verify_compliance",  "to": "complete",
+      "condition": { "==": [ { "var": "compliant" }, true ] } },
+    { "from": "verify_compliance",  "to": "escalate",
+      "condition": { "==": [ { "var": "compliant" }, false ] } }
+  ],
+
+  "label_schema": {
+    "dimensions": {
+      "persona":   ["new-franchisee", "multi-unit-operator", "corporate-admin"],
+      "scenario":  ["happy-path", "missing-documents", "compliance-overdue"],
+      "tier":      ["single-unit", "regional", "enterprise"],
+      "outcome":   ["success", "partial", "escalated", "failed"],
+      "edge_case": ["none", "timezone-boundary", "unicode-names", "empty-history"]
+    }
+  },
+
+  "outcome_schema": {
+    "type": "object",
+    "required": ["onboarding_status", "outstanding_tasks"],
+    "properties": {
+      "onboarding_status": { "type": "string", "enum": ["complete", "escalated"] },
+      "outstanding_tasks": { "type": "integer", "minimum": 0 },
+      "assigned_modules":  { "type": "array", "items": { "type": "string" } }
+    },
+    "additionalProperties": false
+  }
+}

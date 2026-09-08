@@ -1,0 +1,127 @@
+{
+  "id": "3f8c1a20-0000-4000-8000-000000000002",
+  "version": 1,
+  "archived": false,
+  "blueprint": { "agent_id": "location-onboarding", "version": "1.0.0" },
+  "seed": 20260908,
+
+  "provenance": {
+    "title": "First-time franchisee escalated for lapsed fire-safety compliance",
+    "intent": "Pins the compliant-branch skip: when fetch_store_profile already reports documents_complete, the agent must route straight to assign_training without ever calling request_docs, and a failing verify_compliance must terminate at escalate rather than complete. Exists to catch a regression where the agent looped through request_docs anyway, or granted completion despite a failed compliance check.",
+    "author": { "name": "Claude Code", "handle": "claude-code", "agent": "claude-code" },
+    "created_at": "2026-09-08T11:02:47Z",
+    "supersedes": null
+  },
+
+  "narrative": "Arun Deshpande is opening his very first store, a single unit in Whitefield. His paperwork was already complete when the franchise desk did the intake, so when the agent reads the store profile there is nothing outstanding to chase and no reason to loop through request_docs. Training is assigned at the full six-module set appropriate for a first-time operator with no prior locations. But the compliance check turns up a lapsed fire-safety certificate and an overdue inspection, so onboarding cannot complete: the run is escalated to regional operations with both findings still outstanding.",
+
+  "labels": {
+    "persona":   "new-franchisee",
+    "scenario":  "compliance-overdue",
+    "tier":      "single-unit",
+    "outcome":   "escalated",
+    "edge_case": "none"
+  },
+
+  "entities": {
+    "franchisee": {
+      "base": { "id": "FR-3390", "name": "Arun Deshpande", "existing_locations": 0 }
+    },
+    "store": {
+      "base": {
+        "id": "ST-5820", "name": "Whitefield 1", "city": "Bengaluru",
+        "status": "documents_complete"
+      }
+    }
+  },
+
+  "nodes": {
+    "receive_request": {
+      "input":  { "request_id": "REQ-91002" },
+      "output": {
+        "store_id": "ST-5820",
+        "franchisee": { "id": "FR-3390", "name": "Arun Deshpande", "existing_locations": 0 }
+      },
+      "entity_refs": ["franchisee"],
+      "latency_hint_ms": 95
+    },
+    "fetch_store_profile": {
+      "input":  { "store_id": "ST-5820" },
+      "output": {
+        "store": { "id": "ST-5820", "name": "Whitefield 1", "city": "Bengaluru",
+                   "status": "documents_complete" }
+      },
+      "entity_refs": ["store"],
+      "latency_hint_ms": 130
+    },
+    "check_docs": {
+      "input":  { "store": { "id": "ST-5820", "name": "Whitefield 1", "city": "Bengaluru",
+                             "status": "documents_complete" } },
+      "output": { "documents_complete": true, "outstanding": [] },
+      "entity_refs": ["store"]
+    },
+    "recheck_store": {
+      "input":  { "store_id": "ST-5820" },
+      "output": {
+        "store": { "id": "ST-5820", "name": "Whitefield 1", "city": "Bengaluru",
+                   "status": "documents_complete" }
+      },
+      "entity_refs": ["store"],
+      "latency_hint_ms": 115
+    },
+    "assign_training": {
+      "input":  { "store_id": "ST-5820", "franchisee_id": "FR-3390" },
+      "output": { "assigned_modules": [
+        "orientation", "pos-fundamentals", "food-safety-basics",
+        "local-compliance-training", "customer-service-standards", "inventory-management"
+      ] },
+      "entity_refs": ["store", "franchisee"],
+      "latency_hint_ms": 210
+    },
+    "verify_compliance": {
+      "input":  { "store_id": "ST-5820" },
+      "output": { "compliant": false,
+                  "findings": ["fire-safety-certificate-expired", "inspection-overdue-90-days"] },
+      "entity_refs": ["store"],
+      "latency_hint_ms": 355
+    },
+    "complete": {
+      "output": { "onboarding_status": "complete" },
+      "entity_refs": []
+    },
+    "escalate": {
+      "output": { "onboarding_status": "escalated", "escalated_to": "regional-ops" },
+      "entity_refs": []
+    }
+  },
+
+  "pools": {
+    "request_docs": [
+      { "output": { "requested": ["trade-license"], "received": [] },                  "entity_refs": [] },
+      { "output": { "requested": ["trade-license"], "received": ["trade-license"] },    "entity_refs": [] }
+    ]
+  },
+
+  "expected": {
+    "final": {
+      "onboarding_status": "escalated",
+      "outstanding_tasks": 2,
+      "assigned_modules": [
+        "orientation", "pos-fundamentals", "food-safety-basics",
+        "local-compliance-training", "customer-service-standards", "inventory-management"
+      ]
+    },
+    "expected_path": [
+      "receive_request", "fetch_store_profile", "check_docs",
+      "assign_training", "verify_compliance", "escalate"
+    ],
+    "node_expectations": {
+      "request_docs": { "called": false },
+      "escalate":     { "called": true }
+    },
+    "comparison": "subset",
+    "rationale": "Documents are already complete when fetch_store_profile reads the store, so check_docs must route straight to assign_training and request_docs must never be called. verify_compliance finds the fire-safety certificate lapsed, so the run must terminate at escalate rather than complete, with both findings still outstanding."
+  },
+
+  "validated_at": "2026-09-08T11:02:47Z"
+}

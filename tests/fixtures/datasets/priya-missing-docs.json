@@ -1,0 +1,131 @@
+{
+  "id": "3f8c1a20-0000-4000-8000-000000000001",
+  "version": 1,
+  "archived": false,
+  "blueprint": { "agent_id": "location-onboarding", "version": "1.0.0" },
+  "seed": 20260908,
+
+  "provenance": {
+    "title": "Multi-unit operator missing one FSSAI licence",
+    "intent": "Pins the single-iteration loop path for a franchisee who already operates a location. Training assignment must be the reduced two-module set, not the full onboarding set. Added after the agent assigned all six modules to a repeat operator, which is the behaviour this dataset exists to catch if it regresses.",
+    "author": { "name": "Priya Nair", "handle": "pnair", "agent": "human" },
+    "created_at": "2026-09-08T10:14:22Z",
+    "supersedes": null
+  },
+
+  "narrative": "Priya Raman already runs one outlet in Indiranagar and is opening her second in Koramangala. Her intake is clean except for a missing FSSAI licence, so the agent has to chase exactly one document before onboarding can proceed. Once it arrives the store flips to documents_complete, training is assigned at the reduced count appropriate for an operator who has done this before, compliance passes, and onboarding completes with nothing outstanding.",
+
+  "labels": {
+    "persona":   "multi-unit-operator",
+    "scenario":  "missing-documents",
+    "tier":      "regional",
+    "outcome":   "success",
+    "edge_case": "none"
+  },
+
+  "entities": {
+    "franchisee": {
+      "base": { "id": "FR-2210", "name": "Priya Raman", "existing_locations": 1 }
+    },
+    "store": {
+      "base": {
+        "id": "ST-4471", "name": "Koramangala 2", "city": "Bengaluru",
+        "status": "pending_documents"
+      },
+      "revisions": {
+        "after_docs": {
+          "after_node": "request_docs",
+          "state": {
+            "id": "ST-4471", "name": "Koramangala 2", "city": "Bengaluru",
+            "status": "documents_complete"
+          }
+        }
+      }
+    }
+  },
+
+  "nodes": {
+    "receive_request": {
+      "input":  { "request_id": "REQ-88120" },
+      "output": {
+        "store_id": "ST-4471",
+        "franchisee": { "id": "FR-2210", "name": "Priya Raman", "existing_locations": 1 }
+      },
+      "entity_refs": ["franchisee"],
+      "latency_hint_ms": 90
+    },
+    "fetch_store_profile": {
+      "input":  { "store_id": "ST-4471" },
+      "output": {
+        "store": { "id": "ST-4471", "name": "Koramangala 2", "city": "Bengaluru",
+                   "status": "pending_documents" }
+      },
+      "entity_refs": ["store"],
+      "latency_hint_ms": 120
+    },
+    "check_docs": {
+      "input":  { "store": { "id": "ST-4471", "name": "Koramangala 2", "city": "Bengaluru",
+                             "status": "pending_documents" } },
+      "output": { "documents_complete": false, "outstanding": ["fssai"] },
+      "entity_refs": ["store"]
+    },
+    "recheck_store": {
+      "input":  { "store_id": "ST-4471" },
+      "output": {
+        "store": { "id": "ST-4471", "name": "Koramangala 2", "city": "Bengaluru",
+                   "status": "documents_complete" }
+      },
+      "entity_refs": ["store@after_docs"],
+      "latency_hint_ms": 115
+    },
+    "assign_training": {
+      "input":  { "store_id": "ST-4471", "franchisee_id": "FR-2210" },
+      "output": { "assigned_modules": ["pos-refresher", "local-compliance-bengaluru"] },
+      "entity_refs": ["store@after_docs", "franchisee"],
+      "latency_hint_ms": 200
+    },
+    "verify_compliance": {
+      "input":  { "store_id": "ST-4471" },
+      "output": { "compliant": true, "findings": [] },
+      "entity_refs": ["store@after_docs"],
+      "latency_hint_ms": 340
+    },
+    "complete": {
+      "output": { "onboarding_status": "complete" },
+      "entity_refs": []
+    },
+    "escalate": {
+      "output": { "onboarding_status": "escalated", "escalated_to": "regional-ops" },
+      "entity_refs": []
+    }
+  },
+
+  "pools": {
+    "request_docs": [
+      { "output": { "requested": ["fssai"], "received": [] },        "entity_refs": [] },
+      { "output": { "requested": ["fssai"], "received": ["fssai"] }, "entity_refs": [] }
+    ]
+  },
+
+  "expected": {
+    "final": {
+      "onboarding_status": "complete",
+      "outstanding_tasks": 0,
+      "assigned_modules": ["pos-refresher", "local-compliance-bengaluru"]
+    },
+    "expected_path": [
+      "receive_request", "fetch_store_profile", "check_docs",
+      "request_docs", "recheck_store", "check_docs",
+      "assign_training", "verify_compliance", "complete"
+    ],
+    "node_expectations": {
+      "request_docs":  { "called": true,
+                         "args_match": { "==": [ { "var": "doc_type" }, "fssai" ] } },
+      "escalate":      { "called": false }
+    },
+    "comparison": "subset",
+    "rationale": "One document is outstanding, so the agent must loop through request_docs exactly once, re-read the store, then proceed. Compliance passes, so escalate must never be called."
+  },
+
+  "validated_at": "2026-09-08T10:14:22Z"
+}
