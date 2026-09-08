@@ -829,6 +829,58 @@ drift claim.
 **Cost if wrong.** If full-text is genuinely wanted, it is a new named parameter alongside
 `q`, not a redefinition of it.
 
+### R-37 — `run_steps` gains `UNIQUE (run_id, seq)`, and the step read order is total
+
+M3's review found a race and **reproduced it** rather than reasoning about it: replaying the
+statement sequence `upsert_step` issues, on two interleaved connections against one
+file-backed SQLite database, both connections committed `seq = 1`. pysqlite defers `BEGIN`
+until the first DML, so the existence check and the `max(seq)` read take no lock; Postgres
+under READ COMMITTED behaves the same way. Wrapping the read and the insert in
+`engine.begin()` is therefore not the safety the code and `DECISIONS.md` describe, and
+unlike the dataset-version race this branch had no test.
+
+**Ruling.** Two changes, both required.
+
+1. Add `UNIQUE (run_id, seq)` to `run_steps` — an addition to `contracts.md` section 7, which
+   this ruling authorises. Then allocate `seq` with the same bounded-retry-on-`IntegrityError`
+   pattern `put_dataset` already uses for dataset versions, which the review verified is
+   correct and which even tests the losing side of the race. The constraint is what makes the
+   retry sound; a transaction alone is not.
+2. Make the step read order **total**: `order_by(seq, node_id, iteration)`. This is free and
+   unconditional, and it holds even if a duplicate `seq` ever reaches the table.
+
+**Why it matters at M6, not now.** `get_run` orders steps by `seq` alone, so duplicate values
+make `Run.steps` and the reconstructed `Run.path` non-deterministic. `Run.path` is what step
+resolution disambiguates against (`contracts.md` section 5 uses `run.path[-1]` as the head),
+so a duplicate `seq` would surface at M6 as intermittently wrong tool-name resolution with no
+obvious cause. That is the most expensive shape of bug this build can ship.
+
+**This extends R-35.** The step order is a **fourth** ordering, absent from R-35's list, and
+it was the only one not already total. R-35's requirement — every ordering total, so
+identical inputs give byte-identical output on every backend — applies to it.
+
+**Cost if wrong.** A unique constraint and a wider `ORDER BY`; both are additive and neither
+changes an existing result.
+
+### R-38 — `find_datasets` returns one row per lineage, at its latest version
+
+M3 implemented `find_datasets` as one row per dataset lineage at its latest version, and the
+review flagged that this is an implementer choice on a Protocol method M4 and M9 consume.
+
+**Ruling.** Ratified, and it is the only coherent option. `dataset_find`'s specified ordering
+is `(created_at, id)`, and under R-09 `created_at` comes from `provenance.created_at` —
+authored content, identical across every version of one dataset. So per-version rows would
+share both sort keys and the specified ordering could not be total, breaking M4's gate that
+"label queries return deterministic ordering for identical inputs".
+
+It is also what the method is *for*. PRD 5.7 and M9 make the dataset list a review surface —
+"a stranger has to judge relevance without opening anything" — and a list showing the same
+dataset five times, once per edit, is a worse review surface, not a more complete one.
+`dataset_get(dataset_id, version)` is how a specific version is reached.
+
+**Cost if wrong.** If version history ever needs to be browsable, it is a new parameter or a
+new method, not a redefinition of this one.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
