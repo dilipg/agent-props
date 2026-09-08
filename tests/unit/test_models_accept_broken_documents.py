@@ -10,12 +10,13 @@ Coverage comes from three tables, and
 eleven, so a new ruling is added to a table rather than discovered missing by
 someone else's suite:
 
-1. `tests/fixtures/broken/manifest.json` - the 28 shipped corpus cases. It
-   reaches seven of the eleven. It is deliberately incomplete: R-14 quotes
-   `worked-example.md` calling it "a starting set, not the complete one", so
-   depending on it alone is what let DS-020 hide.
-2. :data:`EXTRA_PARSE_CASES` - hand-written, keyed by rule id, covering the ids
-   the corpus does not reach.
+1. `tests/fixtures/broken/manifest.json` - the corpus. It reached seven of the
+   eleven as shipped, and reaches all eleven since M2 extended it under ruling
+   R-14. The tables below are kept anyway: they carry *second spellings* of the
+   same rules (a title over 120 characters as well as a whitespace one,
+   ``max_iterations`` of ``-1`` as well as ``0``) that the corpus has no reason
+   to duplicate, and one of them asserts the opposite of parsing.
+2. :data:`EXTRA_PARSE_CASES` - hand-written, keyed by rule id.
 
 :data:`STRICT_BY_DESIGN_CASES` is the third table and asserts the *opposite*:
 these mutations must raise, because ruling R-23 requires strict numeric typing
@@ -25,39 +26,45 @@ raw ``dict`` off ``json.loads`` before any model is constructed - so DS-020 and
 BP-008's "is an integer" half fire there, with real corpus cases, and the strict
 annotation is the defence-in-depth second layer.
 
+The corpus case for DS-020 is one of those: the manifest marks it
+``parse_raises``, because "seed is an integer" is exactly what ``StrictInt``
+enforces, so the mutation cannot both parse and violate the rule. Those cases
+are asserted to raise here rather than to parse, and the rule id still fires at
+M2 against the raw document.
+
 Every parse case must also round-trip, since M2 reads pointers off the original
 document and M7 needs export bytes to be stable.
 
 Failures here are *this* package's bug, not the corpus's. A case that will not
-parse means a model is enforcing something the catalogue owns.
+parse - and is not marked ``parse_raises`` - means a model is enforcing
+something the catalogue owns.
 
-The patch applier below is a deliberate minimum: the four RFC 6902 operations
-these tables use, and nothing more. M2 builds the real corpus loader;
-duplicating thirty lines is cheaper than either package importing the other's
-test helpers.
+The patch applier lives in `tests/corpus.py`, which M2 built as the real corpus
+loader. This module imported its own copy at M1, before that existed; sharing
+one applier is what keeps the two suites reading the same manifest the same way
+now that the manifest has grown per-case keys.
 """
 
 from __future__ import annotations
 
-import copy
-import json
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from agentprops.models import Blueprint, Dataset
-from conftest import FIXTURES_DIR
+from corpus import MANIFEST, base_document, parse_raises
+from corpus import mutated as mutated_document
 
-MANIFEST = json.loads((FIXTURES_DIR / "broken" / "manifest.json").read_text(encoding="utf-8"))
-
-MODELS = {"blueprint": Blueprint, "dataset": Dataset}
-BASES = {
-    "blueprint": MANIFEST["base_blueprint"],
-    "dataset": MANIFEST["base_dataset"],
-}
+MODELS: dict[str, type[Blueprint] | type[Dataset]] = {"blueprint": Blueprint, "dataset": Dataset}
 
 CASES = [(case["id"], case) for case in MANIFEST["cases"]]
+
+#: Cases whose mutation is *designed* not to parse (ruling R-23). See the module
+#: docstring: the rule is one a strict annotation also enforces, so the
+#: mutation raises at parse time and fires at M2 against the raw document.
+PARSE_RAISES_CASES = [(case_id, case) for case_id, case in CASES if parse_raises(case)]
+PARSING_CASES = [(case_id, case) for case_id, case in CASES if not parse_raises(case)]
 
 #: The rule ids ruling R-04 names as swallowable by a model constraint.
 R04_RULE_IDS = frozenset(
@@ -121,60 +128,33 @@ STRICT_BY_DESIGN_CASES: list[tuple[str, str, list[dict[str, Any]]]] = [
 ]
 
 
-def unescape(token: str) -> str:
-    return token.replace("~1", "/").replace("~0", "~")
-
-
-def resolve(document: Any, pointer: str) -> tuple[Any, str | int]:
-    """Return ``(container, key)`` for an RFC 6901 pointer's final segment."""
-    tokens = [unescape(t) for t in pointer.split("/")[1:]]
-    container = document
-    for token in tokens[:-1]:
-        container = container[int(token)] if isinstance(container, list) else container[token]
-    last = tokens[-1]
-    if isinstance(container, list):
-        return container, len(container) if last == "-" else int(last)
-    return container, last
-
-
-def read(document: Any, pointer: str) -> Any:
-    container, key = resolve(document, pointer)
-    return container[key]
-
-
-def apply_operation(document: Any, operation: dict[str, Any]) -> None:
-    op = operation["op"]
-    value = read(document, operation["from"]) if op == "copy" else operation.get("value")
-    container, key = resolve(document, operation["path"])
-    if op == "remove":
-        del container[key]
-    elif op == "add" and isinstance(container, list):
-        container.insert(int(key), copy.deepcopy(value))
-    else:
-        container[key] = copy.deepcopy(value)
-
-
 def mutated(case: dict[str, Any]) -> tuple[type[Blueprint] | type[Dataset], dict[str, Any]]:
-    target = case["target"]
-    base = json.loads((FIXTURES_DIR / BASES[target]).read_text(encoding="utf-8"))
-    for operation in case["mutate"]:
-        apply_operation(base, operation)
-    return MODELS[target], base
+    """The model a case targets, and the document its patch list produces."""
+    return MODELS[case["target"]], mutated_document(case)
 
 
 def test_the_corpus_manifest_is_not_empty() -> None:
-    assert len(CASES) >= 28, f"expected the shipped corpus, found {len(CASES)} cases"
+    assert len(CASES) >= 28, f"expected at least the shipped corpus, found {len(CASES)} cases"
 
 
-@pytest.mark.parametrize(("case_id", "case"), CASES, ids=[case_id for case_id, _ in CASES])
+@pytest.mark.parametrize(
+    ("case_id", "case"), PARSING_CASES, ids=[case_id for case_id, _ in PARSING_CASES]
+)
 def test_broken_case_still_parses(case_id: str, case: dict[str, Any]) -> None:
-    """No mutation may raise ``ValidationError``. Every one must reach the rules."""
+    """No mutation may raise ``ValidationError``. Every one must reach the rules.
+
+    Except the ``parse_raises`` cases, which are asserted to raise below: those
+    are the rules a strict annotation also enforces, and ruling R-23 puts the
+    catalogue's copy of the check against the raw document instead.
+    """
     model, document = mutated(case)
     parsed = model.model_validate(document)
     assert parsed is not None, case_id
 
 
-@pytest.mark.parametrize(("case_id", "case"), CASES, ids=[case_id for case_id, _ in CASES])
+@pytest.mark.parametrize(
+    ("case_id", "case"), PARSING_CASES, ids=[case_id for case_id, _ in PARSING_CASES]
+)
 def test_broken_case_still_round_trips(case_id: str, case: dict[str, Any]) -> None:
     """And no mutation may be silently normalised away on the way back out."""
     model, document = mutated(case)
@@ -182,18 +162,32 @@ def test_broken_case_still_round_trips(case_id: str, case: dict[str, Any]) -> No
     assert dumped == document, case_id
 
 
+@pytest.mark.parametrize(
+    ("case_id", "case"), PARSE_RAISES_CASES, ids=[case_id for case_id, _ in PARSE_RAISES_CASES]
+)
+def test_parse_raises_case_really_does_raise(case_id: str, case: dict[str, Any]) -> None:
+    """A ``parse_raises`` marker is a claim about the model, so check it.
+
+    Without this, the marker would be a way to excuse a case from the parsing
+    tests. If a model stops enforcing what one of these mutations violates, the
+    marker is wrong and the case belongs with the others.
+    """
+    model, document = mutated(case)
+    with pytest.raises(ValidationError):
+        model.model_validate(document)
+
+
 def test_the_mutations_actually_changed_something() -> None:
     """Guard against a patch applier that quietly no-ops.
 
-    ``DS-008-constant-entity-drift`` is a known exception: ruling R-14 records
-    that its first operation replaces a value with itself, and one of its two
-    operations is therefore a genuine no-op. The case as a whole still changes
-    the document, which is all this asserts.
+    ``DS-008-constant-entity-drift`` used to be an exception: ruling R-14
+    recorded that one of its two operations replaced a value with itself. M2
+    replaced that case, so there is no exception left and every case changes the
+    document it is applied to.
     """
     unchanged: list[str] = []
     for case_id, case in CASES:
-        target = case["target"]
-        base = json.loads((FIXTURES_DIR / BASES[target]).read_text(encoding="utf-8"))
+        base = base_document(case["target"])
         _, after = mutated(case)
         if after == base:
             unchanged.append(case_id)
@@ -264,7 +258,7 @@ def test_ruling_r04_ids_are_all_covered() -> None:
     """Every id R-04 names is exercised by one of the three tables.
 
     This is the test that would have caught the original gap: the shipped corpus
-    reaches only seven of the eleven, and nothing said so.
+    reached only seven of the eleven, and nothing said so.
     """
     from_extra = {rule for rule, _, _ in EXTRA_PARSE_CASES}
     from_strict = {rule for rule, _, _ in STRICT_BY_DESIGN_CASES}
@@ -276,12 +270,17 @@ def test_ruling_r04_ids_are_all_covered() -> None:
     )
 
 
-def test_the_corpus_alone_does_not_cover_ruling_r04() -> None:
-    """Pins *why* the hand-written tables exist, so nobody deletes them.
+def test_the_corpus_now_covers_every_ruling_r04_id() -> None:
+    """M2's corpus extension (ruling R-14) closed the gap the tables were for.
 
-    If a future corpus extension (R-14) does reach all eleven ids, this test
-    fails and should be deleted along with the redundant table entries - which
-    is the right way to find that out.
+    This replaces ``test_the_corpus_alone_does_not_cover_ruling_r04``, which
+    asserted the *opposite* and whose own docstring said to delete it if the
+    corpus ever reached all eleven ids. It now does - BP-002, BP-008, DS-017 and
+    DS-020 all have corpus cases - so the assertion is inverted rather than
+    dropped, and the hand-written tables stay for the second spellings and the
+    must-raise cases the corpus has no reason to carry.
     """
     uncovered = R04_RULE_IDS - CORPUS_RULE_IDS
-    assert sorted(uncovered) == ["BP-002", "BP-008", "DS-017", "DS-020"]
+    assert uncovered == frozenset(), (
+        f"the corpus no longer covers these R-04 ids: {sorted(uncovered)}"
+    )

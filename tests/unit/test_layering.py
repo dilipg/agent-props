@@ -1,8 +1,8 @@
-"""`models/` is pure: no sibling layers, no I/O, no clock, no policy.
+"""`models/` and `validation/` are pure: no sibling layers, no I/O, no clock.
 
 CLAUDE.md's layering rule says review enforces this. A test is cheaper than a
-review round, and two of the four properties here are rulings that later
-milestones depend on staying true:
+review round, and three of the properties here are rulings that later milestones
+depend on staying true:
 
 - **R-04** - models are shapes, the catalogue is policy. A ``pattern`` or a
   ``Literal`` slipped into a model turns ten corpus cases from "reports a rule
@@ -10,6 +10,10 @@ milestones depend on staying true:
 - **R-09 / R-10** - no clock and no random source in `models/`. Importing
   ``uuid`` for the ``UUID`` type and parser is explicitly allowed; *calling*
   ``uuid4()`` is not.
+- **R-11** - `validation/` reaches the store through an injected ``Resolver``
+  and never imports `storage/`. That is what lets DS-001, DS-031 and BP-016
+  exist in a package specified as pure functions with no I/O. `validation/` may
+  import `models/` and nothing else sideways.
 
 Everything is checked against the parsed AST rather than by grepping text, so
 docstrings that discuss ``min_length`` or ``uuid4()`` - and this file does -
@@ -24,13 +28,22 @@ from pathlib import Path
 import pytest
 
 import agentprops.models
+import agentprops.validation
 
 MODELS_DIR = Path(agentprops.models.__file__).resolve().parent
 MODEL_FILES = sorted(MODELS_DIR.glob("*.py"))
 
+VALIDATION_DIR = Path(agentprops.validation.__file__).resolve().parent
+VALIDATION_FILES = sorted(VALIDATION_DIR.glob("*.py"))
+
 #: `models/` may import none of these. `export/` is in the list even though
 #: CLAUDE.md's arrow diagram omits it: it is a sibling layer either way.
 FORBIDDEN_LAYERS = frozenset({"validation", "storage", "service", "server", "expansion", "export"})
+
+#: `validation/` may import `models/`, and nothing else sideways. `storage/` is
+#: the one that matters: ruling R-11 exists precisely so that the three
+#: existence checks do not reach for it.
+FORBIDDEN_LAYERS_FOR_VALIDATION = frozenset({"storage", "service", "server", "expansion", "export"})
 
 #: Calls that read a clock or a random source, by dotted suffix.
 FORBIDDEN_CALLS = frozenset(
@@ -178,15 +191,14 @@ def test_the_model_file_table_is_not_empty() -> None:
     assert MODEL_FILES, f"no model modules found under {MODELS_DIR}"
 
 
-@pytest.mark.parametrize("path", MODEL_FILES, ids=lambda p: p.name)
-def test_models_import_no_sibling_layer(path: Path) -> None:
-    """Absolute and relative imports both.
+def sibling_import_offences(path: Path, forbidden: frozenset[str]) -> list[str]:
+    """Every import in ``path`` that reaches a layer in ``forbidden``.
 
-    A relative import (``from ..validation import x``) has no ``agentprops``
-    segment to anchor on - ``node.module`` is just ``"validation"`` - so
-    ``node.level > 0`` is matched against the forbidden set directly. That case
-    is not hypothetical: it is the spelling an author reaching sideways is most
-    likely to reach for.
+    Absolute and relative imports both. A relative import
+    (``from ..validation import x``) has no ``agentprops`` segment to anchor on -
+    ``node.module`` is just ``"validation"`` - so ``node.level > 0`` is matched
+    against the forbidden set directly. That case is not hypothetical: it is the
+    spelling an author reaching sideways is most likely to reach for.
     """
     offences: list[str] = []
     for node in ast.walk(parse(path)):
@@ -195,7 +207,7 @@ def test_models_import_no_sibling_layer(path: Path) -> None:
                 parts = alias.name.split(".")
                 if "agentprops" in parts:
                     tail = parts[parts.index("agentprops") + 1 :]
-                    if tail and tail[0] in FORBIDDEN_LAYERS:
+                    if tail and tail[0] in forbidden:
                         offences.append(f"line {node.lineno}: import {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             if node.level > 0:
@@ -208,15 +220,89 @@ def test_models_import_no_sibling_layer(path: Path) -> None:
                 )
                 dots = "." * node.level
                 for head in heads:
-                    if head in FORBIDDEN_LAYERS:
+                    if head in forbidden:
                         offences.append(f"line {node.lineno}: from {dots}{head} (relative)")
             elif node.module:
                 parts = node.module.split(".")
                 if "agentprops" in parts:
                     tail = parts[parts.index("agentprops") + 1 :]
-                    if tail and tail[0] in FORBIDDEN_LAYERS:
+                    if tail and tail[0] in forbidden:
                         offences.append(f"line {node.lineno}: from {node.module}")
+    return offences
+
+
+@pytest.mark.parametrize("path", MODEL_FILES, ids=lambda p: p.name)
+def test_models_import_no_sibling_layer(path: Path) -> None:
+    offences = sibling_import_offences(path, FORBIDDEN_LAYERS)
     assert not offences, f"{path.name} imports a sibling layer: {offences}"
+
+
+def test_the_validation_file_table_is_not_empty() -> None:
+    assert len(VALIDATION_FILES) > 1, f"no rule modules found under {VALIDATION_DIR}"
+
+
+@pytest.mark.parametrize("path", VALIDATION_FILES, ids=lambda p: p.name)
+def test_validation_imports_no_sibling_layer_but_models(path: Path) -> None:
+    """Ruling R-11: the existence checks take a ``Resolver``, never a store.
+
+    `storage/` is the import that would quietly undo the ruling - DS-001 is one
+    ``from agentprops.storage import ...`` away from being an I/O call inside a
+    package specified as pure.
+    """
+    offences = sibling_import_offences(path, FORBIDDEN_LAYERS_FOR_VALIDATION)
+    assert not offences, f"{path.name} imports a sibling layer: {offences}"
+
+
+@pytest.mark.parametrize("path", VALIDATION_FILES, ids=lambda p: p.name)
+def test_validation_does_no_io(path: Path) -> None:
+    """Pure functions, no I/O - including the raw-text helper.
+
+    `rawjson.py` exists for DS-013 and takes a *string*: the caller reads the
+    file or the request body. If it ever opened a path itself, the rule would
+    stop being a rule and become an I/O call.
+    """
+    offences: list[str] = []
+    for node in ast.walk(parse(path)):
+        if isinstance(node, ast.Call):
+            name = dotted(node.func)
+            if name and name.rsplit(".", 1)[-1] in FORBIDDEN_IO_CALLS:
+                offences.append(f"line {node.lineno}: {name}()")
+    assert not offences, f"{path.name} performs I/O: {offences}"
+
+
+@pytest.mark.parametrize("path", VALIDATION_FILES, ids=lambda p: p.name)
+def test_validation_reads_no_clock_and_no_random_source(path: Path) -> None:
+    """Ruling R-09's grep, scoped: a rule that read a clock would not be a rule."""
+    offences: list[str] = []
+    for node in ast.walk(parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        name = dotted(node.func)
+        if name and (name in FORBIDDEN_CALLS or name.rsplit(".", 1)[-1] in FORBIDDEN_CALLS):
+            offences.append(f"line {node.lineno}: {name}()")
+    assert not offences, f"{path.name} calls a clock or a random source: {offences}"
+
+
+def test_no_rule_raises_for_a_validation_failure() -> None:
+    """CLAUDE.md's style rule, checked at the source.
+
+    Structured errors, never exceptions, for anything a user could cause. The
+    two ``raise`` statements this allows are both programming-error guards - a
+    rule reading the blueprint without declaring ``needs_blueprint``, and a
+    corpus anchor that no longer matches - so the check is that a *rule
+    function* contains no ``raise`` at all.
+    """
+    offences: list[str] = []
+    for path in VALIDATION_FILES:
+        for node in ast.walk(parse(path)):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if not (node.name.startswith(("bp_", "ds_", "sk_"))):
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Raise):
+                    offences.append(f"{path.name}:{inner.lineno} in {node.name}")
+    assert not offences, f"a rule raises instead of reporting a finding: {offences}"
 
 
 @pytest.mark.parametrize("path", MODEL_FILES, ids=lambda p: p.name)

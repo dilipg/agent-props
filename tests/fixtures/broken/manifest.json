@@ -1,17 +1,63 @@
 {
   "base_blueprint": "blueprints/location-onboarding-1.0.0.json",
   "base_dataset":   "datasets/priya-missing-docs.json",
+
+  "about": [
+    "Declarative rejection corpus. Each case applies its RFC 6902 patch list to a deep copy",
+    "of the named base fixture at test collection time, then asserts that the validator",
+    "reports EXACTLY the rule ids in `expect` - no more, no fewer. Do not hand-write broken",
+    "JSON files: they rot the moment a schema changes (docs/worked-example.md section 6).",
+    "Started from the 28 cases in worked-example.md section 6, extended per ruling R-14 to",
+    "cover every BP-* and DS-* rule in docs/contracts.md section 3.",
+    "Optional per-case keys:",
+    "  `expect: []`      the mutation must validate CLEAN - used to pin a deliberate skip",
+    "  `resolver`        which corpus resolver stub to use; default knows the golden",
+    "                    blueprint as published for datasets and nothing for blueprints",
+    "  `parse_raises`    the mutated document does not parse as its Pydantic model, by",
+    "                    design (ruling R-23's strict numerics). The rule still fires,",
+    "                    because the validator runs against the raw dict",
+    "  `note`            why the case is shaped the way it is"
+  ],
+
   "cases": [
     { "id": "BP-001-bad-agent-id", "target": "blueprint", "expect": ["BP-001"],
       "mutate": [ { "op": "replace", "path": "/agent_id", "value": "Location_Onboarding" } ] },
 
+    { "id": "BP-002-not-semver", "target": "blueprint", "expect": ["BP-002"],
+      "mutate": [ { "op": "replace", "path": "/version", "value": "1.0" } ] },
+
     { "id": "BP-003-duplicate-node", "target": "blueprint", "expect": ["BP-003"],
-      "mutate": [ { "op": "replace", "path": "/nodes/2/id", "value": "fetch_store_profile" } ] },
+      "note": "Ruling R-14 replaced the shipped case, which renamed nodes/2 and thereby orphaned every edge that referenced it - firing BP-004 and BP-005 as well. Appending a second node with an existing id duplicates the id without touching an edge.",
+      "mutate": [ { "op": "add", "path": "/nodes/-",
+                    "value": { "id": "complete", "kind": "terminal", "pool": false,
+                               "notes": "A second node claiming the id `complete`.",
+                               "input_schema": { "type": "object", "additionalProperties": true },
+                               "output_schema": { "type": "object", "required": ["onboarding_status"],
+                                                  "properties": { "onboarding_status": { "type": "string", "const": "complete" } },
+                                                  "additionalProperties": false } } } ] },
+
+    { "id": "BP-004-edge-to-unknown-node", "target": "blueprint", "expect": ["BP-004"],
+      "note": "An added edge rather than a retargeted one: retargeting `to` would orphan the old target and fire BP-005 too.",
+      "mutate": [ { "op": "add", "path": "/edges/-",
+                    "value": { "from": "assign_training", "to": "review_queue", "condition": null } } ] },
 
     { "id": "BP-005-unreachable", "target": "blueprint", "expect": ["BP-005"],
       "mutate": [ { "op": "remove", "path": "/edges/6" } ] },
 
+    { "id": "BP-006-entry-node-unknown", "target": "blueprint", "expect": ["BP-006"],
+      "note": "BP-005 is skipped when entry_node names no node - otherwise every node in the graph reports as unreachable on top of this one finding. The inbound-edge half of BP-006 cannot be reached from a mutation: every node is reachable from the entry node, so any edge into it also creates a loop-free cycle and fires BP-018.",
+      "mutate": [ { "op": "replace", "path": "/entry_node", "value": "kickoff" } ] },
+
+    { "id": "BP-007-terminal-with-outbound-edge", "target": "blueprint", "expect": ["BP-007"],
+      "mutate": [ { "op": "add", "path": "/edges/-",
+                    "value": { "from": "complete", "to": "escalate", "condition": null } } ] },
+
+    { "id": "BP-008-loop-max-iterations-zero", "target": "blueprint", "expect": ["BP-008"],
+      "note": "0, never a non-integer: `max_iterations` is StrictInt on the model (ruling R-23), so a string would raise at parse time instead of firing the rule. The integer half of BP-008 is covered by tests/unit/test_models_accept_broken_documents.py.",
+      "mutate": [ { "op": "replace", "path": "/nodes/3/max_iterations", "value": 0 } ] },
+
     { "id": "BP-009-unknown-entity-ref", "target": "blueprint", "expect": ["BP-009"],
+      "note": "BP-011 must NOT fire here: ruling R-18 gives it schema syntax with entity refs stripped, so an unresolvable entity is BP-009 alone.",
       "mutate": [ { "op": "replace", "path": "/nodes/1/output_schema/properties/store/$ref",
                     "value": "entity:outlet" } ] },
 
@@ -19,38 +65,94 @@
       "mutate": [ { "op": "replace", "path": "/edges/2/condition",
                     "value": { "==": [ { "var": "docs_done" }, false ] } } ] },
 
+    { "id": "BP-011-invalid-node-schema", "target": "blueprint", "expect": ["BP-011"],
+      "note": "assign_training's output_schema is referenced by no edge condition, so BP-010 has nothing to say about it.",
+      "mutate": [ { "op": "replace", "path": "/nodes/5/output_schema/properties/assigned_modules/items",
+                    "value": { "type": "not-a-json-schema-type" } } ] },
+
+    { "id": "BP-012-invalid-outcome-schema", "target": "blueprint", "expect": ["BP-012"],
+      "mutate": [ { "op": "replace", "path": "/outcome_schema/properties/outstanding_tasks",
+                    "value": { "type": "intger" } } ] },
+
+    { "id": "BP-013-duplicate-label-value", "target": "blueprint", "expect": ["BP-013"],
+      "mutate": [ { "op": "replace", "path": "/label_schema/dimensions/tier",
+                    "value": ["single-unit", "regional", "regional"] } ] },
+
     { "id": "BP-014-ambiguous-tool", "target": "blueprint", "expect": ["BP-014"],
       "mutate": [ { "op": "replace", "path": "/nodes/5/tool_name",
                     "value": "delightree.docs.request" } ] },
 
+    { "id": "BP-015-duplicate-entity-id", "target": "blueprint", "expect": ["BP-015"],
+      "mutate": [ { "op": "add", "path": "/entities/-",
+                    "value": { "id": "store",
+                               "schema": { "type": "object", "additionalProperties": true } } } ] },
+
+    { "id": "BP-016-modifying-a-published-version", "target": "blueprint", "expect": ["BP-016"],
+      "resolver": "blueprint-already-published",
+      "note": "The only case that swaps the resolver. BP-016 is not a property of the document - it is a property of the store, so it needs a resolver that reports location-onboarding 1.0.0 as already published (ruling R-11). The default blueprint resolver knows nothing published, which is the right answer for a first publish and for blueprint_validate.",
+      "mutate": [ { "op": "replace", "path": "/description",
+                    "value": "Edited in place after publication, which BP-016 forbids." } ] },
+
     { "id": "BP-017-loop-without-pool", "target": "blueprint", "expect": ["BP-017"],
+      "note": "`replace`, never `remove`: `pool` is a required field, so removing it would raise at parse time rather than firing the rule.",
       "mutate": [ { "op": "replace", "path": "/nodes/3/pool", "value": false } ] },
 
     { "id": "BP-018-cycle-without-loop", "target": "blueprint", "expect": ["BP-018"],
       "mutate": [ { "op": "replace", "path": "/nodes/3/kind", "value": "tool_call" },
                   { "op": "replace", "path": "/nodes/3/pool", "value": false } ] },
 
+    { "id": "BP-019-node-without-notes", "target": "blueprint", "expect": ["BP-019"],
+      "note": "Warning only (ruling R-13): the blueprint still publishes, so ok is true and the warning is present. BP-019's catalogue wording states the satisfied condition; the finding is the absence of notes.",
+      "mutate": [ { "op": "remove", "path": "/nodes/0/notes" } ] },
+
+    { "id": "DS-001-unknown-blueprint-version", "target": "dataset", "expect": ["DS-001"],
+      "note": "When the blueprint cannot be resolved, every rule that needs it is skipped - there is nothing to check a fixture against. The document-local rules still run and this document passes them all.",
+      "mutate": [ { "op": "replace", "path": "/blueprint/version", "value": "9.9.9" } ] },
+
     { "id": "DS-002-missing-node-fixture", "target": "dataset", "expect": ["DS-002"],
       "mutate": [ { "op": "remove", "path": "/nodes/escalate" } ] },
+
+    { "id": "DS-003-fixture-for-unknown-node", "target": "dataset", "expect": ["DS-003"],
+      "mutate": [ { "op": "add", "path": "/nodes/notify_ops",
+                    "value": { "output": { "notified": true }, "entity_refs": [] } } ] },
 
     { "id": "DS-004-output-violates-schema", "target": "dataset", "expect": ["DS-004"],
       "mutate": [ { "op": "replace", "path": "/nodes/fetch_store_profile/output/store/status",
                     "value": "unknown_state" } ] },
 
+    { "id": "DS-005-input-violates-schema", "target": "dataset", "expect": ["DS-005"],
+      "mutate": [ { "op": "replace", "path": "/nodes/receive_request/input/request_id",
+                    "value": 42 } ] },
+
+    { "id": "DS-006-unknown-entity-ref", "target": "dataset", "expect": ["DS-006"],
+      "note": "DS-006 checks the entity_id segment only (ruling R-18); DS-009 owns @revision.",
+      "mutate": [ { "op": "replace", "path": "/nodes/check_docs/entity_refs/0",
+                    "value": "outlet" } ] },
+
+    { "id": "DS-007-unreferenced-entity", "target": "dataset", "expect": ["DS-007"],
+      "note": "Warning only: an entity nothing references is dead weight in the world, but it blocks nothing.",
+      "mutate": [ { "op": "add", "path": "/entities/inspector",
+                    "value": { "base": { "id": "IN-0091", "name": "K. Rao" } } } ] },
+
     { "id": "DS-008-constant-entity-drift", "target": "dataset", "expect": ["DS-008"],
-      "mutate": [ { "op": "replace",
-                    "path": "/nodes/assign_training/output/assigned_modules/0",
-                    "value": "pos-refresher" },
-                  { "op": "replace", "path": "/nodes/receive_request/output/franchisee/existing_locations",
+      "note": "Ruling R-14 fixed the shipped case: its first operation replaced a value with itself. `franchisee` declares no revisions, so its embedded state in receive_request must match entities.franchisee.base, where existing_locations is 1. DS-008 locates embedded state at each site the node's schema marks with an entity ref - see DECISIONS.md.",
+      "mutate": [ { "op": "replace", "path": "/nodes/receive_request/output/franchisee/existing_locations",
                     "value": 4 } ] },
 
     { "id": "DS-009-unknown-revision", "target": "dataset", "expect": ["DS-009"],
+      "note": "DS-010 is skipped when DS-009 has fired on the same reference (ruling R-02), so this reports one id.",
       "mutate": [ { "op": "replace", "path": "/nodes/verify_compliance/entity_refs/0",
                     "value": "store@after_training" } ] },
 
     { "id": "DS-010-revision-from-downstream", "target": "dataset", "expect": ["DS-010"],
+      "note": "after_docs comes into being after request_docs runs, and no path leads from request_docs to fetch_store_profile, so that fixture cannot show the revised state.",
       "mutate": [ { "op": "replace", "path": "/nodes/fetch_store_profile/entity_refs/0",
                     "value": "store@after_docs" } ] },
+
+    { "id": "DS-011-revision-after-unknown-node", "target": "dataset", "expect": ["DS-011"],
+      "note": "DS-010 is skipped when after_node names no node: DS-011 owns that.",
+      "mutate": [ { "op": "replace", "path": "/entities/store/revisions/after_docs/after_node",
+                    "value": "collect_docs" } ] },
 
     { "id": "DS-012-label-outside-vocabulary", "target": "dataset", "expect": ["DS-012"],
       "mutate": [ { "op": "replace", "path": "/labels/persona", "value": "master-franchisee" } ] },
@@ -63,9 +165,38 @@
       "mutate": [ { "op": "replace", "path": "/expected/expected_path",
                     "value": ["receive_request", "verify_compliance", "complete"] } ] },
 
+    { "id": "DS-016-expectation-for-unknown-node", "target": "dataset", "expect": ["DS-016"],
+      "mutate": [ { "op": "add", "path": "/expected/node_expectations/notify_ops",
+                    "value": { "called": true } } ] },
+
+    { "id": "DS-017-unknown-comparison", "target": "dataset", "expect": ["DS-017"],
+      "mutate": [ { "op": "replace", "path": "/expected/comparison", "value": "fuzzy" } ] },
+
     { "id": "DS-018-pool-on-non-pool-node", "target": "dataset", "expect": ["DS-018"],
       "mutate": [ { "op": "add", "path": "/pools/assign_training",
                     "value": [ { "output": { "assigned_modules": [] }, "entity_refs": [] } ] } ] },
+
+    { "id": "DS-019-empty-pool", "target": "dataset", "expect": ["DS-019"],
+      "mutate": [ { "op": "replace", "path": "/pools/request_docs", "value": [] } ] },
+
+    { "id": "DS-019-pool-output-violates-schema", "target": "dataset", "expect": ["DS-019"],
+      "note": "DS-004 must NOT fire here: ruling R-18 gives every pool fixture to DS-019, and DS-004/DS-005 cover `nodes` only.",
+      "mutate": [ { "op": "replace", "path": "/pools/request_docs/0/output/requested",
+                    "value": "fssai" } ] },
+
+    { "id": "DS-020-seed-not-an-integer", "target": "dataset", "expect": ["DS-020"],
+      "parse_raises": true,
+      "note": "Ruling R-23 asks for a real corpus case here rather than a coverage exemption. `seed` is StrictInt on the model, so this document does not parse - and it does not need to: the validator runs against the raw dict before any model is constructed, which is the whole point of validating the submitted document.",
+      "mutate": [ { "op": "replace", "path": "/seed", "value": "not-a-number" } ] },
+
+    { "id": "DS-021-thin-narrative", "target": "dataset", "expect": ["DS-021"],
+      "note": "`replace`, never `remove`: `narrative` is required on the model, so the presence half is structural and only the content half is a rule.",
+      "mutate": [ { "op": "replace", "path": "/narrative", "value": "Docs missing." } ] },
+
+    { "id": "DS-022-malformed-fault", "target": "dataset", "expect": ["DS-022"],
+      "note": "Two findings, both DS-022: an unknown `kind` and an undeclared key. FaultSpec is extra=allow on the model on purpose (ruling R-07), so the unknown key reaches this rule instead of raising. DS-004 is skipped entirely because `fault` is set.",
+      "mutate": [ { "op": "add", "path": "/nodes/verify_compliance/fault",
+                    "value": { "kind": "exploded", "retries": 3 } } ] },
 
     { "id": "DS-023-pool-exceeds-max", "target": "dataset", "expect": ["DS-023"],
       "mutate": [ { "op": "add", "path": "/pools/request_docs/-",
@@ -99,7 +230,16 @@
       "mutate": [ { "op": "replace", "path": "/provenance/supersedes",
                     "value": "3f8c1a20-0000-4000-8000-00000000dead" } ] },
 
+    { "id": "DS-032-intent-equals-rationale", "target": "dataset", "expect": ["DS-032"],
+      "note": "Warning only. intent says why the dataset exists in the suite; rationale says why this outcome is right in this world. Contracts 2.2: both are required, neither substitutes for the other.",
+      "mutate": [ { "op": "copy", "from": "/expected/rationale", "path": "/provenance/intent" } ] },
+
+    { "id": "DS-033-thin-rationale", "target": "dataset", "expect": ["DS-033"],
+      "note": "DS-033 is the one rule the ruling register adds (R-21), mirroring DS-026 so that `rationale: \"\"` can no longer validate clean.",
+      "mutate": [ { "op": "replace", "path": "/expected/rationale", "value": "It just is." } ] },
+
     { "id": "MULTI-two-errors", "target": "dataset", "expect": ["DS-012", "DS-014"],
+      "note": "Proves the validator reports every problem in one pass rather than stopping at the first. A validator returning only the first error passes a membership check and fails this one.",
       "mutate": [ { "op": "replace", "path": "/labels/scenario", "value": "not-a-scenario" },
                   { "op": "replace", "path": "/expected/final/outstanding_tasks", "value": -3 } ] },
 
@@ -108,6 +248,20 @@
       "mutate": [ { "op": "remove", "path": "/labels/tier" },
                   { "op": "replace", "path": "/provenance/intent", "value": "wip" },
                   { "op": "replace", "path": "/nodes/fetch_store_profile/entity_refs/0",
-                    "value": "store@after_docs" } ] }
+                    "value": "store@after_docs" } ] },
+
+    { "id": "VALID-fault-skips-output-schema", "target": "dataset", "expect": [],
+      "note": "Ruling R-07's other half, and the fault fixture it asks the corpus to carry: when `fault` is set, DS-004 skips output_schema validation entirely and requires only that `output` be absent or an object. This output would violate verify_compliance's output_schema outright, and the document must still validate clean.",
+      "mutate": [ { "op": "add", "path": "/nodes/verify_compliance/fault",
+                    "value": { "kind": "timeout", "code": "UPSTREAM_TIMEOUT", "after_ms": 3000 } },
+                  { "op": "replace", "path": "/nodes/verify_compliance/output",
+                    "value": { "error": "compliance service timed out" } } ] }
+  ],
+
+  "raw_text_cases": [
+    { "id": "DS-013-duplicate-label-dimension", "target": "dataset", "expect": ["DS-013"],
+      "note": "The one rule no JSON Patch can reach: duplicate object keys collapse at parse time, and a dict cannot hold one key twice. Ruling R-20 keeps the rule and detects it at the tool boundary, where the raw text still exists, so this case is a text substitution rather than a mutation. The surviving value is a legal persona, so DS-012 stays silent and the expected set is exactly DS-013.",
+      "replace": [ { "find": "\"persona\":   \"multi-unit-operator\",",
+                     "with": "\"persona\":   \"multi-unit-operator\",\n    \"persona\":   \"corporate-admin\"," } ] }
   ]
 }
