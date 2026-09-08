@@ -926,6 +926,83 @@ because section 6 *is* the Protocol of record and R-33 said to add it to the Pro
 `{run_id, seq}` unique index belongs in section 8's Mongo list because R-37 must hold on every
 backend, not just the SQL ones.
 
+## Rulings that bind M4 (the MCP surface)
+
+### R-40 — R-20's premise was false, and DS-013 survives on an explicit raw parameter
+
+R-20 chose to keep DS-013 over retiring it, and gave one reason: "(a) is preferable because
+the MCP boundary genuinely does receive raw text." **M4 proved that premise false for this
+SDK.** Raw text is destroyed in three places before any `agentprops` code runs: both
+transports parse JSON on receipt, and `MCPServer.pre_parse_json` calls a bare `json.loads`
+on any string argument whose annotation is not literally `str`. There is no point in the
+request path where a duplicate key survives to be seen.
+
+So the reason R-20 gave for its own decision is gone, and the choice has to be re-made on
+what is actually true.
+
+**Ruling.** DS-013 stays, on the mechanism M4 built: an **additive, optional
+`dataset_json: str`** parameter on `dataset_validate`, annotated literally `str` so
+`pre_parse_json` leaves it intact. DS-013 fires end-to-end over a real MCP round trip. Three
+reasons this beats retiring the rule:
+
+1. It is built, tested, and works — retiring would waste it and reopen the registry, corpus
+   and exemption bookkeeping R-20 already settled.
+2. `dataset_validate` is the tool that explicitly **does not store**. It is a diagnostic
+   surface, so an extra diagnostic input on it is coherent rather than a second write path.
+3. A rule in the registry that can never fire anywhere is fiction. Either it has an
+   enforcement point or it should not be a rule; M4 gave it one.
+
+**The guard that makes this maintainable** is the part worth keeping: a test calls
+`pre_parse_json` directly, so if the SDK ever stops mangling string arguments the
+workaround's justification fails loudly instead of the parameter quietly becoming cargo.
+That is the right shape for any workaround built around third-party behaviour.
+
+**On `dataset_json` being outside the envelope contract.** M4 flagged that a wrong-*typed*
+value there produces an SDK error rather than an `AP-001` envelope. Accepted, and it
+generalises: the envelope contract covers what our code can see. A request malformed at the
+transport or SDK layer never reaches a tool function, so it cannot produce an envelope —
+that is true of every tool and every parameter, not a defect of this one. "Structured errors,
+never exceptions, for anything a user could cause" binds the code we write.
+
+**Cost if wrong.** If the owner prefers retiring DS-013, removing it is one registry line,
+one manifest entry, one exemption entry, `rawjson.py`, and this parameter.
+
+### R-41 — `blueprint_diff` gets a fifth category
+
+The contract names four diff categories — nodes added/removed/changed, edges added/removed,
+per-node schema changes, label vocabulary changes. M4 found that leaves
+`entities[*].schema`, `entry_node`, `outcome_schema` and `description` unreportable: a
+blueprint version could change any of them and the diff would show nothing.
+
+**Ruling.** Add a fifth category covering blueprint-level changes: `entry_node`,
+`outcome_schema`, `description`, and entity schemas added, removed or changed.
+
+`blueprint_diff` exists to answer "what changed between these two versions", and R-27 has
+just made entity schemas a validated part of a blueprint — so a silent blind spot over them
+is worse than the small scope increase. The tool remains informational and never a failure
+signal.
+
+**Cost if wrong.** One category is additive; no caller breaks by receiving more detail.
+
+### R-42 — three envelope and paging decisions, ratified
+
+**(a) `AP-004` returns `ok: false` for an unknown id.** Ratified. `contracts.md` section 1
+says the envelope covers "a validation **or resolution** failure", so an unknown id is
+squarely inside it. "The service never gates" is about **policy** — it must not refuse to
+serve because something looked wrong — not about pretending a nonexistent id resolved. A
+caller asking for a dataset that does not exist has made an error, and `ok: false` with a
+rule id is the honest answer.
+
+**(b) `dataset_find`'s default `limit` of 50.** Ratified. Nothing specifies it, and 50 suits
+the review surface M9 builds on it.
+
+**(c) `label_vocabulary` does not page.** Ratified, and it should not. It returns a
+blueprint's `label_schema` plus per-value counts, so its size is bounded by the **blueprint**
+— the number of dimensions an author declared — not by how much data the store holds. A
+paging parameter on a bounded response is complexity with no payoff.
+
+**Cost if wrong.** All three are single-value or single-parameter changes.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
