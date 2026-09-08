@@ -77,11 +77,14 @@ Thirteen tools: `blueprint_upsert`, `blueprint_get`, `blueprint_list`, `blueprin
 `blueprint_diff`, `dataset_find`, `dataset_get`, `dataset_archive`, `dataset_restore`,
 `dataset_validate`, `store_status`, `label_vocabulary`, `agent_list`.
 
-Every tool answers one of the two envelopes in [`docs/contracts.md`](docs/contracts.md) section 1 and
-never raises for anything a caller can cause — a malformed argument, an unknown id, a rule violation
-and a store refusal are all `{"ok": false, "errors": [...]}` with a rule id and an RFC 6901 pointer.
-A policy problem is a **warning** on a successful response: `blueprint_diff` never fails, and
-`dataset_get` returns an archived dataset with a `dataset_archived` warning.
+Every tool answers one of the two envelopes in [`docs/contracts.md`](docs/contracts.md) section 1,
+and never raises for anything that reaches it — a malformed argument, an unknown id, a rule
+violation, an out-of-range integer and a store refusal are all `{"ok": false, "errors": [...]}` with
+a rule id and an RFC 6901 pointer. (A request malformed at the transport or MCP-SDK layer never
+reaches a tool function at all, so it comes back as a protocol error instead; ruling R-40 settles
+that the envelope contract binds the code in this repository.) A policy problem is a **warning** on
+a successful response: `blueprint_diff` never fails, and `dataset_get` returns an archived dataset
+with a `dataset_archived` warning.
 
 In-process, for a test or a script:
 

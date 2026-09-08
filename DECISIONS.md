@@ -1505,6 +1505,8 @@ raising — because a guard whose only proof is "the code above cannot reach it"
 the M3 fix rounds were spent on.
 
 ## [M4] The `blueprint_diff` payload shape
+**Superseded in one respect by `[M4, fix round 1]` below (ruling R-41): a fifth `blueprint` category
+was added, and this entry's "Deliberately not in the diff" paragraph is retracted.**
 contracts section 4 names four categories and no payload, so the shape is defined in
 `service/diff.py` and recorded here:
 
@@ -1769,7 +1771,8 @@ fail (`blueprint_diff`), so the transport is not proved by one read.
 
 ## Questions for the owner — M4
 
-1. **`blueprint_diff` cannot report an entity-schema change.** contracts section 4 names four
+1. **RETRACTED — answered by ruling R-41; see the fix-round-1 retraction below.**
+   **`blueprint_diff` cannot report an entity-schema change.** contracts section 4 names four
    categories — nodes, edges, per-node schemas, label vocabulary — and none of them covers
    `entities[*].schema`, `entry_node`, `outcome_schema` or `description`. Ruling R-27 extended BP-011
    to validate entity schemas precisely because a malformed one publishes and surfaces a milestone
@@ -1782,3 +1785,169 @@ fail (`blueprint_diff`), so the transport is not proved by one read.
    that wanted `ok: true, data: {dataset: null}` for a miss would have to change the envelope.
 3. **`dataset_find`'s default `limit` is 50.** Nothing specifies one and `DatasetQuery` carries no
    constraint. If the web app at M9 wants a different page size, this is the constant to move.
+
+## [M4, fix round 1] Correction: the `paginate` entry reasoned about one end of a boundary and left the other unclamped
+The `[M4] dataset_find takes a DatasetQuery, and paginate owns the defaults` entry above says
+clamping happens "because the service never gates and a negative `LIMIT` is a per-backend accident
+(SQLite reads `LIMIT -1` as 'no limit', Postgres rejects it) rather than a portable answer". Every
+word of that is true **about the negative direction**, and the entry stops there. The upper end was
+left unclamped and untested, and the residue was an exception escaping three tool paths.
+
+`ArgReader.number` accepts any Python `int`, and Python integers are unbounded; every backend's
+integer column is signed 64-bit. So an integer above `2**63 - 1` reached pysqlite, raised
+`OverflowError`, and the MCP SDK turned that into `UnexpectedToolError` — `is_error: true`,
+`structured_content: None`. That is precisely the shape CLAUDE.md's "structured errors, never
+exceptions, for anything a user could cause" exists to prevent, and under ruling R-40 ("the envelope
+contract binds the code we write") it is ours, because it happens inside a tool function's own call
+graph rather than at the SDK layer. Reproduced against the in-memory client, and the boundary is
+exact:
+
+```
+dataset_find  {"limit":  2**63 - 1}                  is_error=False   envelope
+dataset_find  {"limit":  2**63}                      is_error=True    structured_content=None
+dataset_find  {"offset": 10**30}                     is_error=True    structured_content=None
+dataset_get   {"version": 10**30}                    is_error=True    structured_content=None
+```
+
+**Fixed in `service/`, not in `ArgReader`,** because the bound is a fact about what a row can hold
+rather than about what a JSON request may say. New `service/limits.py` carries `MAX_STORED_INT`,
+`clamp()` and `storable()`, and the split between those two functions is the decision worth
+recording:
+
+- a **quantity** (`limit`, `offset`, and M7's `count`) is clamped, because every value above the
+  range means the same thing as the largest value inside it — `limit = 2**63 - 1` already means
+  "every row there will ever be", so nothing is refused and no storable value is altered. The clamp
+  is representability, not a policy cap, so ground rule 3 is untouched.
+- an **identifier** (`version`, and M6's `iteration`) is *not* clamped: a version outside the range
+  is not a large version, it is no version, so `dataset_get` reports `AP-004`. Clamping an
+  identifier to the nearest representable one would answer a question the caller did not ask.
+
+**And the rule this is the third instance of.** M3's two defects and this one have the same shape: a
+confident `DECISIONS.md` entry with no test behind its residue. So, stated as a rule rather than as
+an apology — **when an entry reasons about a boundary, test both ends of it.**
+`test_paginate_clamps_at_the_int64_boundary` and
+`test_get_reports_ap_004_for_a_version_outside_the_storable_range` each assert `2**63 - 1` *and*
+`2**63`, and all five new tests were verified to fail against the pre-fix code:
+
+```
+FAILED test_service_datasets.py::test_paginate_clamps_at_the_int64_boundary
+FAILED test_service_datasets.py::test_get_reports_ap_004_for_a_version_outside_the_storable_range
+FAILED test_service_datasets.py::test_find_survives_an_out_of_range_limit_and_returns_rows
+FAILED test_tools_contract.py::test_an_out_of_range_integer_is_an_envelope_and_not_an_exception
+FAILED test_tools_contract.py::test_an_out_of_range_limit_still_returns_every_row
+```
+
+Every other malformed-argument probe the review ran already returned a proper envelope — a
+100k-character `agent_id`, empty version strings, NUL bytes in ids, 2000 unbalanced braces in
+`dataset_json`, a self-referential `$ref`, a negative `version`, `10**40` in `max_iterations`. So
+this was narrow rather than systemic, and the narrowness is why it survived: the one integer that
+reached a *column* was the one nobody probed.
+
+## [M4, fix round 1] Retraction: `blueprint_diff` has a fifth category (ruling R-41)
+**The `[M4] The blueprint_diff payload shape` entry above is superseded in one respect, and its
+"Deliberately **not** in the diff" paragraph is retracted.** That paragraph reads:
+
+> Deliberately **not** in the diff, because none of the four categories covers it: `entry_node`,
+> `outcome_schema`, `description` and the **entity schemas**. See "Questions for the owner" below.
+
+**Owner question 1 in the "Questions for the owner — M4" section is likewise retracted**: it asked
+whether the blind spot should be closed, and ruling R-41 answers yes. Both are left standing above
+with this retraction rather than silently edited, so the reasoning that produced the wrong shape
+stays readable — the same treatment M3's fix round 2 gave its own correction.
+
+R-41's reasoning, which is better than the reasoning it replaces: `blueprint_diff` exists to answer
+"what changed between these two versions", and R-27 had just made entity schemas a *validated* part
+of a blueprint. A silent blind spot over a field the validator now polices is worse than a small
+scope increase, and the increase really is small — the category is additive, no caller breaks by
+receiving more detail, and it inherits totality and "never a failure signal" for free because
+nothing in `diff.py` can raise.
+
+Chose, for the shape: a fifth key `"blueprint"` with two halves.
+
+```jsonc
+"blueprint": {
+  "changes": [{"field": "entry_node", "from": "receive_request", "to": "intake"}],
+  "entities": {
+    "added":   ["franchisee"],
+    "removed": [],
+    "changed": [{"entity_id": "store", "field": "schema", "from": { }, "to": { }}]
+  }
+}
+```
+
+Both halves **mirror shapes already in the payload** rather than inventing a third convention:
+`changes` is the same `{field, from, to}` triple `nodes.changed` uses, produced by the same
+`_field_changes` helper so the two cannot drift into two spellings of one thing, and `entities` is
+the same added/removed/changed split `nodes` uses with `_entities_by_id` mirroring `_nodes_by_id`.
+The `changed` entry carries `field: "schema"` the way a `schemas` entry does; an entity has exactly
+two fields — its id, which is the identity, and its schema — so `schema` is the only field that can
+appear today, and naming it keeps the entry readable if `EntitySchema` ever gains a second.
+
+`outcome_schema` sits in `blueprint.changes` rather than in `schemas` because that category is
+documented as *per-node* and this schema belongs to no node.
+Alternative rejected: a sixth top-level `entities` key alongside `nodes` and `edges`. It reads
+symmetrically and splits one answer ("what changed about the blueprint itself?") across two places.
+
+**Four things moved with the code, and three of them were record rather than code** — landing the
+implementation and leaving these would have left a future reader finding the code and the record in
+direct disagreement, which is the failure mode this file exists to prevent:
+
+1. `tests/unit/test_tools_contract.py`'s `assert set(diff) == {...}`.
+2. `docs/contracts.md`'s `blueprint_diff` row, which named four categories twice.
+3. `service/diff.py`'s "What is deliberately *not* in the diff" section, now "What is *still* not in
+   the diff" — and the answer is "nothing structural".
+4. This retraction, and owner question 1.
+
+**A new guard, because the original gap was invisible.** Four categories left four fields
+unreportable and no test failed.
+`test_service_diff.py::test_every_blueprint_field_is_covered_by_some_category` walks
+`Blueprint.model_fields` and asserts each one is either the diff's own subject (`agent_id`,
+`version`), a category of its own (`nodes`, `edges`, `label_schema`, `entities`), reported in the
+per-side envelope (`status`), or named in `BLUEPRINT_FIELDS`. A field added to the model in future
+fails it. That is what should have existed the first time.
+
+## [M4, fix round 1] `not_found` takes the pointer field by name
+Chose: `not_found(what, *, field, **context)`.
+Reason: it was `next(iter(context), "id")` — the first key of the context kwargs. Correct for both
+callers, and correct by *luck*: `not_found("dataset", version=..., dataset_id=...)` would have
+pointed at `/version`, and a pointer that depends on kwarg insertion order is a bug waiting for the
+first person who writes the arguments in the other order.
+`test_not_found_takes_the_pointer_field_by_name_not_by_kwarg_order` asserts the property directly
+with the kwargs reversed, so the old implementation fails it.
+
+## [M4, fix round 1] The every-tool envelope assertion encodes the real invariant, not the strict one
+`test_tool_surface.py` asserted `set(payload) == {"ok", "data", "warnings"}` whenever `ok` was true.
+That is **false as a contract**: `blueprint_validate` and `dataset_validate` return `{ok, errors}`
+with `ok: true` on a clean document, which ruling R-13 requires and `ErrorEnvelope`'s own docstring
+sanctions. It passed only because `sample()` synthesises arguments that make both of those tools
+fail, so the branch was never taken. Nothing was broken; a reader at M5 or M6 would have taken the
+assertion for the contract and been wrong.
+Chose: assert the payload is one of the two envelopes, then per shape — a `{ok, data, warnings}`
+payload must have `ok: true` and exactly one key under `data`; an `{ok, errors}` payload with
+`ok: true` must come from a tool in `VALIDATE_TOOLS` and carry only warning-severity items; one with
+`ok: false` must carry at least one error-severity item. The last two halves are ruling R-13 in both
+directions, which nothing had asserted anywhere.
+`VALIDATE_TOOLS` is a named two-element set tied to contracts section 4, with
+`test_the_validate_tools_are_registered` keeping it from going stale.
+
+## [M4, fix round 1] Note for M9: `agent_list` is an N+1
+`service/admin.py`'s `agents()` issues one unlimited `find_datasets` per agent, and each of those is
+a full lineage scan. Not fixed now, and recorded so it is not rediscovered.
+Ruling R-42(c) ratified `label_vocabulary`'s unlimited scan because its size is bounded by the
+**blueprint** — the dimensions an author declared. This one is not: it is bounded by agents ×
+datasets, which is a different class of number. It is fine at authoring volume and it is behind an
+admin tool, but M9 will put it behind a page load, which is where it will first be noticed.
+The named remedy, when it matters: a counting method on the `Store` Protocol — one grouped query per
+backend — not a page size on a tool whose whole answer is a count. Same shape as the remedy R-39(a)
+records for the `q` filter, and the same trigger: a measured problem, not a suspected one.
+
+## [M4, fix round 1] `docs/contracts.md` is excluded from `ruff format` for a reason, and passing it explicitly defeats that
+Recorded as a hazard rather than a decision, because it cost a revert. `pyproject.toml` sets
+`extend-exclude = ["docs", ".superpowers"]` with a comment explaining why: `docs/` holds the frozen
+specification and `worked-example.md` is the byte-exact source for `tests/fixtures/`. But an
+**explicitly named** path overrides an exclusion, so `uv run ruff format tests/ docs` reformatted
+three fenced Python blocks in `contracts.md` and one in `worked-example.md` — reflowing a `Protocol`
+signature and collapsing aligned trailing comments in the document of record.
+Caught by reading `git diff` before committing, and reverted. The lesson is narrow and worth having
+written down: **run `uv run ruff format` with no path argument.** The configured excludes are the
+whole point, and naming a path is how you skip them.
