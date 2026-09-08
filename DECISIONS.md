@@ -805,3 +805,333 @@ stated at the code so the next author does not assume the walk descends.
   `latency_hint_ms`. Ground rule 9's determinism and the ban on wall-clock reads in generation paths
   both point at declarative, but a load-class run (`run_class: "load"`) is the case where a real
   delay would be the point. Not a blocker for M2; the shape is validated either way.
+
+---
+
+## [M3] Dataset versions are allocated by the store, guarded by the primary key
+`put_dataset` ignores `ds.version`, reads `max(version)` for that id, and inserts at `max + 1`. The
+read happens *outside* the insert's transaction and `PRIMARY KEY (id, version)` is what makes it
+safe: two writers that read the same maximum both attempt the same version, one loses on the
+constraint, and the loser re-reads and takes the next one. Bounded at eight attempts, and an
+`IntegrityError` that is not that race — a missing blueprint tripping `datasets_blueprint_fkey` —
+is re-raised immediately rather than retried, so the real cause is not buried.
+Reason: monotonic under concurrency with no mechanism that only one backend has. `SELECT ... FOR
+UPDATE` does not exist in SQLite, advisory locks do not exist in Mongo, and a serialisable
+transaction held across a read and a write is the shape that deadlocks under load. The constraint is
+already in the DDL and is already the thing that must hold; leaning on it means there is one
+guarantee rather than two that have to agree.
+Alternative rejected: a `SELECT max(version) ... FOR UPDATE` inside the insert transaction — correct
+on Postgres, unavailable on SQLite, meaningless on Mongo. Also rejected: a separate counter table,
+which adds a row that can disagree with the data it counts.
+Both branches are tested. `tests/integration/test_sql_version_allocation.py` forces a lost race by
+making the first version read return a stale answer, and asserts the retry produces version 2 rather
+than a duplicate; a second test asserts a foreign-key violation surfaces as itself.
+
+## [M3] `seq` is allocated by the store; a caller-supplied `seq` is ignored
+`run_steps.seq` is `NOT NULL` in the DDL while `StepRecord.seq` is optional — the seam M1 flagged.
+`upsert_step` closes it by computing `max(seq) + 1` within the run, starting at 1, and ignoring any
+`seq` on the incoming model. The returned `StepRecord` carries the allocated value.
+Reason: `seq` is defined as "traversal order, reconstructs the path". It is the store's record of the
+order steps were actually served in, not caller data — and the store is the only party that knows
+the run's current step count. Honouring a caller-supplied value would give traversal order two
+sources of truth and would let a client forge the order it visited nodes in, which is exactly what
+"the path is reconstructed, not declared" exists to prevent.
+Alternative rejected: honour `step.seq` when present and allocate otherwise. It reads as
+accommodating and is the same class of hole as a declared `path`.
+Consequence, recorded rather than hidden: a run re-imported step by step is renumbered from 1. Order
+is preserved, the original numbers are not. Nothing in phase 1 imports runs (`run_export` at M10 is
+export-only), and if run import ever needs the original numbers it needs a bulk path that bypasses
+the idempotency check anyway.
+
+## [M3] The label filter and the `q` filter are one portable expression each
+Both are SQLAlchemy Core expressions with no dialect branch, and both are the fallback
+`contracts.md` section 7 prescribes for SQLite:
+- **labels**: one equality per dimension, `datasets.c.labels[dimension].as_string() == value`. That
+  compiles to `JSON_EXTRACT(labels, '$."tier"')` on SQLite and `labels ->> 'tier'` on Postgres from
+  the same Python, because the column type is `JSON().with_variant(postgresql.JSONB(), "postgresql")`
+  and the variant carries the operator through.
+- **`q`**: `LOWER(title) LIKE '%term%' OR LOWER(intent) LIKE '%term%'`, with `autoescape` so a `%`
+  or `_` in the search term is a literal.
+Reason: it survives Postgres because it is already correct on Postgres. `datasets_labels_gin` and
+`datasets_search` are *optimisations* of these two expressions, not replacements for them — the GIN
+index on `labels` accelerates `->>` without the query changing, and the `q` filter on Postgres is a
+correct sequential scan until someone decides the volume justifies swapping in `to_tsvector`. That
+swap is one expression at one call site (`_apply_dataset_filters`), and the conformance suite holds
+both implementations to the same rows, because it asserts results and never plans.
+Alternative rejected: a normalised `dataset_labels` table, which would make the label filter a join
+on every backend and would need its own copy-on-write story per dataset version. Deferred until
+label queries are slow, exactly as the M3 brief's example entry suggests. Also rejected: a
+`_backend == "postgres"` branch at M3 for indexes that do not exist yet — speculative code in the
+one place the milestone is trying to keep honest.
+
+## [M3] `mypy` now checks `tests/` as well as `src/`
+Evaluated as asked, and done. `uv run mypy src tests` reported **three** errors across 48 files, all
+of them one-line fixes and all of them latent bugs rather than annotation noise:
+1. `tests/unit/test_layering.py` read `node.lineno` off an `ast.AST` from `ast.walk` after narrowing
+   with a conditional expression mypy cannot follow. Fixed by narrowing with `isinstance` first,
+   which also removed a three-branch conditional.
+2. `tests/integration/conftest.py` returned `Any` from `json.loads` through a `dict[str, Any]`
+   signature.
+3. The same file passed a `str` where `Skeleton.id` is a `UUID` — Pydantic coerces it, so it worked,
+   and the type said otherwise.
+Reason: the guards are the argument. `test_layering.py`, `test_models_accept_broken_documents.py`
+and the new `test_storage_no_delete.py` are AST walkers whose entire job is to be precise about node
+types, and an AST walker with a typo in an attribute name does not fail — it silently matches
+nothing and the guard passes forever. That is the failure mode R-31 already caught once by hand.
+Alternative rejected: leaving `files = ["src"]`. The cost of the change was three fixes; the cost of
+*not* making it is that the next guard to go silently green does so undetected.
+Cost carried forward: new test code must type-check. `pytest` fixtures and `monkeypatch` typed fine;
+the only friction found was `json.loads` returning `Any`, which is one annotated local.
+
+## [M3] `publish` is the single source of truth for a blueprint's stored status
+`put_blueprint(bp, publish)` normalises the stored document's `status` field to match the flag —
+`published` when true, `draft` when false — so a row's `status` column and the `status` inside its
+document can never disagree.
+Reason: `Blueprint` carries a `status` field *and* the Protocol takes a `publish` argument, so two
+values describe one fact. One of them has to win, and the argument is the one the caller passed
+deliberately.
+Consequence, deliberate: `put_blueprint(published_bp, publish=False)` is a *demotion*, which is a
+mutation of a published version, so BP-016 refuses it like any other difference. Un-publishing a
+version that datasets may already reference (DS-001 requires a published one) is not something this
+store does quietly. If demotion is ever wanted it needs its own Protocol method and its own rule id.
+Alternative rejected: `status = "published" if publish else bp.status`, which makes the flag
+authoritative in one direction only and leaves a document that says `published` sitting in a `draft`
+row.
+
+## [M3] BP-016's storage-level guard raises; R-29's identical case returns
+A differing document over a published `{agent_id, version}` raises
+`PublishedVersionImmutableError`. A canonically identical one is a no-op success returning the stored
+blueprint, per ruling R-29, compared with `json.dumps(sort_keys=True)`.
+Reason: under R-23 a user-caused BP-016 is caught in `service/` and returned as a rule id with a
+pointer, so a differing document arriving at storage means a write path skipped validation. The two
+available responses are to raise or to overwrite a published version; raising is the one that does
+not lose data. This is the same shape as the two `raise` statements `validation/` allows — a
+programming-error guard, not a user-facing error path.
+Alternative rejected: returning the stored blueprint silently for the differing case too. It makes
+`put_blueprint` look total and turns a lost publish into a mystery.
+Same reasoning applied twice more: `set_archived` and `mark_skeleton_submitted` raise
+`RecordNotFoundError` for a row that does not exist, because their return types
+(`DatasetSummary`, `None`) leave no way to say "no". Read methods never raise — they return `None`,
+including for an id that is not a well-formed UUID.
+
+## [M3] Archive flips the flag across the whole lineage, in the column *and* the document
+`set_archived(dataset_id, archived)` takes no version, so it updates every version of that id, and
+it rewrites `archived` inside each stored document as well as in the column, in one transaction.
+It does not bump the version.
+Reason three ways. It takes no version, so it is about the dataset, not one of its versions. It must
+not bump the version, because a run pinned to version 1 has to keep reading version 1 — an archive
+that created version 3 would leave the pinned version un-archived forever. And writing both copies
+means an exported dataset carries its true archive state and nothing downstream has to know which
+copy wins.
+This is the only in-place update on a dataset row, and it does not violate "datasets are immutable
+and versioned": the flag is store metadata, not fixture content.
+Alternative rejected: `json_set` / `jsonb_set` to patch the document in SQL — two different
+functions in the two SQL dialects and neither exists in Mongo. Archiving is a rare administrative
+action on a handful of rows, so a portable read-modify-write inside one transaction is the right
+trade. Also rejected: treating the column as authoritative and overlaying it onto the document on
+read, which makes the stored bytes and the returned model disagree for no gain.
+Left simple deliberately: a new version written after an archive takes `ds.archived` as given rather
+than inheriting the lineage's flag. `service/` decides that policy; storage does not invent one.
+
+## [M3] `find_datasets` returns one row per dataset id, at its latest version
+Not one row per version.
+Reason: `dataset_find` promises "deterministic ordering by `(created_at, id)`", and every version of
+a dataset shares both of those values — so a row per version makes the promised order genuinely
+ambiguous. It would also return five near-identical rows for a dataset edited five times, which is
+the opposite of what a discovery surface is for. Implemented as a correlated
+`version = (SELECT max(version) ... WHERE id = ...)`, which is portable across both SQL dialects and
+index-friendly.
+Alternative rejected: a window function (`ROW_NUMBER() OVER (PARTITION BY id ...)`), which also works
+on both dialects but reads worse and buys nothing here.
+
+## [M3] `runs` gains a `declared_bp_version` column that `contracts.md` section 7 does not have
+**A reported discrepancy, not a silent divergence.** Contracts section 2.3 gives `Run` a
+`declared_blueprint_version` field — what the agent *said* it was running, as against
+`pin.blueprint_version`, which is what it is being served — and the section 7 `runs` DDL has no
+column for it. Every other `Run` field maps to a column or is explained (`path` is reconstructed,
+`steps` live in `run_steps`); this one is simply absent.
+Chosen: add `declared_bp_version TEXT NULL`.
+Reason: the alternative is dropping a model field on write, and that field is the input to the
+`blueprint_version_mismatch` warning, which ground rule 3 requires be attached "to the response
+*and* to the stored run". Dropping it also breaks the store-wide invariant that a write returns what
+a read returns. It is nullable, and absent from `RunSummary` — which ruling R-05 derives from "the
+`runs` DDL columns minus `outcome`" — so no read shape changes.
+If the owner intends the field to be *derived* rather than stored (recoverable from the stored
+warning's `detail`), the column comes out and `Run.declared_blueprint_version` becomes a
+service-layer projection. Recorded as a question below.
+
+## [M3] `Run.path` is reconstructed from `run_steps`, never stored
+No column holds it, in the DDL or here. `get_run` rebuilds it from `run_steps` ordered by `seq`,
+using each row's `fetched_at` as `PathStep.at`, and a `path` carried on the model on the way in is
+ignored.
+Reason: the model's own docstring states the principle — "the path is reconstructed, not declared:
+the ordered sequence of calls carrying a run id *is* the traversal, so branch selection is learned
+implicitly and the agent cannot lie about where it went". A column would make it declarable.
+Consequence: `put_run` returns the reconstruction, not its argument, so `put_run(run)` and a later
+`get_run(run.id)` agree. That is one instance of a store-wide invariant worth stating on its own —
+**every write returns exactly what the matching read returns** — which also covers the allocated
+dataset version and the allocated `seq`, and is what makes the conformance suite's equality
+assertions meaningful rather than tautological.
+
+## [M3] The stored document column is written with `exclude_unset=True`
+`document` holds `model.model_dump(mode="json", exclude_unset=True)`, with only the two fields the
+store owns overridden — a dataset's allocated `version` and a blueprint's normalised `status`.
+Reason: ruling R-08 defines the round trip as
+`model_validate(raw).model_dump(mode="json", exclude_unset=True) == raw`, and the golden fixtures
+omit many optional fields (`tool_name` on three nodes, `max_iterations` on eight, `input` on every
+pool entry). A full dump would reintroduce those as `null`, so the bytes a dataset was submitted
+with would stop being the bytes `dataset_export` emits — which is precisely the byte-stability M7's
+"exported from SQLite, imported into Postgres" gate depends on. The conformance suite asserts the
+golden dataset round-trips byte-for-byte through the store.
+Alternative rejected: a full `model_dump()`. Pydantic equality ignores `fields_set`, so the *models*
+would still compare equal and the loss would only surface at M7, in the milestone with three
+backends in play.
+
+## [M3] `UtcDateTime`, because SQLite silently discards `tzinfo`
+A `TypeDecorator` over `DateTime(timezone=True)`: `TIMESTAMP WITH TIME ZONE` on Postgres, SQLite's
+TEXT `DATETIME` elsewhere, with values normalised to UTC on bind and UTC re-attached on result.
+Reason: SQLAlchemy's SQLite `DATETIME` bind processor formats the naive components and drops the
+offset without a warning, so `2026-09-08T10:14:22Z` reads back naive and compares unequal to the
+aware value the model carries. Every `created_at`, `started_at` and `fetched_at` assertion would
+fail on SQLite and pass on Postgres, for a reason no reader would guess from the code.
+Two properties are load-bearing beyond correctness. SQLAlchemy's fixed-width storage format sorts
+lexicographically in chronological order, which is what makes `ORDER BY created_at` on SQLite match
+Postgres — `find_datasets`'s deterministic-ordering promise. And `CURRENT_TIMESTAMP`, which
+`DEFAULT now()` becomes on SQLite, produces a *prefix* of that format, so a defaulted value and a
+bound value still sort correctly against each other.
+Alternative rejected: storing ISO-8601 text in a `TEXT` column of our own format, which would sort
+inconsistently against `CURRENT_TIMESTAMP` and would give up Postgres's native type for nothing.
+
+## [M3] The two Postgres-only indexes live in a dialect branch, not in `METADATA`
+`datasets_labels_gin` and `datasets_search` are created by the initial migration inside
+`if op.get_bind().dialect.name == "postgresql"`, are absent from `METADATA`, and are filtered out of
+Alembic's autogenerate comparison by `include_object` (defined in `storage/sql.py`, next to the
+names it filters, and imported by `migrations/env.py`).
+Reason: `create_all` would otherwise try to build a GIN index on SQLite, and autogenerate against a
+Postgres database at M7 would see two indexes it does not know about and propose dropping them. The
+filter makes `alembic check` clean on both dialects, which is what lets the check be a gate.
+Alternative rejected: declaring them in `METADATA` with `postgresql_using="gin"`. SQLite ignores the
+dialect kwarg and would create two useless B-tree indexes with misleading names.
+
+## [M3] `storage/` duplicates `canonical()` rather than importing it
+`sql.py` has a three-line `_canonical`, a duplicate of
+`validation/jsonschemas.py`'s `canonical()`.
+Reason: the layering rule is explicit — `storage/` may import `models/` and must not import
+`validation/` — and R-23's ordering is the reason it exists: validation happens in `service/` before
+storage sees a document, so an adapter that imported the catalogue would put it on the write path
+twice and on the read path at all. R-29 names the comparison literally
+(`json.dumps(sort_keys=True)`), so the duplicate is a specification, not a copy of an
+implementation. `tests/unit/test_layering.py` now enforces the import rule for `storage/` as it
+already did for `models/` and `validation/`.
+Alternative rejected: moving `canonical()` into `models/` as a shared pure helper. Defensible, and
+it would touch M2's module and give `models/` a function that belongs to no model. Reconsider if a
+third layer needs it.
+
+## [M3] Upserts are select-then-insert-or-update, not `ON CONFLICT`
+`put_blueprint`, `put_skeleton` and `put_run` read the row inside a transaction and then insert or
+update.
+Reason: SQLite and Postgres spell `ON CONFLICT DO UPDATE` differently enough to need a dialect
+branch, Mongo does not have it, and two of these three need to *inspect* the existing row anyway —
+`put_blueprint` compares documents for BP-016, `mark_skeleton_submitted` compares the existing
+`submitted_as`. A single-row upsert by primary key is not the thing worth optimising in an authoring
+store.
+Alternative rejected: `sqlalchemy.dialects.sqlite.insert(...).on_conflict_do_update(...)`, which
+would be the first place in the module to ask what dialect it is talking to.
+
+## [M3] `get_blueprint(agent_id, None)` is the newest published version, by semver, sorted in Python
+Contracts section 4 documents `blueprint_get` as "Latest published when version omitted", so an
+omitted version never returns a draft. "Latest" is greatest semver, computed in Python.
+Reason: `ORDER BY version` on a `TEXT` column puts `1.10.0` before `1.9.0`, and no portable SQL
+expression fixes that. BP-002 guarantees semver at write time, but a store must not raise on data it
+can be handed, so an unparseable version sorts below every parseable one and ties break
+lexicographically. The row count per agent is small enough that sorting in Python costs nothing.
+Alternative rejected: a `version_sort_key` column maintained on write — real complexity, and it
+would be the first column not in contracts section 7 for a reason other than a model field needing
+somewhere to live.
+
+## [M3] `health()` never raises, and its counts are row counts
+An unreachable backend returns `healthy: false` with zero counts rather than propagating a
+`SQLAlchemyError`. `counts` are table row counts, so an edited dataset counts once per version and
+archived datasets are included (ruling R-05).
+Reason: `store_status` exists to answer "is the backend there", and an exception is a worse answer
+than "no". `StoreCounts`'s own docstring says "row counts per aggregate", and R-05 says the dataset
+count includes archives because it is a store-health number, not a discovery number.
+Alternative rejected: counting distinct dataset ids, which is a different and more useful number for
+a human but is not what the type says and would make `counts.datasets` disagree with the row count
+an operator sees in `psql`.
+
+## [M3] SQLite gets `PRAGMA foreign_keys=ON`, set on the `connect` event
+`create_engine_for` registers it per connection for SQLite engines; `migrations/env.py` uses the
+same factory rather than `engine_from_config`.
+Reason: SQLite parses `REFERENCES` and ignores it unless asked. Contracts section 7 declares four
+foreign keys; declaring them without enforcing them would be claiming something untrue, and it would
+make SQLite and Postgres behave differently in the one area the conformance suite is explicitly told
+not to test (contracts section 8: Mongo has no foreign keys, so referential behaviour is tested
+through `service/`). The suite therefore writes a blueprint before a dataset because that is the
+honest order, not because SQLite forces it.
+One trap, worth recording because it cost a debugging round: issuing the pragma on the *connection*
+inside `env.py` opens a SQLAlchemy transaction before `context.configure`, Alembic concludes the
+caller owns the transaction and never commits, and the result is a database with every table created
+(pysqlite autocommits DDL) and an empty `alembic_version` — so `alembic check` reports "target
+database is not up to date" immediately after a successful `alembic upgrade head`. Using the engine
+factory, which sets the pragma on the DBAPI `connect` event, avoids it entirely.
+
+## [M3] `--store` is repeatable, defaults to sqlite, and skips what is not built
+`pytest_addoption` in `tests/conftest.py` with `choices=("sqlite", "postgres", "mongo")` and
+`action="append"`; `pytest_generate_tests` in `tests/integration/conftest.py` parameterises every
+`store`-taking test over the selection; the fixture skips with a reason for a backend not in
+`IMPLEMENTED_STORE_BACKENDS`.
+Reason: the milestone's own command is `uv run pytest -m integration --store postgres`, which must
+be a sensible thing to type at M3 and a passing thing to type at M7. `choices` makes a typo a pytest
+usage error rather than a confusing skip. The default of `sqlite` means plain `uv run pytest` runs
+the whole conformance suite rather than skipping it.
+M7's work is one tuple and two fixture branches. Not a line of the suite changes.
+
+## [M3] Two integration modules are deliberately SQL-specific
+`test_migrations.py` and `test_sql_version_allocation.py` do not take the `store` fixture and are not
+parameterised over backends.
+Reason: Alembic is SQL-only — contracts section 8 gives Mongo collections and indexes, not DDL — so
+there is nothing for a document store to conform to; and version allocation's *mechanism* is a SQL
+primary key, which is exactly what the backend-agnostic suite must not assert on. Keeping them
+separate is what lets `test_store_conformance.py` stay honestly portable.
+`test_migrations.py` runs Alembic's own autogenerate diff (`compare_metadata`, which is what
+`alembic check` runs) against a freshly migrated database and asserts it is empty. That is what makes
+it safe for the conformance fixture to build its schema with `create_all`: the two paths are proven
+to produce the same schema. It also runs a write journey against the migrated database, because a
+schema comparison can pass while a column type is unusable through the adapter.
+
+## [M3] `schemas_dir()` asserts a sibling `pyproject.toml`
+Deferred minor from M1's review, done. `repo_root()` resolves `parents[2]` and raises `RuntimeError`
+naming the path if there is no `pyproject.toml` beside it; `schemas_dir()` is now
+`repo_root() / "schemas"`.
+Reason: the parent arithmetic is only true in a source checkout. Installed from a wheel it points at
+whatever contains `site-packages/agentprops`, and `write_schemas` would `mkdir(parents=True)` and
+write two files into a virtualenv, silently, reporting success.
+`repo_root` takes an optional `module_file` purely so the guard is testable — the failing case cannot
+be reached by calling it from inside the repository, which is the only place the tests run. The mild
+smell of a test-only parameter is cheaper than an untested guard.
+
+---
+
+## Questions for the owner — M3
+
+None of these block the build; each has a working decision above.
+
+1. **`declared_blueprint_version` has no column in `contracts.md` section 7.** Contracts 2.3 gives
+   the field to `Run` and the DDL omits it. A column was added (nullable, absent from `RunSummary`)
+   because the alternative is dropping a model field on write. If it is meant to be *derived* from
+   the stored `blueprint_version_mismatch` warning rather than stored, say so and the column comes
+   out.
+2. **Should a new dataset version inherit the lineage's archive flag?** `set_archived` flips every
+   version; an edit written *after* an archive currently takes `ds.archived` as given, which can
+   leave versions 1-2 archived and version 3 not. Storage does not invent the policy; `service/`
+   will have to pick one at M5, and "an edit un-archives" and "an edit inherits" are both defensible.
+3. **Does `upsert_step`'s strict idempotency leave `record_step` a seam at M8?** Contracts section 6
+   says a second call with the same key "is a no-op that returns the existing record", which means
+   `upsert_step` cannot be the thing that writes `actual` later. M8 needs either a new Protocol
+   method for the recorded half or a `put_run` that rewrites its steps. Flagged now because it is a
+   Protocol shape question, and the Protocol is contracts', not M3's.
+4. **`list_blueprints` and `find_runs` orderings are unspecified.** Chosen: `(agent_id, semver)` for
+   blueprints, `started_at DESC, id` for runs — the latter being the order `runs_lookup` is built
+   for. Both are deterministic, which is the property that matters; if a tool surface wants a
+   different one, it is a one-line change at each call site.

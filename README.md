@@ -41,6 +41,37 @@ document did; warnings (`BP-019`, `DS-007`, `DS-027`, `DS-032`) report `ok: true
 `errors` with `severity: "warning"`. `validate_dataset` takes a `Resolver` — two read-only lookups
 for the three rules that are existence checks — so `validation/` stays pure and imports no storage.
 
+## Store a document
+
+```python
+from agentprops.storage import SqlStore, create_schema, sqlite_url
+
+store = SqlStore.from_url(sqlite_url("agentprops.db"))  # or: alembic upgrade head
+store.put_blueprint(blueprint, publish=True)
+version_1 = store.put_dataset(dataset)  # the store allocates the version
+version_2 = store.put_dataset(edited)  # copy-on-write; version 1 stays readable
+store.set_archived(str(dataset.id), True)  # a flag, never a delete
+```
+
+Everything above `storage/` goes through the `Store` Protocol in
+[`src/agentprops/storage/base.py`](src/agentprops/storage/base.py), never through an adapter
+directly. It has no `delete_*` method and never will: archive is a flag, a dataset edit is
+copy-on-write, and two tests hold the line — one on the Protocol's shape, one on the AST of every
+module in the package.
+
+## Migrate a database
+
+```bash
+uv run alembic upgrade head                     # apply, using AGENTPROPS_DB_URL or alembic.ini
+uv run alembic check                            # does the live schema match storage/sql.py?
+AGENTPROPS_DB_URL=sqlite+pysqlite:///dev.db uv run alembic upgrade head
+```
+
+The schema is declared once, as SQLAlchemy Core tables in
+[`src/agentprops/storage/sql.py`](src/agentprops/storage/sql.py), and `migrations/env.py` hands that
+same metadata to Alembic — so `alembic check` is a real drift gate rather than a comparison between
+two copies of the truth.
+
 ## Install
 
 Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
