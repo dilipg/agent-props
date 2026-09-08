@@ -963,9 +963,7 @@ class SqlStore:
         for attempt in range(FIRST_WRITE_ATTEMPTS):
             try:
                 with self._engine.begin() as conn:
-                    exists = conn.execute(
-                        select(skeletons.c.id).where(skeletons.c.id == sk.id)
-                    ).one_or_none()
+                    exists = self._existing_skeleton(conn, sk.id)
                     if exists is None:
                         conn.execute(insert(skeletons).values(id=sk.id, **values))
                     else:
@@ -1048,9 +1046,7 @@ class SqlStore:
         for attempt in range(FIRST_WRITE_ATTEMPTS):
             try:
                 with self._engine.begin() as conn:
-                    exists = conn.execute(
-                        select(runs.c.id).where(runs.c.id == run.id)
-                    ).one_or_none()
+                    exists = self._existing_run(conn, run.id)
                     if exists is None:
                         conn.execute(insert(runs).values(id=run.id, **values))
                     else:
@@ -1262,6 +1258,22 @@ class SqlStore:
         clock read by the database is the same ruling R-09 category as a column
         default; there is still no clock read in Python anywhere in this
         package.
+
+        **There is exactly one place this method decides anything**, and that is
+        deliberate. ``WHERE actual IS NULL`` makes the ``UPDATE`` conditional, so
+        a writer that lost the race changes nothing - and it then *loops back*
+        rather than reading the row and returning it, because the row it would
+        read holds the winner's value. The top of the loop is where an already
+        recorded actual is compared with this caller's, and where a difference
+        becomes a :class:`StoreError`.
+
+        M3's fix round 1 got this wrong in exactly the way two decision sites
+        always go wrong: the post-``UPDATE`` branch checked that *some* actual
+        was now stored rather than that it was *this* one, so the losing writer
+        in a genuine race received a successful ``StepRecord`` carrying the
+        winner's value. A step's recorded actual is evidence, and evidence that
+        silently belongs to a different writer is worse than an error. Looping
+        back is the same shape :meth:`upsert_step` uses for its own lost race.
         """
         for _ in range(FIRST_WRITE_ATTEMPTS):
             row = self._step_row(run_id, node_id, iteration)
@@ -1288,11 +1300,10 @@ class SqlStore:
                     )
                     .values(actual=dict(actual), recorded_at=func.now())
                 )
-            written = self._step_row(run_id, node_id, iteration)
-            if written is None:  # pragma: no cover - checked above, in this method
-                raise RecordNotFoundError(f"no step {run_id}/{node_id}/{iteration}")
-            if written.actual is not None:
-                return _step(written)
+            # Back to the top, whether that UPDATE applied or not. The next pass
+            # re-reads and takes the identical-or-refuse decision above, which
+            # returns this call's own value when it won and raises when a
+            # concurrent writer's value got there first.
         raise StoreError(f"could not record an actual for {run_id}/{node_id}/{iteration}")
 
     # -------------------------------------------------------------------- health
@@ -1345,6 +1356,22 @@ class SqlStore:
                 blueprints.c.version == version,
             )
         ).one_or_none()
+
+    def _existing_skeleton(self, conn: Connection, skeleton_id: uuid.UUID) -> Row[Any] | None:
+        """Whether a skeleton row exists, read on the caller's connection.
+
+        A method rather than an inline ``select`` for the same two reasons as
+        :meth:`_blueprint_row`: the read and the write it decides on stay in one
+        transaction, and the losing side of a concurrent first write is
+        reachable in a test by making this return ``None`` once.
+        """
+        return conn.execute(
+            select(skeletons.c.id).where(skeletons.c.id == skeleton_id)
+        ).one_or_none()
+
+    def _existing_run(self, conn: Connection, run_id: str) -> Row[Any] | None:
+        """Whether a run row exists, read on the caller's connection."""
+        return conn.execute(select(runs.c.id).where(runs.c.id == run_id)).one_or_none()
 
     def _lineage_archived(self, dataset_id: uuid.UUID) -> bool | None:
         """The lineage's current archive state, or ``None`` if it has no versions yet.
