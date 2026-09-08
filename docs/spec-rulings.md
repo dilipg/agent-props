@@ -1122,6 +1122,78 @@ being reproducible from their seed. So pin the derivation with a test asserting 
 `(seed, salt)` yields a specific UUID, which is the guarantee M7's property test then
 generalises.
 
+### R-47 — `mark_skeleton_submitted` becomes a compare-and-set
+
+M5 tested the losing side and reported honestly that **concurrent `dataset_submit` on one
+skeleton is not closed**: both callers pass SK-005, both write, and the loser becomes dataset
+version 2. Sequential double submit *is* correctly refused and writes nothing.
+
+**Ruling.** Close it now, by making the existing method a CAS rather than adding a new one.
+`mark_skeleton_submitted(skeleton_id, dataset_id)` succeeds **only if `submitted_as` is
+currently null**, and signals the loser otherwise. `dataset_submit` then orders itself:
+validate → CAS → on loss return SK-005 → on win `put_dataset`. The dataset id is available
+before the write because R-10 derives it deterministically from `(seed, salt)`.
+
+**Why now and not "when a second writer exists".** This is R-33's argument exactly. M7
+implements this Protocol against Postgres and Mongo. A CAS added after M7 costs touching
+three adapters that were already signed off; added now it costs one conformance test in a
+suite that already runs against every backend. The trigger the implementer named — M9's web
+app — arrives *after* M7, which is the worst possible ordering.
+
+**Why it matters more than a duplicate row.** SK-005 exists so a skeleton cannot become two
+datasets. A spurious second version is not corruption, but nothing signals it: the losing
+caller receives a success envelope for a dataset it did not intend to create, and no rule
+fires. An invariant the catalogue asserts and the store cannot hold is worse than no
+invariant.
+
+**Cost if wrong.** One method's contract tightens; the sequential path is unchanged.
+
+### R-48 — the `dataset_fill_part` race is accepted for phase 1
+
+M5 also found that concurrent `dataset_fill_part` calls for **different** sections lose one,
+because the whole `parts` object is written last-write-wins.
+
+**Ruling.** Accept, and do not add optimistic concurrency for it. The asymmetry with R-47 is
+deliberate:
+
+- A lost **fill** is immediately observable and self-correcting. Every `dataset_fill_part`
+  response carries `filled` and `remaining`, so the caller is told exactly what is still
+  outstanding and re-fills it. R-06 explicitly permits re-filling a section.
+- A lost **submit** is silent. The caller gets a success envelope for a dataset it did not
+  mean to create, and nothing in the response says so.
+
+The authoring flow this serves is PRD Flow B: one LLM filling sections in manifest order,
+one at a time. Concurrent fills of one skeleton are not a use case phase 1 has.
+
+**Cost if wrong.** A `revision` field on the skeleton row plus a retry, later — and unlike
+R-47 it does not change a Protocol method's contract, so it is not made expensive by M7.
+
+### R-49 — three smaller M5 decisions
+
+**(a) `skeletons` gains `labels` and `seed` columns.** Ratified, and it was forced rather
+than chosen: `dataset_submit(skeleton_id)` takes no other argument, and R-06 makes `labels`
+and `seed` non-section **inputs**, so a skeleton that does not carry them cannot be
+assembled into a dataset at all. Same class as R-32 — the DDL lost a field the flow requires.
+Amend `contracts.md` section 7.
+
+**(b) Id-space exhaustion gets its own `AP-*` code.** The generation walk gives up after 64
+salts for one `(agent_id, version, labels, seed)` and currently reports `AP-001` at `/seed`,
+which says "bad argument" when the truth is "this seed's id space is full". Add a dedicated
+code to section 3.5 — the R-43 family exists precisely for boundary conditions no catalogue
+rule owns, and this is one.
+
+**(c) All five sections are `required: true`.** Ratified. A pool-less blueprint therefore
+fills `nodes.branches` with `{"pools": {}}` rather than the service inventing a default. An
+explicit empty is honest and keeps the five-call gate literally true for every blueprint;
+a conditionally-required section would make the manifest depend on the blueprint's shape,
+which R-06 deliberately did not do.
+
+**(d) R-44's guard compares through universal newlines.** Ratified — and it must. The
+worktree has `worked-example.md` as CRLF while the fixtures are LF, though the index stores
+all three as LF, so a raw-byte comparison would fail on every Windows checkout while proving
+nothing about drift. The implementer verified the guard still fails on real content drift,
+which is the property that matters.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
