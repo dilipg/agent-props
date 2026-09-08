@@ -59,7 +59,7 @@ from typing import Annotated, Any
 from pydantic import Field
 
 from agentprops.models import RuleError
-from agentprops.service import AP_ARGUMENT, Reply, boundary, field_pointer
+from agentprops.service import AP_ARGUMENT, Reply, boundary, field_pointer, storable
 
 __all__ = [
     "ArgReader",
@@ -163,15 +163,40 @@ class ArgReader:
         return value
 
     def integer(self, name: str, value: object) -> int:
-        """A required integer. ``true`` is not an integer - see the module docstring.
+        """A required integer, inside the range a store column can hold.
 
         Separate from :meth:`number`, which returns ``None`` for an omitted
         optional argument. A required argument that is absent has to be
         ``AP-001``, and ``0`` is a legitimate ``seed``, so "absent" and "zero"
         cannot share a return value.
+
+        ``true`` is not an integer here, for the reason the module docstring
+        gives.
+
+        **The range check is ruling R-50, and it is not optional.** Python
+        integers are unbounded and every backend's integer column is signed
+        64-bit, so an out-of-range value reaches the driver and raises -
+        ``OverflowError`` from pysqlite, which the SDK turns into a protocol
+        error rather than the section 1 envelope. That is the M4 blocker
+        (`limit`, `offset`, `version`) repeated at M5 on `seed`, which is why
+        R-50 asks for a guard as well as a fix:
+        `test_bounded_integers.py` enumerates every integer parameter on the
+        **registered surface** and asserts each one answers an envelope at both
+        ends of the range.
+
+        An out-of-range value is **rejected**, not clamped, and that asymmetry
+        with :func:`~agentprops.service.limits.clamp` is the point.
+        ``clamp`` is for a *quantity* - a `limit` of ``2**64`` means the same as
+        the largest representable one. A `seed` is neither a quantity nor an
+        identifier of an existing row: it is an authored value that every
+        derived id depends on, so silently substituting a nearby one would
+        author a dataset the caller did not ask for.
         """
         if isinstance(value, bool) or not isinstance(value, int):
             self._reject(name, value, "an integer")
+            return 0
+        if not storable(value):
+            self._reject(name, value, f"an integer no wider than 64 bits (got {value})")
             return 0
         return value
 

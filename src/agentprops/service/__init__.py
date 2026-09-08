@@ -14,7 +14,9 @@ The layout
 `resolver.py`                the real ``Resolver`` over a store (R-11)
 `context.py`                 the two injected ports, together
 `envelope.py`                the contracts section 1 envelopes, plus the
-                             five ``AP-*`` boundary codes that are not rules
+                             six ``AP-*`` boundary codes that are not rules
+`limits.py`                  the integer range a store column can hold, and
+                             the clamp and the predicate that keep values in it
 `documents.py`               argument to document, and R-20's raw-text seam
 `diff.py`                    ``blueprint_diff``'s pure computation
 `blueprints.py`              the five blueprint tools
@@ -56,6 +58,7 @@ from agentprops.service.documents import Document, read_document
 from agentprops.service.envelope import (
     AP_ARGUMENT,
     AP_DOCUMENT_SHAPE,
+    AP_ID_SPACE_EXHAUSTED,
     AP_MALFORMED_JSON,
     AP_NOT_FOUND,
     AP_STORE_REFUSED,
@@ -66,15 +69,19 @@ from agentprops.service.envelope import (
     field_pointer,
     success,
 )
+from agentprops.service.limits import MAX_STORED_INT, MIN_STORED_INT, clamp, storable
 from agentprops.storage import Store
 
 __all__ = [
     "AP_ARGUMENT",
     "AP_DOCUMENT_SHAPE",
+    "AP_ID_SPACE_EXHAUSTED",
     "AP_MALFORMED_JSON",
     "AP_NOT_FOUND",
     "AP_STORE_REFUSED",
     "BOUNDARY_CODES",
+    "MAX_STORED_INT",
+    "MIN_STORED_INT",
     "Clock",
     "Document",
     "FrozenClock",
@@ -83,10 +90,12 @@ __all__ = [
     "Store",
     "SystemClock",
     "boundary",
+    "clamp",
     "context_from_url",
     "failure",
     "field_pointer",
     "read_document",
     "sqlite_context",
+    "storable",
     "success",
 ]
