@@ -22,14 +22,44 @@ scaffold (package layout, tooling, CI, golden fixtures), the M1 domain models in
 `src/agentprops/models/`, the M2 validator in `src/agentprops/validation/` — every `BP-*` and
 `DS-*` rule in [`docs/contracts.md`](docs/contracts.md) section 3, with a rule-id-to-callable
 registry and a declarative rejection corpus — the M3 `Store` Protocol and SQLite adapter in
-`src/agentprops/storage/`, and the M4 MCP surface: `src/agentprops/service/` and
-`src/agentprops/server/`, thirteen tools over stdio and streamable HTTP. `expansion/` and `export/`
-are empty modules waiting on M7.
+`src/agentprops/storage/`, the M4 MCP surface — `src/agentprops/service/` and
+`src/agentprops/server/`, over stdio and streamable HTTP — and the M5 skeleton pipeline:
+`dataset_skeleton`, `dataset_fill_part` and `dataset_submit` in
+`src/agentprops/service/skeletons.py`, the five `SK-*` rules, and `Seeded.uuid()` in
+`src/agentprops/expansion/seeded.py`. Sixteen tools. `export/` is an empty module waiting on M7,
+and `expansion/` holds `uuid()` only.
 
-Not yet built: the skeleton pipeline (`dataset_skeleton`, `dataset_fill_part`, `dataset_submit`, M5),
-the runtime (`run_start`, `fetch_step`, M6), expansion and export/import (M7), and the web app (M9).
-`tests/unit/test_tool_surface.py` lists exactly which documented tools are still deferred, and to
-which milestone.
+Not yet built: the runtime (`run_start`, `fetch_step`, M6), expansion beyond ids and export/import
+(M7), and the web app (M9). `tests/unit/test_tool_surface.py` lists exactly which documented tools
+are still deferred, and to which milestone.
+
+## Author a dataset
+
+```python
+# manifest order: provenance, entities, nodes.core, nodes.branches, expected
+started = call(
+    "dataset_skeleton",
+    agent_id="location-onboarding",
+    version="1.0.0",
+    labels={"persona": "multi-unit-operator", ...},
+    seed=20260908,
+)
+skeleton = started["data"]["skeleton"]
+for section in skeleton["manifest"]:
+    call(
+        "dataset_fill_part",
+        skeleton_id=skeleton["skeleton_id"],
+        section=section["id"],
+        content={target.lstrip("/"): ... for target in section["pointers"]},
+    )
+call("dataset_submit", skeleton_id=skeleton["skeleton_id"])
+```
+
+Sections are filled in manifest order (SK-002) and a section's `content` is a fragment of the
+dataset document, keyed by the top-level fields its `pointers` name. Re-filling a filled section is
+allowed and replaces it: a rejection carries the `section` to repair, so an LLM fixes one part
+rather than regenerating the whole dataset. `dataset_submit` runs every `DS-*` rule over the
+assembled document and stores it; a skeleton becomes exactly one dataset (SK-005).
 
 ## Validate a document
 

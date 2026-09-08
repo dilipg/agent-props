@@ -1951,3 +1951,386 @@ signature and collapsing aligned trailing comments in the document of record.
 Caught by reading `git diff` before committing, and reverted. The lesson is narrow and worth having
 written down: **run `uv run ruff format` with no path argument.** The configured excludes are the
 whole point, and naming a path is how you skip them.
+
+## [M5] The `skeletons` table gains `labels` and `seed`, and contracts section 7 is amended
+`dataset_skeleton(agent_id, version, labels, seed)` takes four inputs; ruling R-06 settles that
+`labels` and `seed` are **inputs rather than fillable sections**; and `dataset_submit(skeleton_id)`
+takes no other argument. So the two values have to survive on the skeleton row or the dataset cannot
+be assembled at all — they exist nowhere else and cannot be derived from anything.
+Chose: add `labels JSONB NOT NULL` and `seed BIGINT NOT NULL` to the `skeletons` DDL, to
+`Skeleton`, to the SQLite adapter and to migration `0001`, and amend `docs/contracts.md` section 7
+with the reason at the columns.
+Reason: this is the same class of omission as ruling R-32's missing `runs.declared_bp_version` and
+R-05's six missing Protocol types — a DDL refinement that lost a field the tool contract requires,
+not a deliberate exclusion. The column types match `datasets`, so a skeleton and the dataset it
+becomes agree about both values.
+Alternatives rejected: **a reserved key inside `parts`** — `parts` is documented as "section id to
+the content filled for it", and `filled`/`remaining` are derived from its keys, so a non-section key
+would have to be filtered at every use and would break the first author who forgot; **making the
+LLM fill them as part of a section** — R-06 forbids it and it would let the filling model change the
+labels the caller asked for.
+Migration `0001` is amended rather than superseded, on ruling R-39(c)'s reasoning exactly: this is
+the initial schema of an unreleased milestone on an unmerged branch, and no database outside a
+temporary test file has ever been migrated by it. **Migrations become append-only the moment this
+branch merges.**
+
+## [M5] The section manifest is data, and it partitions the dataset's top-level fields
+Ruling R-06 fixes five sections in order and assigns `narrative` to `provenance` and `pools` to
+`nodes.branches`. `service/skeletons.py::SECTION_FIELDS` is that ruling as a table: each section
+owns whole **top-level fields of the dataset document**, and the five sections' fields partition
+every authored field. `nodes.core` owns `/nodes`; `nodes.branches` owns `/pools`.
+Reason: that partition is not a new decision. `validation/pointers.py::section_for_pointer`, written
+at M2, already maps `/nodes/<non-pool id>` to `nodes.core` and `/pools/...` to `nodes.branches`, so
+a `DS-*` finding's `section` and the manifest agree **by construction** rather than by coincidence.
+`test_every_manifest_pointer_maps_back_to_its_section` is the assertion that keeps them tied; it is
+the only place in the suite that compares the two.
+R-06's "alongside the loop node's own fixture" resolves to exactly this: a `pool: true` node's
+fixtures live in `pools` (ruling R-01), so the loop node's fixture **is** the `nodes.branches`
+content, and the golden dataset's `request_docs` appears in `pools` and nowhere else.
+Consequence, and the reason the partition is worth this much care: filling the five sections
+reassembles `priya-missing-docs.json` **exactly**, except for `id`. That is acceptance criterion 6.
+
+## [M5] A section's `content` is a fragment of the dataset document, keyed at the top level
+`dataset_fill_part("nodes.core", {"nodes": {...}})`, not `dataset_fill_part("nodes.core", {...})`.
+Reason: an RFC 6901 pointer into the content is then already a pointer into the assembled dataset,
+so SK-003's findings and every `DS-*` finding address the same places and nothing has to translate
+between two coordinate systems. It also makes the fill sequence derivable from the manifest alone —
+a caller slices its own document by `section["pointers"]`, which is exactly what
+`test_worked_example_fill.py` does and what M8's client will do.
+The cost is one level of nesting on a section with a single field (`{"entities": {...}}`), and one
+rule to learn instead of five shapes.
+Alternative rejected: the bare value, with the service knowing which field each section means. That
+puts the mapping in two places (the manifest's `pointers` and an unwritten convention) and makes a
+two-field section — `provenance`, which owns `narrative` too — unexpressible.
+
+## [M5] A re-fill replaces the whole section
+Ruling R-06 makes re-filling explicitly legal; it does not say whether a re-fill merges.
+Chose: replace.
+Reason: PRD 6 flow B repairs "one part", and the part is the section. Merging would mean a caller
+cannot *remove* a field it should not have written, and the stored state would depend on the order
+of two calls rather than on the last one. Replacement also makes the `{filled, remaining}` response
+a complete description of the state, which a merge would not.
+Consequence, recorded because it is the obvious complaint: repairing a blank `provenance.title`
+means re-sending the whole `provenance` section. That is one section out of five, which is the
+granularity the ruling and the PRD both chose.
+
+## [M5] `dataset_fill_part` validates the section at *type* level only, one field deep
+The brief says the fill "validates it locally at schema level". That could mean parsing the section
+into its Pydantic models, and it must not.
+Chose: `content` must be an object, every key must be one the section owns, and each present field
+must have the JSON type the `Dataset` model declares for it (`narrative` a string, the rest
+objects). Nothing deeper.
+Reason: **ruling R-45 requires DS-025 to be reachable for a filled provenance whose title is absent
+or blank.** A model-level parse at fill time would reject the absent case as `AP-003` and the rule
+id a ruling explicitly assigns to a rule would become unreachable through the tool surface. The same
+argument covers DS-021 (`narrative` present, ≥30 characters) and DS-033.
+So the boundary is: fill time owns the shape of the *request*, submit time owns the content of the
+*document*. `test_a_missing_owned_field_is_accepted_and_becomes_a_ds_rule_at_submit` is that line as
+an assertion.
+An unowned key is `AP-001` rather than a rule id, because no `SK-*` rule describes the shape of
+`content` and section 3.5 exists for exactly the failures a user can cause that no catalogue rule
+covers (ruling R-43a).
+
+## [M5] The `SK-*` rules run in two phases, and the phase lists are drift-guarded
+SK-001 to SK-003 read a section name and its content, which a submit does not have; SK-004 only
+means anything at submit; SK-005 guards both.
+Chose: two runners in `validation/__init__.py` — `validate_fill` and `validate_submit` — driven by
+`FILL_RULES` and `SUBMIT_RULES` in `validation/skeleton.py`, with
+`test_every_skeleton_rule_runs_in_exactly_one_phase` asserting their union is exactly the `SK-*`
+registry and their intersection is exactly `{SK-005}`.
+Reason: a rule that is documented, registered and never run is worse than a missing rule, because
+the drift test reports it as covered. The union assertion is what makes adding a sixth skeleton rule
+without wiring it a failure.
+Alternative rejected: one runner plus a phase check inside each rule body. That hides the same
+decision in five places and puts a gate inside a predicate.
+Both runners **stop at the first rule that reports**, unlike `validate_dataset`, which runs every
+rule. A dataset document is complete and its findings are independently actionable; a fill request
+is a single action, and SK-001's finding removes the ordinal SK-002 would need. The difference is
+stated in both docstrings.
+
+## [M5] The `SK-*` precedence, and where ruling R-45's half of it lives
+Four skips, each inside the lower-priority rule so the rules stay order-free (ruling R-26's shape):
+- **SK-001 before SK-002.** A section outside the manifest has no ordinal, so "is every
+  earlier-ordinal section filled" has no answer.
+- **SK-002 before SK-003.** SK-003 resolves node `entity_refs` against the *filled* `entities`
+  section; `entities` is earlier-ordinal than both node sections, so when it is unfilled SK-002
+  already fires and SK-003 would otherwise add one finding per reference.
+- **SK-005 before everything**, on both tools. A skeleton that does not exist has no manifest.
+- **SK-004 before every `DS-*` rule** — ruling R-45. This one is in `service/skeletons.py::submit`
+  rather than in a rule body, because it decides whether the dataset catalogue runs *at all*: an
+  unfilled required section returns SK-004 findings and the catalogue is never invoked. R-45's
+  reason is the right one: "otherwise a submit of an empty skeleton would report most of the
+  catalogue", and the finding that says what to do would be buried in it.
+SK-003 checks the `entity_id` segment only, never `@revision`, matching the DS-006/DS-009 split
+ruling R-18 makes. If it did otherwise, a fill would reject a reference the submit accepts.
+SK-002 reports **one** finding, scoped to the earliest unfilled predecessor, with the full blocking
+list in `context`. Reporting one finding per predecessor would scope four findings to four different
+sections for a single mistake, and `section` is meant to name the part to repair.
+
+## [M5] SK-005 owns an unknown `skeleton_id`, not `AP-004`
+Chose: SK-005 for both halves — the skeleton does not exist, and the skeleton was already submitted.
+Reason: the catalogue names the check ("`skeleton_id` exists and has not already been submitted"), so
+a caller learns one vocabulary for one condition. `AP-004` exists for ids no rule describes; this one
+is described.
+It guards **both** tools. A submitted skeleton is frozen — datasets are immutable (ground rule 5) —
+so filling another part of one could only mislead, and `test_a_fill_after_a_submit_is_sk_005` pins
+it.
+
+## [M5] The skeleton id is derived from the request, and a re-request resumes rather than overwrites
+Ruling R-10 mints skeleton ids from `Seeded.uuid()`, so an id is a pure function of the request and
+two identical `dataset_skeleton` calls derive the **same** id. Left alone, the second call's
+`put_skeleton` would silently discard every filled section.
+Chose: `_claim()` walks generations `0..63`, deriving one candidate id per generation, and stops at
+the first candidate that is **free or unsubmitted**. A free id is used; an unsubmitted skeleton is
+returned as-is, with its parts intact and **without a write**; a submitted one moves to the next
+generation.
+Reason: it makes the derived id safe in both directions. An LLM that lost its `skeleton_id` mid-fill
+resumes instead of starting over, and a second dataset can still be authored from one label
+combination once the first is submitted. Not writing on resume also means a re-request cannot race
+with a fill in progress.
+One loop with **one** exit predicate — *free or unsubmitted* — deliberately, because the `seq`
+allocation defect at M3 came from two conditions that had to agree.
+Both ends are tested: `test_a_second_request_with_identical_arguments_resumes_the_same_skeleton`
+and `test_a_request_after_a_submit_mints_a_new_skeleton`.
+The bound: `SKELETON_GENERATIONS = 64`, so one `(agent_id, version, labels, seed)` can author 64
+datasets before the caller varies an argument. The `Store` Protocol offers no way to *enumerate*
+skeletons — `get_skeleton` and nothing else — so probing by derived id is the only mechanism
+available, and an unbounded probe would be a worse answer than a stated limit. Exhaustion returns
+`AP-001` pointed at `/seed`, which is the argument to change;
+`test_running_out_of_generations_is_reported_rather_than_overwriting` monkeypatches the bound to 1
+so the branch is reachable and asserts the submitted skeleton's lineage survives.
+`AP-001` is the closest existing code rather than a good fit. A sixth `AP-*` code would be better
+and would mean amending contracts section 3.5, which M5 was not asked to do — recorded here rather
+than done quietly.
+
+## [M5] The dataset id is derived from the *skeleton*, never from the request
+`Seeded(seed).uuid(f"dataset:{skeleton_id}")`.
+Reason: deriving it from `(agent_id, version, labels, seed)` would give two skeletons authored from
+one label combination the **same** dataset id, and `put_dataset` would then file the second as
+*version 2 of the first* — two datasets silently collapsed into one lineage, which no rule would
+report and which `dataset_find` (one row per lineage) would hide.
+`test_the_dataset_id_is_derived_from_the_skeleton_not_the_request` asserts two distinct ids, both at
+version 1.
+
+## [M5] `Seeded.uuid` derivation: blake2b over length-prefixed components
+`hashlib.blake2b(_encode(str(seed), self.salt, salt), digest_size=16, person=b"agentprops:uuid")`,
+then version-4 and RFC 4122 variant bits stamped over the digest.
+Three choices inside that, each with a failure it avoids:
+- **`hashlib`, not `hash()`.** Python's built-in `hash()` is randomised per process by
+  `PYTHONHASHSEED`, so a `hash()`-derived id would differ between two runs of identical code — the
+  exact failure determinism exists to prevent, and one no single-process test suite would catch.
+  `test_the_derivation_is_stable_across_processes` runs the derivation in three subprocesses with
+  different `PYTHONHASHSEED` values.
+- **Length-prefixed components, not a separator.** With a separator, `("a:b", "c")` and
+  `("a", "b:c")` encode identically, so two different salts mint one id and `put_skeleton`
+  overwrites one skeleton with another. A four-byte big-endian length in front of each UTF-8
+  component is injective for every tuple of strings, including empty ones and ones containing the
+  separator. `test_the_salt_encoding_is_injective` carries the colliding pairs.
+- **`person=` for domain separation**, so a future `Seeded` method hashing the same `(seed, salt)`
+  for another purpose cannot produce a value that collides with an id.
+The signature keeps both salts: `Seeded(seed, salt="")` from contracts section 9, and `uuid(salt)`
+from ruling R-10. They are distinct components of the derivation, so `Seeded(s, "a").uuid("")` and
+`Seeded(s).uuid("a")` are different ids rather than an accidental collision. The constructor salt
+defaults to empty so a caller with nothing to scope by writes `Seeded(seed)`.
+Ruling R-46's requirement is met by `test_the_derivation_is_pinned`, with **literal** expected
+UUIDs: a round trip through the implementation would pass against any derivation at all. Changing
+`_encode` or `uuid` changes every id this service has ever minted, and the test docstring says so.
+Only `uuid()` is built. R-46: `int()`, `choice()`, `shuffled()` and `timestamp()` arrive at M7 with
+the expansion that needs them, because an unused generator method is untested surface.
+
+## [M5] The scaffold: keys are blueprint facts, leaves are empty, and no placeholder may validate
+"How much scaffolding does `dataset_skeleton` pre-fill" comes down to two rules.
+**Keys are blueprint facts.** The non-pool node ids, the pool node ids and the entity ids are all
+knowable from the published blueprint, and they are exactly what an author has to enumerate —
+DS-002 wants a fixture per non-pool node, DS-018 an entry per pool node. So they are emitted as
+keys, in blueprint declaration order, along with the three fields no section owns (`blueprint`,
+`seed`, `labels`) at their real values.
+**No placeholder may validate if it is left unedited.** An empty fixture `{}` reports DS-004, an
+empty pool reports DS-019, an empty entity fails to construct. A more helpful-looking placeholder —
+`{"base": {}}`, or `{"entity_refs": []}` — would pass every rule and store a nonsense dataset, which
+is strictly worse than an error. `test_no_scaffold_placeholder_would_validate_if_left_unedited`
+submits the scaffold verbatim and asserts it is rejected with rule ids.
+Field-level guidance therefore lives in each section's `description`, interpolated from the
+blueprint (entity ids, node ids, the pool's `max_iterations`), which is prose's job. A filled
+section shows its stored content instead of its placeholder, so a resumed skeleton is a live view of
+the work so far.
+Residue, named: a section deliberately filled with an empty object is indistinguishable in the
+scaffold from an unfilled one. `dataset_fill_part`'s `{filled, remaining}` is the authoritative fill
+state and is where the difference is visible. Adding `filled`/`remaining` to `dataset_skeleton`'s
+payload was rejected as a deviation from the four keys contracts section 4 names.
+
+## [M5] The `instructions` string is composed from the manifest, and says only what a rule enforces
+Generated from `manifest` and `SECTION_FIELDS` rather than written out, so renaming a section
+renames it here too and it cannot describe sections that do not exist.
+Content, and why each line is in it: the fill **order** (SK-002); that a re-fill is allowed and is
+how a rejection is repaired (ruling R-06, PRD 6 flow B); the **keyed** content form, with each
+section's fields listed; that a re-fill replaces the section; that `blueprint`, `seed` and `labels`
+are not fillable (R-06) **and that `label_vocabulary` is the pre-flight for them**; and that submit
+runs the cross-cutting pass and a skeleton becomes one dataset (SK-005).
+No timestamp, no counter, no clock reading, so two calls for one blueprint version return
+byte-identical text — which is M4's determinism criterion applied to M5's read-shaped tool, and
+`test_dataset_skeleton_output_is_byte_identical_across_repeated_calls` asserts it over the whole
+envelope.
+
+## [M5] `dataset_skeleton` does not validate `labels`, and that is a choice
+A label outside the blueprint's vocabulary, or an incomplete label set, is **not repairable by
+re-filling** — R-06 makes labels an input, so the caller has to start a new skeleton. Failing fast
+at `dataset_skeleton` is therefore tempting.
+Chose: no label validation at skeleton time. DS-012 and DS-024 own labels, at submit, against the
+assembled document.
+Reason: M5's acceptance criterion says "a submit carrying partial labels is rejected with DS-024".
+Pre-empting DS-024 at skeleton time would make that criterion unreachable through the tool surface,
+and a rule that cannot fire on the normal path is a rule the corpus tests and the product does not.
+`label_vocabulary` — M4's tool — already answers "which values does this blueprint declare", so the
+pre-flight surface exists; `instructions_for` points at it, and that is the mitigation.
+Alternative rejected: running DS-012 only, keeping DS-024 for submit. That splits one field's
+validation across two moments for no gain in guidance.
+
+## [M5] `submit` writes the dataset first, then marks the skeleton
+Order matters only for a crash between the two writes.
+Chose: `put_dataset`, then `mark_skeleton_submitted`.
+Reason: a crash then leaves a stored, validated dataset and an unmarked skeleton — visible, and
+recoverable. The reverse leaves a skeleton SK-005 has closed and no dataset, and the filled work is
+unreachable through any tool. It is also the honest order: you cannot record what a skeleton became
+until it became it.
+
+## [M5] Concurrency: two claims, both with the losing side tested
+`skeleton_id` is caller-supplied and the partial state is mutable across calls, so both of these are
+tested rather than asserted in a docstring.
+**A concurrent fill of another section is lost.** `dataset_fill_part` is a read-modify-write of the
+whole `parts` object, because `put_skeleton` is a whole-aggregate upsert and the `Store` Protocol has
+no compare-and-set. Two fills that both read before either writes end with only the second one's
+section. `test_a_concurrent_fill_of_another_section_is_lost` replays that interleaving and asserts
+the loss.
+**Two interleaved submits both write, and the second becomes version 2.** Sequentially a second
+submit is SK-005 and writes nothing — `test_a_second_submit_is_sk_005_and_writes_nothing` proves it,
+including that the stored dataset is still at version 1. Concurrently it is **not** closed: both
+calls read `submitted_as` as null before either writes, so both pass SK-005 and both reach
+`put_dataset`, which allocates version 2 for the loser. The dataset id is derived from the skeleton,
+so `mark_skeleton_submitted` sees the same id twice and its replay tolerance accepts it.
+`test_two_interleaved_submits_both_write_and_the_second_becomes_version_two` is that case.
+Not fixed now, and the reason is a cost, not a judgement that it cannot happen: closing it needs a
+compare-and-set on the skeleton — `mark_skeleton_submitted` dropping its replay tolerance, or a
+`claim_skeleton` method — which is a `Store` Protocol change that three adapters pay for and that
+M7's conformance suite would have to cover on all three. An authoring session is one caller filling
+one skeleton in sequence.
+**The named remedy, with its trigger:** add `claim_skeleton(skeleton_id, dataset_id) -> bool` to the
+Protocol, implemented as a conditional update (`WHERE submitted_as IS NULL`), and have `submit` call
+it *before* `put_dataset`. Build it when a second writer exists — the web app at M9 is the first
+plausible one. Both tests carry a message telling the next author to update this entry when they
+land it.
+
+## [M5] The assembled document is emitted in one canonical key order
+`DATASET_FIELD_ORDER` — the golden fixture's own order — is applied to every assembled document.
+Reason: dict equality ignores order, so nothing depends on it *today*. But five `dataset_fill_part`
+calls can arrive in any order and the parts are stored as they arrive, so without this the stored
+document's key order is a function of call order. M7's `dataset_export` gate is byte stability
+across an export/import cycle, and one canonical order in the single write path is cheaper than a
+canonicalising export.
+`_ordered` keeps any unexpected field rather than dropping it: an unowned field is `AP-001` at fill
+time, but ordering must never be the thing that silently discards a value, because a value dropped
+there is a value no rule could report.
+
+## [M5] The `SK-*` coverage exemption is a third kind, and it names its test
+The corpus is a list of JSON Patches against two golden **documents**. A skeleton rule's subject is
+the `parts`/`manifest`/`submitted_as` state of a skeleton row, so **no mutation can reach one**.
+Chose: `PIPELINE_ONLY` in `test_validation_drift.py`, keyed by rule id and valued by the *name* of
+the covering test, subtracted from the coverage gate, with
+`test_every_pipeline_exemption_names_a_test_that_exists` and `test_no_pipeline_exemption_is_stale`
+holding it up. This is ruling R-12's "corpus coverage or a **named** exemption", and it is the shape
+ruling R-31 established for a rule *half*: an exemption is worth exactly what the test it names is
+worth.
+It is deliberately a third map rather than an entry in either existing one. `MUTATION_UNREACHABLE`
+requires a raw-text case (R-20's DS-013), which a skeleton rule has no analogue of;
+`RULE_HALF_EXEMPTIONS` is keyed by `(rule, half)` and asserts the rule *does* have a corpus case.
+Alternative rejected: a second, differently-shaped mutation manifest carrying skeleton fixtures.
+Five rules is not enough to justify a parallel corpus mechanism, and the state those rules read is
+exactly what the service builds anyway — which is what `test_service_skeletons.py` exercises.
+
+## [M5] Ruling R-44's fixture drift guard, and why it normalises line endings
+`tests/unit/test_fixtures.py` now extracts the fenced JSON blocks from `docs/worked-example.md`
+sections 3 and 4 and compares them with the two committed golden fixtures. Before this, nothing in
+the suite pinned the fixtures to the document that declares itself their source: the byte-diff had
+been done once, by hand, and never committed.
+It covers **exactly two** files and the exclusions are stated at the assertion, in
+`test_the_drift_guard_covers_exactly_the_two_byte_exact_fixtures`: `broken/manifest.json` was
+deliberately extended past section 6's cases by ruling R-14 and is *supposed* to differ, and
+`datasets/arun-escalated.json` was authored from section 5's prose and has no JSON block to compare
+against. A test asserts the two maps are exhaustive over the four committed fixtures, so a new
+fixture has to be classified.
+**One concession, and it is git's doing.** Measured: on this Windows checkout with
+`core.autocrlf=true`, the worktree copy of `worked-example.md` is CRLF while the two golden fixtures
+are LF — even though the index stores all three as LF, so *in the repository* they are byte
+identical. Comparing raw worktree bytes would fail on a fact about the checkout, on one platform,
+for every reader. So both sides are read through `Path.read_text` (universal newlines) and the
+docstring carries the measurement. Content, whitespace, indentation, key order and number formatting
+are all still compared exactly; only the line terminator, which git owns and the specification does
+not, is excluded.
+Verified by making it fail: changing `"seed": 20260908` to `20260909` in the document's section 4
+block reported drift on `priya-missing-docs.json`, and the document was restored byte-identically.
+
+## [M5] `expansion/` gets the layering guards `validation/` and `storage/` already had
+Three parametrised guards in `test_layering.py`: no sibling-layer imports but `models/`, no I/O, and
+no clock or random source.
+Reason: ground rule 9 and contracts section 9 both ask for it ("enforce with a ruff custom rule or a
+test that greps the tree"), and this is the one layer where the module's whole purpose would be
+defeated by a single call — "all randomness flows through `Seeded`" means nothing if `Seeded`
+contains randomness. `uuid.UUID(bytes=...)` is not caught and should not be: ruling R-10 bans
+*calls* to `uuid4()` and friends, not the type and the parser.
+`test_the_expansion_guard_would_catch_a_random_source` feeds the guard a module that calls
+`random.choice`, `uuid.uuid4` and `datetime.now` and asserts all three are reported — the same
+verify-the-guard step M4 ran on its five layering guards, because a guard that has never been shown
+to fail is a guard nobody has tested.
+
+## [M5] `ArgReader` gains three readers, and `RequiredIntArg` exists so the schema stays honest
+`integer` (a required integer), `mapping` (a required JSON object) and `required_labels` (a required
+`{dimension: value}` object of strings), plus a `RequiredIntArg` annotation publishing
+`{"type": "integer"}` rather than `["integer", "null"]`.
+Reason: `dataset_skeleton`'s `seed` and `labels` and `dataset_fill_part`'s `content` have no
+defaults, so an omitted argument must be `AP-001`. The existing `number()` returns `None` for an
+omitted optional argument and **`0` is a legitimate seed**, so "absent" and "zero" cannot share a
+return value. `integer` also rejects `True`, because `isinstance(True, int)` is true in Python and
+the same trap already cost a rule (`validation.context.as_int` excludes `bool` so DS-020 does not
+accept `"seed": true`) — the two layers have to agree about what an integer is.
+`required_labels` treats an **empty** labels object as a meaningful value rather than an absence: it
+is a dataset with no labels, which DS-024 rejects at submit with a rule id, which is better guidance
+than a boundary code.
+`mapping` is distinct from `document`, which passes a document argument through untouched for
+ruling R-20's raw-text seam. A section fragment is not a document: no rule reads its raw text, and
+DS-013 cannot apply because `labels` is not a fillable section.
+
+## [M5] The negative control in `test_tool_surface.py` moves to a tool that will never land
+`test_the_scanner_does_not_credit_a_name_nobody_calls` used `dataset_skeleton` as its example of a
+name that appears as a string literal under `tests/` while never being called. M5 landed that tool,
+so the control had to move — which is the flaw in choosing a deferred tool that will one day exist.
+Chose: `blueprint_infer`, which contracts section 4 tags *(phase 1.5)* and says is "Not in phase 1",
+plus a first assertion that the control name **does** appear as a string literal under `tests/`. A
+control that stopped appearing would make the test pass vacuously, which is the failure mode a
+control exists to prevent.
+
+## Questions for the owner — M5
+
+1. **`skeletons.labels` and `skeletons.seed` are an addition to contracts section 7.** They are
+   forced rather than chosen — `dataset_submit(skeleton_id)` takes no other argument and ruling R-06
+   makes both values non-section inputs, so a skeleton that does not carry them cannot be assembled
+   into a dataset. Same class as ruling R-32's missing `runs.declared_bp_version`. Flagged because it
+   is a schema change, not a code choice.
+2. **How many datasets should one `(agent_id, version, labels, seed)` be able to author?** The
+   answer today is 64, because skeleton ids are derived (ruling R-10) and the `Store` Protocol can
+   only *probe* for one, never enumerate. Exhaustion is an `AP-001` telling the caller to vary the
+   seed. If the intended answer is "one" — i.e. a repeat request should be refused rather than
+   walking to a fresh generation — the walk becomes a single probe.
+3. **Should exhausting the generation walk have its own boundary code?** It is reported as `AP-001`
+   pointed at `/seed`, which is the closest existing code rather than a good fit: nothing is
+   malformed, the arguments simply cannot be served. A sixth `AP-*` code would be the honest answer
+   and would mean amending contracts section 3.5, which M5 was not asked to do.
+4. **Concurrent `dataset_submit` on one skeleton is not closed.** SK-005 refuses a *sequential*
+   second submit and writes nothing; two truly simultaneous submits both pass it and the loser
+   becomes version 2 of the same dataset. Both cases are tested. Closing it needs a compare-and-set
+   on the skeleton — a `Store` Protocol change three adapters pay for — and the named remedy plus its
+   trigger are in the concurrency entry above. Worth an explicit decision before M9 puts a second
+   writer on the store.
+5. **A blueprint with no `pool: true` node still has to fill `nodes.branches` with `{"pools": {}}`.**
+   All five sections are `required: True`, because the `Dataset` model requires all their fields and
+   the alternative is the service inventing an empty container. One extra call per dataset for such
+   a blueprint; the golden blueprint has a pool node, so nothing in this build pays it.
