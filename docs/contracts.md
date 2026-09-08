@@ -20,7 +20,7 @@ Every tool returns this shape on a validation or resolution failure. The service
       "rule": "DS-008",
       "severity": "error",
       "pointer": "/nodes/verify_compliance/entity_refs/0",
-      "section": "nodes.compliance",
+      "section": "nodes.core",
       "message": "Entity 'store' has no revisions block but differs from its state in node 'fetch_store_profile'.",
       "context": { "entity": "store", "conflicting_node": "fetch_store_profile" }
     }
@@ -31,7 +31,7 @@ Every tool returns this shape on a validation or resolution failure. The service
 - `rule` is the catalogue id. **Tests assert on this, never on `message`.**
 - `severity` is `error` or `warning`. Warnings never block a write or a read.
 - `pointer` is an RFC 6901 JSON pointer into the submitted document.
-- `section` is the skeleton section the error belongs to, so a partial fill can be repaired without regenerating the whole dataset. Null for non-skeleton contexts.
+- `section` is the skeleton section the error belongs to, so a partial fill can be repaired without regenerating the whole dataset. Null for non-skeleton contexts. The five sections are `provenance`, `entities`, `nodes.core`, `nodes.branches`, `expected`; the example above reads `nodes.core`, corrected from `nodes.compliance` by ruling R-06.
 
 Success shape:
 
@@ -226,6 +226,8 @@ The run id is a client-supplied opaque string, 8 to 128 characters, `^[A-Za-z0-9
 
 Every rule needs an entry in `validation/registry.py` and at least one fixture in `tests/fixtures/broken/`. A test enforces both. Severity is `error` unless stated.
 
+Sections 3.1 to 3.3 are the rule registry. **Section 3.4 is a response-code table, not part of the rule registry** (ruling R-12): those codes describe a `fetch_step` response, have no document to validate and no JSON pointer, so they carry no registry entry and no broken fixture. The drift test parses 3.1 to 3.3 only.
+
 ### 3.1 Blueprint rules
 
 | Rule | Check |
@@ -286,6 +288,7 @@ Every rule needs an entry in `validation/registry.py` and at least one fixture i
 | DS-030 | `provenance.author.agent` is one of `claude-code`, `codex`, `human`, `generator` |
 | DS-031 | `provenance.supersedes`, when non-null, references a dataset that exists |
 | DS-032 | *(warning)* `provenance.intent` is byte-identical to `expected.rationale` |
+| DS-033 | `expected.rationale` is present and at least 30 characters (added by ruling R-21: contracts 2.2 requires it in prose, but no rule enforced it) |
 
 ### 3.3 Skeleton rules
 
@@ -307,7 +310,8 @@ Errors:
 | RT-E02 | Unknown node or tool name for this blueprint |
 | RT-E03 | Unknown run id |
 | RT-E04 | Dataset not found, or archived and not pinned by this run |
-| RT-E05 | Iteration exceeds `max_iterations` for this loop node |
+
+There is no RT-E05. Ruling R-03 deleted "iteration exceeds `max_iterations`": PRD 5.2's deliberate repeat-and-warn wins, so a loop drawing past its pool repeats the last entry with a `pool_exhausted` warning and the service never gates on iteration count.
 
 Warnings, attached to both the response and the stored run, never blocking:
 
