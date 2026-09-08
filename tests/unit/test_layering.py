@@ -52,6 +52,7 @@ from pathlib import Path
 
 import pytest
 
+import agentprops.expansion
 import agentprops.models
 import agentprops.server
 import agentprops.service
@@ -68,6 +69,9 @@ VALIDATION_FILES = sorted(VALIDATION_DIR.glob("*.py"))
 #: the module most likely to reach for something convenient.
 STORAGE_DIR = Path(agentprops.storage.__file__).resolve().parent
 STORAGE_FILES = sorted(STORAGE_DIR.rglob("*.py"))
+
+EXPANSION_DIR = Path(agentprops.expansion.__file__).resolve().parent
+EXPANSION_FILES = sorted(EXPANSION_DIR.glob("*.py"))
 
 SERVICE_DIR = Path(agentprops.service.__file__).resolve().parent
 SERVICE_FILES = sorted(SERVICE_DIR.glob("*.py"))
@@ -97,6 +101,13 @@ FORBIDDEN_LAYERS_FOR_VALIDATION = frozenset({"storage", "service", "server", "ex
 #: canonical comparison in `sql.py` duplicates three lines rather than crossing
 #: this line.
 FORBIDDEN_LAYERS_FOR_STORAGE = frozenset({"validation", "service", "server", "expansion", "export"})
+
+#: `expansion/` may import `models/`, and nothing else sideways. It is a peer
+#: of `validation/`: pure, no I/O, and - the reason it exists - **no clock and
+#: no random source**, which the two guards below enforce rather than describe.
+#: Ground rule 9 and contracts section 9 both ask for exactly this ("enforce
+#: with a ruff custom rule or a test that greps the tree").
+FORBIDDEN_LAYERS_FOR_EXPANSION = frozenset({"validation", "storage", "service", "server", "export"})
 
 #: `service/` may reach every layer below it - that is its job - and may not
 #: reach the layer above. One entry, and it is the one that matters: a service
@@ -359,6 +370,85 @@ def test_validation_reads_no_clock_and_no_random_source(path: Path) -> None:
         if name and (name in FORBIDDEN_CALLS or name.rsplit(".", 1)[-1] in FORBIDDEN_CALLS):
             offences.append(f"line {node.lineno}: {name}()")
     assert not offences, f"{path.name} calls a clock or a random source: {offences}"
+
+
+def test_the_expansion_file_table_is_not_empty() -> None:
+    assert len(EXPANSION_FILES) > 1, f"no expansion modules found under {EXPANSION_DIR}"
+
+
+@pytest.mark.parametrize("path", EXPANSION_FILES, ids=lambda p: p.name)
+def test_expansion_imports_no_sibling_layer_but_models(path: Path) -> None:
+    """`expansion/` is a peer of `validation/`, not a consumer of it."""
+    offences = sibling_import_offences(path, FORBIDDEN_LAYERS_FOR_EXPANSION)
+    assert not offences, f"{path.name} imports a sibling layer: {offences}"
+
+
+@pytest.mark.parametrize("path", EXPANSION_FILES, ids=lambda p: p.name)
+def test_expansion_reads_no_clock_and_no_random_source(path: Path) -> None:
+    """Ground rule 9 at its source: this is the layer the rule is *about*.
+
+    "All randomness inside the service flows through ``Seeded``" only means
+    something if ``Seeded`` itself contains no randomness. So the same grep that
+    protects `models/`, `validation/` and `storage/` runs here, and it is the
+    only one of the four where the module's whole purpose would be defeated by a
+    single call.
+
+    ``uuid.UUID(bytes=...)`` is not caught and should not be: ruling R-10 bans
+    *calls* to ``uuid4()`` and friends, not the type and the parser. M7 adds
+    ``choice()`` and ``shuffled()`` as **methods**, whose definitions this guard
+    does not see - but a call to ``random.choice`` inside one of them is
+    ``choice`` by dotted suffix and would be caught, which is the case that
+    matters.
+    """
+    offences: list[str] = []
+    for node in ast.walk(parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        name = dotted(node.func)
+        if not name or name.startswith("self."):
+            continue
+        if name in FORBIDDEN_CALLS or name.rsplit(".", 1)[-1] in FORBIDDEN_CALLS:
+            offences.append(f"line {node.lineno}: {name}()")
+    assert not offences, f"{path.name} calls a clock or a random source: {offences}"
+
+
+@pytest.mark.parametrize("path", EXPANSION_FILES, ids=lambda p: p.name)
+def test_expansion_does_no_io(path: Path) -> None:
+    """A deterministic generator that read a file would not be deterministic."""
+    offences: list[str] = []
+    for node in ast.walk(parse(path)):
+        if isinstance(node, ast.Call):
+            name = dotted(node.func)
+            if name and name.rsplit(".", 1)[-1] in FORBIDDEN_IO_CALLS:
+                offences.append(f"line {node.lineno}: {name}()")
+    assert not offences, f"{path.name} performs I/O: {offences}"
+
+
+def test_the_expansion_guard_would_catch_a_random_source(tmp_path: Path) -> None:
+    """The guard's own guard, in the shape M4's five layering guards were verified.
+
+    A guard that has never been shown to fail is a guard nobody has tested. This
+    feeds it a module that reads a clock and a random source and asserts that
+    both are reported - so the parametrised test above is known to be doing
+    something, rather than passing because `seeded.py` happens to be clean.
+    """
+    offending = tmp_path / "cheating.py"
+    offending.write_text(
+        "import random\nimport uuid\nfrom datetime import datetime\n\n"
+        "def pick() -> object:\n"
+        "    return (random.choice([1, 2]), uuid.uuid4(), datetime.now())\n",
+        encoding="utf-8",
+    )
+    offences: list[str] = []
+    for node in ast.walk(parse(offending)):
+        if not isinstance(node, ast.Call):
+            continue
+        name = dotted(node.func)
+        if not name or name.startswith("self."):
+            continue
+        if name in FORBIDDEN_CALLS or name.rsplit(".", 1)[-1] in FORBIDDEN_CALLS:
+            offences.append(name)
+    assert offences == ["random.choice", "uuid.uuid4", "datetime.now"]
 
 
 def test_the_storage_file_table_is_not_empty() -> None:
