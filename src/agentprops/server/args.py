@@ -68,6 +68,7 @@ __all__ = [
     "ObjectArg",
     "OptionalObjectArg",
     "OptionalTextArg",
+    "RequiredIntArg",
     "TextArg",
     "reply",
 ]
@@ -89,6 +90,12 @@ BoolArg = Annotated[object, Field(json_schema_extra={"type": "boolean"})]
 
 #: An optional integer.
 IntArg = Annotated[object, Field(json_schema_extra={"type": ["integer", "null"]})]
+
+#: A required integer, advertised as one. Separate from :data:`IntArg` because
+#: the published schema is what an LLM caller reads: ``dataset_skeleton``'s
+#: ``seed`` has no default and admitting ``null`` in its type would advertise
+#: an option the tool then rejects.
+RequiredIntArg = Annotated[object, Field(json_schema_extra={"type": "integer"})]
 
 
 def reply(envelope: Reply) -> dict[str, Any]:
@@ -154,6 +161,47 @@ class ArgReader:
             self._reject(name, value, "an integer or null")
             return None
         return value
+
+    def integer(self, name: str, value: object) -> int:
+        """A required integer. ``true`` is not an integer - see the module docstring.
+
+        Separate from :meth:`number`, which returns ``None`` for an omitted
+        optional argument. A required argument that is absent has to be
+        ``AP-001``, and ``0`` is a legitimate ``seed``, so "absent" and "zero"
+        cannot share a return value.
+        """
+        if isinstance(value, bool) or not isinstance(value, int):
+            self._reject(name, value, "an integer")
+            return 0
+        return value
+
+    def mapping(self, name: str, value: object) -> dict[str, Any]:
+        """A required JSON object, as a plain ``dict``.
+
+        Distinct from :meth:`document`, which passes a *document* argument
+        through untouched so that `service/documents.py` can resolve it against
+        ruling R-20's raw-text seam. ``dataset_fill_part``'s ``content`` is a
+        section fragment rather than a whole document: no rule reads its raw
+        text, and DS-013 cannot apply to it because ``labels`` is not a fillable
+        section.
+        """
+        if isinstance(value, Mapping):
+            return dict(value)
+        self._reject(name, value, "an object")
+        return {}
+
+    def required_labels(self, name: str, value: object) -> dict[str, str]:
+        """A required ``{dimension: value}`` object of strings.
+
+        ``labels`` on ``dataset_skeleton`` is required, and an empty object is a
+        *meaningful* value there - it is a dataset with no labels, which DS-024
+        rejects at submit with a rule id rather than a boundary code. So absence
+        and emptiness are different answers and only absence is ``AP-001``.
+        """
+        if value is None:
+            self._reject(name, value, "an object of string label values")
+            return {}
+        return self.labels(name, value) or {}
 
     def labels(self, name: str, value: object) -> dict[str, str] | None:
         """A ``{dimension: value}`` object of strings, or ``None`` when omitted.

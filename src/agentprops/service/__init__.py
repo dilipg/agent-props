@@ -19,6 +19,7 @@ The layout
 `diff.py`                    ``blueprint_diff``'s pure computation
 `blueprints.py`              the five blueprint tools
 `datasets.py`                the five dataset tools M4 owns
+`skeletons.py`               the authoring flow, and the one dataset write
 `admin.py`                   the three admin reads
 ============================ =============================================
 

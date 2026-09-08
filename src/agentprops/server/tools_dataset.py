@@ -1,8 +1,14 @@
-"""The five dataset tools M4 owns. contracts section 4, Dataset table.
+"""The eight dataset tools. contracts section 4, Dataset table.
 
-``dataset_skeleton``, ``dataset_fill_part`` and ``dataset_submit`` are M5's;
-``dataset_expand``, ``dataset_export`` and ``dataset_import`` are M7's. They go
-in this module, decorated the same way, and inherit the same plumbing.
+Four are M4's reads, one is ``dataset_validate``, and the last three are M5's
+skeleton pipeline. ``dataset_expand``, ``dataset_export`` and ``dataset_import``
+are M7's: they go in this module, decorated the same way, and inherit the same
+plumbing.
+
+``dataset_submit`` is the **only tool on this surface that writes a dataset** -
+ground rule 1's "nothing writes to a dataset except the authoring flow". All of
+the behaviour is in `service/skeletons.py`; each function here reads its
+arguments and delegates, the same shape as every other tool in this package.
 
 ``dataset_validate`` is here rather than at M5 because ruling R-15 assigns it to
 M4 beside ``blueprint_validate``. It is also the only tool on this surface with
@@ -23,16 +29,20 @@ from agentprops.server.args import (
     ObjectArg,
     OptionalObjectArg,
     OptionalTextArg,
+    RequiredIntArg,
     TextArg,
     reply,
 )
-from agentprops.service import datasets, failure
+from agentprops.service import datasets, failure, skeletons
 
 __all__ = [
     "dataset_archive",
+    "dataset_fill_part",
     "dataset_find",
     "dataset_get",
     "dataset_restore",
+    "dataset_skeleton",
+    "dataset_submit",
     "dataset_validate",
 ]
 
@@ -115,3 +125,63 @@ def dataset_validate(dataset: ObjectArg = None, dataset_json: str = "") -> dict[
     JSON is parsed.
     """
     return reply(datasets.validate(bound(), dataset, dataset_json))
+
+
+@mcp.tool()
+def dataset_skeleton(
+    agent_id: TextArg, version: TextArg, labels: ObjectArg, seed: RequiredIntArg
+) -> dict[str, Any]:
+    """Start authoring a dataset: get a partially-filled skeleton to complete.
+
+    Returns `skeleton_id`, the ordered section `manifest`, the partially-filled
+    `skeleton` document, and `instructions` for filling it. Fill the sections in
+    manifest order with `dataset_fill_part`, then call `dataset_submit`.
+
+    `labels` and `seed` are fixed by this call and are not fillable sections. A
+    label outside the blueprint's vocabulary cannot be repaired by re-filling,
+    so check `label_vocabulary` first. Calling this again with identical
+    arguments returns the same skeleton, with its filled sections intact.
+    """
+    args = ArgReader()
+    agent = args.text("agent_id", agent_id)
+    at = args.text("version", version)
+    dimensions = args.required_labels("labels", labels)
+    number = args.integer("seed", seed)
+    if args.errors:
+        return reply(failure(args.errors))
+    return reply(skeletons.skeleton(bound(), agent, at, dimensions, number))
+
+
+@mcp.tool()
+def dataset_fill_part(skeleton_id: TextArg, section: TextArg, content: ObjectArg) -> dict[str, Any]:
+    """Fill one section of a skeleton. Returns which sections are filled and which remain.
+
+    `section` is one of the manifest's ids, and may not be filled before every
+    earlier one is (SK-002). `content` is a fragment of the dataset document: an
+    object whose keys are the section's own top-level fields, as its manifest
+    entry says. Re-filling an already-filled section is allowed and replaces it,
+    which is how a rejected submit is repaired one part at a time.
+    """
+    args = ArgReader()
+    wanted = args.text("skeleton_id", skeleton_id)
+    part = args.text("section", section)
+    document = args.mapping("content", content)
+    if args.errors:
+        return reply(failure(args.errors))
+    return reply(skeletons.fill_part(bound(), wanted, part, document))
+
+
+@mcp.tool()
+def dataset_submit(skeleton_id: TextArg) -> dict[str, Any]:
+    """Submit a filled skeleton: validate every DS-* rule, then store the dataset.
+
+    Returns the stored dataset, or every finding against it. Each error carries
+    a rule id, an RFC 6901 pointer into the assembled document, and the section
+    to re-fill. An unfilled required section is SK-004, and a skeleton becomes
+    exactly one dataset (SK-005).
+    """
+    args = ArgReader()
+    wanted = args.text("skeleton_id", skeleton_id)
+    if args.errors:
+        return reply(failure(args.errors))
+    return reply(skeletons.submit(bound(), wanted))
