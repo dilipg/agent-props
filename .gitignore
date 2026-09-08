@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / web
+node_modules/
+web/dist/
+client/typescript/dist/
+
+# Local stores and scratch
+*.sqlite
+*.sqlite3
+*.db
+.env
+.env.local
+
+# Tooling scratch
+.worktrees/
+.superpowers/
+.DS_Store
