@@ -20,12 +20,11 @@ visible decision rather than a convenience.
 """
 
 from collections.abc import Mapping
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 __all__ = ["NullResolver", "Resolver"]
 
 
-@runtime_checkable
 class Resolver(Protocol):
     """Read-only existence lookups the catalogue needs (ruling R-11)."""
 

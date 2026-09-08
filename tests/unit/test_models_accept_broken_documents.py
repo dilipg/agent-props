@@ -137,6 +137,20 @@ def test_the_corpus_manifest_is_not_empty() -> None:
     assert len(CASES) >= 28, f"expected at least the shipped corpus, found {len(CASES)} cases"
 
 
+def test_the_hand_written_tables_are_not_empty() -> None:
+    """The tables are the only cover for their second spellings, so pin them.
+
+    `test_ruling_r04_ids_are_all_covered` stays green if both tables are
+    emptied, because the corpus now reaches all eleven R-04 ids on its own - and
+    their parametrised tests would then collect zero cases and pass silently.
+    What would be lost is the spellings the corpus has no reason to duplicate: a
+    400-character title, `max_iterations: -1`, `seed: true`, `pool: 0`.
+    """
+    assert len(EXTRA_PARSE_CASES) >= 6, "EXTRA_PARSE_CASES has lost entries"
+    assert len(STRICT_BY_DESIGN_CASES) >= 6, "STRICT_BY_DESIGN_CASES has lost entries"
+    assert {rule for rule, _, _ in STRICT_BY_DESIGN_CASES} == {"DS-020", "BP-008", "BP-017"}
+
+
 @pytest.mark.parametrize(
     ("case_id", "case"), PARSING_CASES, ids=[case_id for case_id, _ in PARSING_CASES]
 )

@@ -15,6 +15,10 @@ cannot rot quietly:
     to be justified by a raw-text case, so an exemption is never a silent gap
     (ruling R-20).
 
+There is a second, narrower exemption shape for a rule *half* that no exact-set
+case can isolate: :data:`RULE_HALF_EXEMPTIONS` names the unit test that covers
+the half, and a test asserts that test still exists (ruling R-31).
+
 Scope is a parameter, not a constant (ruling R-12). At M2 the registry holds
 ``BP-*`` and ``DS-*``; ``SK-*`` is documented and unimplemented until M5, which
 widens :data:`IMPLEMENTED_PREFIXES` by one entry. ``RT-E*`` never enters: those
@@ -23,6 +27,7 @@ are `fetch_step` response codes, and section 3.4 is not part of the registry.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from typing import Final
 
@@ -51,6 +56,47 @@ MUTATION_UNREACHABLE: Final[dict[str, str]] = {
         "detected at the tool boundary via json.loads(object_pairs_hook=...)"
     ),
 }
+
+#: Rule *halves* that no exact-set corpus case can isolate, each naming the unit
+#: test that covers it. Ruling R-31.
+#:
+#: This is a different shape from :data:`MUTATION_UNREACHABLE`, and it has to
+#: be: the rules here **do** have corpus cases, for their other half, so
+#: registering one in the whole-rule map would trip
+#: :func:`test_no_exemption_is_stale` and the exemption would be a lie. Keyed by
+#: ``(rule, half)`` and valued by the *name* of the covering test, so that
+#: deleting that test fails :func:`test_every_rule_half_exemption_names_a_test_that_exists`
+#: rather than silently dropping the only coverage the half has.
+#:
+#: BP-006's inbound-edge half is the only entry, and it is unreachable
+#: structurally rather than incidentally: any blueprint with an edge into
+#: ``entry_node`` must also carry either a cycle (BP-018) or a predecessor
+#: unreachable from the entry (BP-005), so a mutation always reports a second
+#: id. R-31 therefore asks for a *membership* test, not an exact-set case.
+RULE_HALF_EXEMPTIONS: Final[dict[tuple[str, str], str]] = {
+    ("BP-006", "inbound-edge"): "test_bp_006_reports_an_inbound_edge_into_the_entry_node",
+}
+
+#: Where :data:`RULE_HALF_EXEMPTIONS`' covering tests are looked for.
+UNIT_TEST_DIR: Final[Path] = Path(__file__).parent
+
+
+def module_level_test_names() -> set[str]:
+    """Every module-level function defined in `tests/unit/*.py`, by AST.
+
+    Parsed rather than imported: a name is checked against the source, so a
+    test that exists but is skipped, renamed or commented out is all visible,
+    and no import order matters.
+    """
+    names: set[str] = set()
+    for path in sorted(UNIT_TEST_DIR.glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        names.update(
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        )
+    return names
 
 
 def in_scope(rule: str) -> bool:
@@ -93,6 +139,50 @@ def test_no_exemption_is_stale() -> None:
     mutation_covered = {rule for case in CASES for rule in case["expect"]}
     stale = mutation_covered & set(MUTATION_UNREACHABLE)
     assert not stale, f"these rules are exempted but reachable by mutation after all: {stale}"
+
+
+def test_every_rule_half_exemption_names_a_test_that_exists() -> None:
+    """Ruling R-31: a rule-half exemption is only as good as the test it names.
+
+    This is the assertion that gives the exemption teeth. Before it, the
+    exemption for BP-006's inbound-edge half was prose in `manifest.json` and
+    `DECISIONS.md` that protected nothing: R-31 recorded that a unit test
+    covered the half, no such test existed, and a version of `bp_006` that
+    never reported the inbound case would have passed the whole suite.
+    """
+    defined = module_level_test_names()
+    missing = {
+        f"{rule} ({half}) -> {test_name}"
+        for (rule, half), test_name in RULE_HALF_EXEMPTIONS.items()
+        if test_name not in defined
+    }
+    assert not missing, (
+        f"a rule-half exemption names a test that does not exist in {UNIT_TEST_DIR}: "
+        f"{sorted(missing)}. Restore the test or drop the exemption - the half has no other "
+        "coverage."
+    )
+
+
+def test_every_rule_half_exemption_names_a_registered_rule() -> None:
+    unknown = {rule for rule, _ in RULE_HALF_EXEMPTIONS if rule not in RULE_REGISTRY}
+    assert not unknown, f"rule-half exemptions name unregistered rules: {sorted(unknown)}"
+
+
+def test_a_rule_half_exemption_is_not_a_whole_rule_exemption() -> None:
+    """The two exemption maps must stay distinct, or one of them is wrong.
+
+    A rule with a *half* exemption still has a corpus case, for its other half -
+    which is exactly why it cannot live in `MUTATION_UNREACHABLE`, where
+    `test_no_exemption_is_stale` would reject it.
+    """
+    for rule, _ in RULE_HALF_EXEMPTIONS:
+        assert rule in COVERED_RULE_IDS, (
+            f"{rule} has a rule-half exemption but no corpus case at all; it belongs in "
+            "MUTATION_UNREACHABLE instead"
+        )
+        assert rule not in MUTATION_UNREACHABLE, (
+            f"{rule} is exempted twice, as a whole rule and as a half"
+        )
 
 
 def test_the_catalogue_parser_reads_the_document() -> None:

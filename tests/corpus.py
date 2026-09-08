@@ -112,16 +112,34 @@ def read(document: Any, pointer: str) -> Any:
     return container[key]
 
 
+def exists(container: Any, key: str | int) -> bool:
+    """Whether ``key`` addresses something that is already there."""
+    if isinstance(container, list):
+        return isinstance(key, int) and 0 <= key < len(container)
+    return key in container
+
+
 def apply_operation(document: Any, operation: Mapping[str, Any]) -> None:
     """Apply one RFC 6902 operation in place.
 
     The four operations the manifest uses - ``add``, ``remove``, ``replace``,
     ``copy`` - and no more. A fifth would be a case that could have been written
     with these.
+
+    ``replace`` asserts the target exists, as RFC 6902 requires. Without that,
+    a ``replace`` whose path had drifted out of the fixture would silently
+    become an ``add``: the exact-set gate catches that in almost every case,
+    but not in one whose violation *is* an extra key, which would then pass for
+    entirely the wrong reason.
     """
     op = operation["op"]
     value = read(document, operation["from"]) if op == "copy" else operation.get("value")
     container, key = resolve(document, operation["path"])
+    if op in {"remove", "replace"} and not exists(container, key):
+        raise AssertionError(
+            f"{op} targets {operation['path']!r}, which does not exist in the base fixture - "
+            "the manifest path has drifted"
+        )
     if op == "remove":
         del container[key]
     elif op == "add" and isinstance(container, list):
@@ -185,7 +203,3 @@ RAW_TEXT_CASE_IDS: list[str] = [case["id"] for case in RAW_TEXT_CASES]
 COVERED_RULE_IDS: frozenset[str] = frozenset(
     rule for case in CASES + RAW_TEXT_CASES for rule in case["expect"]
 )
-
-#: Cases that must validate clean. `expect: []` is how the manifest pins a
-#: deliberate skip - ruling R-07's fault fixture is the first of them.
-VALID_CASES: list[dict[str, Any]] = [case for case in CASES if not case["expect"]]

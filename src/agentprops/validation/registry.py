@@ -48,8 +48,6 @@ from agentprops.validation import timeline as tl
 from agentprops.validation.context import WARNING_RULES
 
 __all__ = [
-    "BLUEPRINT_RULE_IDS",
-    "DATASET_RULE_IDS",
     "RULE_REGISTRY",
     "TARGET_BLUEPRINT",
     "TARGET_DATASET",
@@ -149,11 +147,4 @@ RULE_REGISTRY: Final[Mapping[str, RuleSpec]] = dict(
         _spec("DS-032", TARGET_DATASET, ds.ds_032),
         _spec("DS-033", TARGET_DATASET, ds.ds_033),
     ]
-)
-
-BLUEPRINT_RULE_IDS: Final[tuple[str, ...]] = tuple(
-    rule for rule, spec in RULE_REGISTRY.items() if spec.target == TARGET_BLUEPRINT
-)
-DATASET_RULE_IDS: Final[tuple[str, ...]] = tuple(
-    rule for rule, spec in RULE_REGISTRY.items() if spec.target == TARGET_DATASET
 )
