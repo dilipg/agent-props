@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, StrictInt
 
 from agentprops.models.base import StrictModel
 from agentprops.models.errors import Warning
@@ -42,7 +42,7 @@ class RunPin(StrictModel):
     """
 
     dataset_id: UUID
-    dataset_version: int
+    dataset_version: StrictInt
     blueprint_version: str
 
 
@@ -55,7 +55,7 @@ class PathStep(StrictModel):
     """
 
     node_id: str
-    iteration: int
+    iteration: StrictInt
     at: datetime
 
 
@@ -74,7 +74,7 @@ class StepRecord(StrictModel):
     """
 
     node_id: str
-    iteration: int
+    iteration: StrictInt
 
     served: dict[str, Any]
     """The fixture actually handed over. Needed for evidence; the dataset
@@ -85,7 +85,7 @@ class StepRecord(StrictModel):
     then."""
 
     recorded_at: datetime | None = None
-    seq: int | None = None
+    seq: StrictInt | None = None
     """Traversal order, which reconstructs the path."""
 
     fetched_at: datetime | None = None
@@ -151,8 +151,8 @@ class RunQuery(StrictModel):
     the parameter only as ``model?``; the model *name* is the only part of
     :class:`ModelInfo` worth filtering a run list on."""
 
-    limit: int | None = None
-    offset: int | None = None
+    limit: StrictInt | None = None
+    offset: StrictInt | None = None
 
 
 class RunSummary(StrictModel):
@@ -166,7 +166,7 @@ class RunSummary(StrictModel):
     id: str
     agent_id: str
     dataset_id: UUID
-    dataset_ver: int
+    dataset_ver: StrictInt
     bp_version: str
     run_class: str
     model: ModelInfo | None = None

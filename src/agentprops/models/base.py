@@ -31,6 +31,30 @@ Nothing here constrains a *value*. Per ruling R-04 the models carry fields and
 the validation catalogue enforces constraints, so no model in this package
 declares ``min_length``, ``max_length``, ``pattern``, ``ge``/``gt``, a
 ``Literal`` enum, or a cross-field validator.
+
+Strict numbers and booleans (ruling R-23)
+-----------------------------------------
+
+Every ``int`` and ``bool`` field in this package is spelled ``StrictInt`` or
+``StrictBool``, never bare ``int``/``bool``. That is a *coercion* policy, not a
+value constraint, and it exists because Pydantic's lax mode silently rewrites
+values: ``seed: "42"`` parses as ``42`` and ``seed: true`` parses as ``1``, so
+the document parses and then fails R-08's round-trip criterion - strictly worse
+than either accepting or rejecting it. Verified under strict typing,
+``"42"``, ``true``, ``3.7`` and ``3.0`` all raise ``int_type``, and ``"no"``
+and ``0`` raise ``bool_type``.
+
+``strict`` is deliberately *not* set on the model config, which would apply to
+every field: in strict mode a ``datetime`` field accepts only ``datetime``
+objects and a ``UUID`` field only ``UUID`` objects, so a JSON document would
+stop parsing entirely. It is applied per field, through the annotation.
+
+This does not take a check away from the catalogue. Ruling R-23 settles that
+the validator operates on the **raw document** - the ``dict`` off
+``json.loads`` - and that models are constructed only after validation passes.
+So DS-020 ("``seed`` is an integer") and BP-008's "is an integer" half are
+implemented against the raw dict at M2 and get real corpus cases; the strict
+annotations here are the second, defence-in-depth layer R-23 asks for.
 """
 
 from pydantic import BaseModel, ConfigDict

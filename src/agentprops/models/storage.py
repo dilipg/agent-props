@@ -11,6 +11,8 @@ in the domain, so it lives here. The ``Store`` Protocol itself is M3's, in
 `storage/base.py`; only its data shapes are M1's.
 """
 
+from pydantic import StrictBool, StrictInt
+
 from agentprops.models.base import StrictModel
 
 __all__ = ["StoreCounts", "StoreHealth"]
@@ -24,9 +26,9 @@ class StoreCounts(StrictModel):
     the thing that hides archives.
     """
 
-    blueprints: int
-    datasets: int
-    runs: int
+    blueprints: StrictInt
+    datasets: StrictInt
+    runs: StrictInt
 
 
 class StoreHealth(StrictModel):
@@ -40,5 +42,5 @@ class StoreHealth(StrictModel):
     backend: str
     """``sqlite``, ``postgres`` or ``mongo``."""
 
-    healthy: bool
+    healthy: StrictBool
     counts: StoreCounts

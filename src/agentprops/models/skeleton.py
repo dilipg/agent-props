@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Final
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, StrictBool
 
 from agentprops.models.base import StrictModel
 
@@ -54,7 +54,7 @@ class Section(StrictModel):
     id: str
     """One of :data:`SECTION_IDS`."""
 
-    required: bool
+    required: StrictBool
     """SK-004: ``dataset_submit`` needs every required section filled."""
 
     pointers: list[str]

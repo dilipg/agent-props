@@ -15,7 +15,7 @@ where the validator must return a rule id.
 
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, StrictBool, StrictInt
 
 from agentprops.models.base import StrictModel
 from agentprops.models.labels import LabelSchema
@@ -72,14 +72,24 @@ class Node(StrictModel):
     """Draft 2020-12 JSON Schema; may ``$ref`` an entity. BP-011. Edge
     conditions are checked against this schema by BP-010."""
 
-    pool: bool
+    pool: StrictBool
     """Opt in to an independent fixture pool instead of chain position.
-    BP-017 requires ``True`` when ``kind == "loop"``."""
+    BP-017 requires ``True`` when ``kind == "loop"``.
 
-    max_iterations: int | None = None
+    Required, and ``StrictBool`` per ruling R-23, so a BP-017 corpus case must
+    replace the value (``{"op": "replace", "path": "/nodes/3/pool", "value":
+    false}``, which is what the shipped case does) and must never remove the
+    key or set it to ``0``."""
+
+    max_iterations: StrictInt | None = None
     """Required by BP-008 when ``kind == "loop"``, and it caps pool length
     (DS-023). It is *not* a runtime gate: ruling R-03 deletes RT-E05, so an
-    agent looping past the pool gets a ``pool_exhausted`` warning."""
+    agent looping past the pool gets a ``pool_exhausted`` warning.
+
+    ``StrictInt`` per ruling R-23, and still no ``gt=0``: BP-008's
+    "greater than 0" half is the catalogue's, so its corpus case must use
+    ``0`` or ``-1``. BP-008's "is an integer" half is enforced both here and by
+    the catalogue against the raw document."""
 
     notes: str | None = None
     """Narrative hints for the generating LLM. BP-019 warns when absent."""

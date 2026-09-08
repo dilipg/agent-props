@@ -26,7 +26,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, StrictBool, StrictInt
 
 from agentprops.models.base import StrictModel
 from agentprops.models.blueprint import BlueprintRef
@@ -152,7 +152,7 @@ class FaultSpec(StrictModel):
     """``error``, ``timeout`` or ``malformed``. DS-022 owns the vocabulary."""
 
     code: str | None = None
-    after_ms: int | None = None
+    after_ms: StrictInt | None = None
 
 
 class NodeFixture(StrictModel):
@@ -177,7 +177,7 @@ class NodeFixture(StrictModel):
     """``entity_id`` for the base state, ``entity_id@revision_id`` for a
     revised state. DS-006 resolves them, DS-009 the revision half."""
 
-    latency_hint_ms: int | None = None
+    latency_hint_ms: StrictInt | None = None
     fault: FaultSpec | None = None
 
 
@@ -189,7 +189,7 @@ class NodeExpectation(StrictModel):
     value type. DS-016 checks that every key names an existing node.
     """
 
-    called: bool
+    called: StrictBool
     args_match: dict[str, Any] | None = None
     """JSONLogic against the arguments the agent passed. Declared intent - the
     service never evaluates it."""
@@ -235,15 +235,21 @@ class Dataset(StrictModel):
     """Derived deterministically from ``(seed, salt)`` by ``Seeded.uuid()``,
     never from ``uuid4()`` (ruling R-10)."""
 
-    version: int
+    version: StrictInt
     """Monotonic, bumped on every edit. Copy-on-write."""
 
-    archived: bool
+    archived: StrictBool
     blueprint: BlueprintRef
 
-    seed: int
-    """DS-020. A plain ``int``: that is the base JSON type ruling R-04 asks
-    for, and no narrower constraint belongs here."""
+    seed: StrictInt
+    """An integer, with no narrower constraint - ruling R-04 asks for the base
+    JSON type and nothing more.
+
+    ``StrictInt`` rather than ``int`` per ruling R-23: lax ``int`` rewrites
+    ``"42"`` to ``42`` and ``true`` to ``1``, producing a document that parses
+    and then fails the round-trip criterion. DS-020 still owns the check, and
+    still fires, because R-23 runs the validator against the raw ``dict``
+    before any model is constructed."""
 
     provenance: Provenance
 
@@ -286,7 +292,7 @@ class DatasetSummary(StrictModel):
     """
 
     id: UUID
-    version: int
+    version: StrictInt
     title: str
     intent: str
     labels: Labels
@@ -297,7 +303,7 @@ class DatasetSummary(StrictModel):
     """The first 200 characters of ``narrative``. Never the whole narrative,
     and never any node fixture."""
 
-    archived: bool
+    archived: StrictBool
 
     created_at: datetime
     """The stored ``datasets.created_at`` column, populated from
@@ -326,5 +332,5 @@ class DatasetQuery(StrictModel):
     """Substring match over ``title`` and ``intent``."""
 
     blueprint_version: str | None = None
-    limit: int | None = None
-    offset: int | None = None
+    limit: StrictInt | None = None
+    offset: StrictInt | None = None

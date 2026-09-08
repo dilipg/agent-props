@@ -10,7 +10,7 @@ is non-empty (ruling R-13). Callers decide by looking at ``severity``.
 
 from typing import Any, Final
 
-from pydantic import Field
+from pydantic import Field, StrictBool
 
 from agentprops.models.base import StrictModel
 
@@ -115,13 +115,13 @@ class ErrorEnvelope(StrictModel):
     R-13).
     """
 
-    ok: bool
+    ok: StrictBool
     errors: list[RuleError] = Field(default_factory=list)
 
 
 class SuccessEnvelope(StrictModel):
     """The success envelope: ``{"ok": true, "data": {...}, "warnings": [...]}``."""
 
-    ok: bool
+    ok: StrictBool
     data: dict[str, Any] = Field(default_factory=dict)
     warnings: list[Warning] = Field(default_factory=list)
