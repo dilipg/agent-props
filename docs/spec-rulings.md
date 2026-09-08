@@ -1194,6 +1194,47 @@ all three as LF, so a raw-byte comparison would fail on every Windows checkout w
 nothing about drift. The implementer verified the guard still fails on real content drift,
 which is the property that matters.
 
+### R-50 — every integer that can reach a store column is bounded at the boundary, and a guard enforces it
+
+This is the **second** milestone in a row whose blocking finding is an unbounded integer
+escaping as an exception instead of an envelope. M4: `limit`, `offset` and `version`
+overflowed pysqlite and produced `is_error: true` with no envelope. M5: `seed` does the same
+through `dataset_skeleton`, on a path that also bypasses the very helper written to translate
+store failures into findings.
+
+M4's fix was correct and local — `service/limits.py` with `clamp()` and `storable()`. M5 then
+added a new integer entry point and did not use it. That is precisely the failure the M3
+implementer generalised and I adopted as build guidance: **the defect sits in the one place a
+working pattern was not reused.** Fixing `seed` alone would leave M6 to repeat it a third
+time, and M6 introduces `iteration` on `fetch_step` plus `limit`/`offset` on `run_find`.
+
+**Ruling.** Two parts, and the second is the one that matters.
+
+1. Bound `seed` where the DDL declares its width, report `AP-001` at `/seed`, and route the
+   first skeleton write through the same error-translation helper the re-fill write already
+   uses. Note the range check is the load-bearing half: that helper catches `StoreError` and
+   an `OverflowError` is not one.
+2. **Add a mechanical guard** asserting that every integer parameter reaching a store column
+   passes through `service/limits.py`. Enumerate the tool parameters typed as integers — from
+   the server's registered tools, in the shape of M4's coverage guard, not a hand-maintained
+   list — and assert each is range-checked before it reaches a store call. A guard that reads
+   a literal list of today's four integers is the defect it exists to prevent.
+
+**Why a guard rather than a third fix.** Two occurrences is a pattern; three would be a
+policy failure. Ground rule "structured errors, never exceptions, for anything a user could
+cause" is stated absolutely, and `tests/toolclient.py::invoke` asserts `is_error is False` on
+every call — so the suite already claims this invariant is unbreakable while a well-typed
+argument breaks it. Either the claim gets a guard or the claim should be weakened, and
+weakening it is not an option I am willing to take.
+
+**The M7 multiplier.** Postgres and Mongo each raise a *different* exception type for the same
+oversized integer. Left open, this hole is inherited by three adapters and by M7's conformance
+suite, which asserts identical results across backends — and would then be asserting identical
+*failures* of an invariant.
+
+**Cost if wrong.** A clamp rejects an integer some future caller wanted; the bound is the
+column's own width, so such a caller was going to get an error regardless — just a worse one.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
