@@ -1069,6 +1069,59 @@ a path overrides `extend-exclude` and reaches `docs/`.
 **Cost if wrong.** A guard that fails when someone deliberately edits the worked example —
 which is the intended behaviour, and the fix is to update both sides together.
 
+## Rulings that bind M5 (the skeleton pipeline)
+
+### R-45 — SK-004 owns an unfilled section; the DS-* provenance rules own a filled-but-bad one
+
+This settles finding F-27, deferred from the pre-flight scan: M5's acceptance criteria say a
+submit "missing provenance" is rejected with **DS-025**, but SK-004 covers
+"`dataset_submit` requires every required section to be filled", and nothing states which
+fires.
+
+**Ruling.** They describe two different failures and the distinction is what makes the error
+useful:
+
+- The provenance section was **never filled** → **SK-004**. There is no provenance document
+  to check, so no `DS-*` provenance rule can have an opinion about its contents. This follows
+  R-26's principle directly: when one violation removes the thing a second rule would check
+  against, the first owns the finding.
+- The provenance section **was filled** but its `title` is absent or blank → **DS-025**.
+  Likewise DS-026 for a trivial `intent` and DS-024 for partial labels.
+
+So M5's gate reads: a submit with **no** provenance section fires SK-004; a submit whose
+filled provenance carries a trivial intent fires DS-026; one carrying partial labels fires
+DS-024. The milestone's three named rule ids are all reachable — they just require the
+section to exist first, which the worked example's fill order guarantees.
+
+**SK-004's precedence is total over section contents.** If two required sections are unfilled,
+SK-004 reports once per unfilled section and no `DS-*` rule scoped to those sections fires at
+all. Otherwise a submit of an empty skeleton would report most of the catalogue.
+
+**Cost if wrong.** If the owner wants DS-025 for a missing section too, it is one predicate —
+but the error then says "title is missing" when the truth is "you never filled provenance",
+which is worse guidance for the LLM that R-14's repair loop depends on.
+
+### R-46 — `expansion/seeded.py` starts at M5, with `uuid()` only
+
+R-10 requires dataset and skeleton ids to come from `Seeded.uuid()`, but the repo layout
+assigns `expansion/` to "M7+" and M7 is where deterministic `dataset_expand` lands. M5 mints
+both kinds of id, so it needs the generator before its stated milestone.
+
+**Ruling.** M5 creates `expansion/seeded.py` with the `Seeded` class and **`uuid(salt)`
+only**. M7 fills in `int()`, `choice()`, `shuffled()` and `timestamp()` when expansion needs
+them. Do not build the rest at M5 — an unused generator method is untested surface, and M7's
+`hypothesis` property test is what will establish the determinism guarantees for the others.
+
+The `uuid()` implementation must satisfy R-10: derive an RFC 4122-shaped value from
+`(seed, salt)`, matching the shape of the golden fixture's hand-built deterministic id
+(`3f8c1a20-0000-4000-8000-000000000001`). Ground rule 9 applies from the first line — no
+`uuid4()`, no `random`, no clock inside it.
+
+**Cost if wrong.** If M7 wants a different derivation, ids minted before the change stop
+being reproducible from their seed. So pin the derivation with a test asserting a specific
+`(seed, salt)` yields a specific UUID, which is the guarantee M7's property test then
+generalises.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
