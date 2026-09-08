@@ -91,7 +91,7 @@ from agentprops.server import binding, mcp
 from agentprops.service import sqlite_context
 
 with binding(sqlite_context("agentprops.db")):
-    async with Client(mcp) as client:          # no subprocess, no transport
+    async with Client(mcp) as client:  # no subprocess, no transport
         result = await client.call_tool("store_status", {})
 ```
 
