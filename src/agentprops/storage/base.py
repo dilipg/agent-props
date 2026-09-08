@@ -1,0 +1,264 @@
+"""The ``Store`` Protocol every adapter implements, and the two guards it raises.
+
+`docs/contracts.md` section 6 is the authority for the shape below: the method
+names, the argument names and the return types are that section verbatim. The
+conformance suite in `tests/integration/` is written once against this Protocol
+and parameterised over backends, so an adapter is finished when it passes that
+suite - not when it looks finished.
+
+**There is no ``delete_*`` method, and there never will be.** Ground rule 6 is
+"no hard delete"; archive is a flag (:meth:`Store.set_archived`) and a dataset
+edit is copy-on-write (:meth:`Store.put_dataset`). Two tests in
+`tests/unit/test_storage_no_delete.py` hold the line: one asserts this Protocol
+declares no method whose name starts with ``delete``, the other reads the AST of
+every module in this package and asserts none of them issues a SQL ``DELETE``.
+
+What this Protocol deliberately does **not** do
+-----------------------------------------------
+
+**It does not validate** (ruling R-23). `service/` validates the raw document
+and constructs the model only after validation passes, so by the time a
+document reaches an adapter it is trusted - which is ground rule 7, "validation
+is strict at write time and absent at read time", read from the storage side.
+An adapter that re-ran the catalogue would be doing `service/`'s job with none
+of `service/`'s context.
+
+**It does not read a clock** (ruling R-09). A timestamp reaches a row from one
+of exactly four places: a DB column default, the client, authored content in
+the document, or ``Seeded.timestamp()``. Two consequences are visible in the
+DDL and are worth stating here because they look like oversights otherwise:
+``datasets.created_at`` is populated from ``provenance.created_at`` rather than
+``now()``, which is what makes ``find_datasets``'s ordering by
+``(created_at, id)`` survive an export/import cycle; and ``validated_at`` and
+the run timestamps arrive on the model from `service/`'s injected ``Clock``.
+
+**It does not mint an id** (ruling R-10). Dataset and skeleton ids come from
+``Seeded.uuid()`` at M5/M7. A store persists whatever id it is handed.
+
+**It does not gate** (ground rule 3). Nothing here returns a policy verdict, so
+nothing here refuses to serve because something looked wrong.
+
+Errors
+------
+
+Everything a *user* can cause is a structured error with a rule id, raised
+nowhere and returned by `service/`. The two exceptions defined here are
+therefore **programming-error guards**, in the same sense as the two ``raise``
+statements `validation/` allows: each one fires only where `service/` should
+already have returned a rule id, and each one refuses to destroy data rather
+than doing so quietly.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+from agentprops.models import (
+    Blueprint,
+    BlueprintSummary,
+    Dataset,
+    DatasetQuery,
+    DatasetSummary,
+    Run,
+    RunQuery,
+    RunSummary,
+    Skeleton,
+    StepRecord,
+    StoreHealth,
+)
+
+__all__ = [
+    "STATUSES",
+    "STATUS_DRAFT",
+    "STATUS_PUBLISHED",
+    "PublishedVersionImmutableError",
+    "RecordNotFoundError",
+    "Store",
+    "StoreError",
+]
+
+#: The two values ``blueprints.status`` may hold, per the DDL's ``CHECK``.
+#: BP-016 makes ``published`` immutable; a ``draft`` is freely overwritten.
+STATUS_DRAFT = "draft"
+STATUS_PUBLISHED = "published"
+STATUSES = (STATUS_DRAFT, STATUS_PUBLISHED)
+
+
+class StoreError(RuntimeError):
+    """A storage invariant was violated by the caller.
+
+    Not a user-facing error. Every subclass below marks a condition `service/`
+    is responsible for turning into a rule id before storage is reached, so
+    seeing one in a log means a write path skipped validation.
+    """
+
+
+class PublishedVersionImmutableError(StoreError):
+    """A differing document was written over a published ``{agent_id, version}``.
+
+    BP-016, enforced a second time at the last possible moment. `service/`
+    reports BP-016 as a rule id through the ``Resolver``; if a differing
+    document still arrives here, the alternative to raising is losing the
+    published version, so this raises.
+
+    Ruling R-29 is what makes the *identical* case different: a byte-identical
+    re-publish is a no-op success returning the stored blueprint, compared
+    canonically (``json.dumps(sort_keys=True)``) so key re-ordering is not a
+    difference. Only a differing document reaches this exception.
+    """
+
+
+class RecordNotFoundError(StoreError):
+    """A write named a row that does not exist.
+
+    Raised by the two methods whose return type leaves no room for "not found"
+    - :meth:`Store.set_archived`, which must return a ``DatasetSummary``, and
+    :meth:`Store.mark_skeleton_submitted`, which returns ``None``. The read
+    methods never raise this: they return ``None``, including for an id that is
+    not a well-formed UUID, because a malformed filter should produce no rows
+    rather than an exception.
+    """
+
+
+@runtime_checkable
+class Store(Protocol):
+    """Everything the service layer may ask of a storage backend.
+
+    ``runtime_checkable`` so a test can assert an adapter satisfies the shape at
+    runtime; the *signatures* are checked statically by ``mypy --strict``,
+    which is the half ``isinstance`` cannot see.
+    """
+
+    # blueprints
+
+    def put_blueprint(self, bp: Blueprint, publish: bool) -> Blueprint:
+        """Write a blueprint at ``{bp.agent_id, bp.version}``.
+
+        ``publish`` decides the stored ``status``, and the stored document's
+        ``status`` field is normalised to match it, so a row and the document
+        inside it can never disagree. Returns the blueprint as stored.
+
+        A ``draft`` is freely overwritten. A ``published`` version is immutable
+        (BP-016): an identical re-write is a no-op success returning the stored
+        blueprint (ruling R-29), and a differing one raises
+        :class:`PublishedVersionImmutableError`.
+        """
+        ...
+
+    def get_blueprint(self, agent_id: str, version: str | None) -> Blueprint | None:
+        """One blueprint, or ``None``.
+
+        With ``version``, that exact version whatever its status. Without it,
+        the latest *published* version - which is what ``blueprint_get``
+        documents ("Latest published when version omitted") and what a running
+        agent needs.
+        """
+        ...
+
+    def list_blueprints(self, status: str | None) -> list[BlueprintSummary]:
+        """Summaries, optionally filtered by status, in a deterministic order."""
+        ...
+
+    # datasets: copy-on-write, never mutate in place
+
+    def put_dataset(self, ds: Dataset) -> Dataset:
+        """Write a new version of ``ds.id`` and return it, version filled in.
+
+        The store allocates the version - ``max(version) + 1`` for that id, so
+        it is monotonic - and ``ds.version`` is ignored. Nothing is ever
+        overwritten: every earlier version stays independently readable by
+        :meth:`get_dataset`, which is what lets a run pinned to version 1 keep
+        reading version 1 for its whole life.
+        """
+        ...
+
+    def get_dataset(self, dataset_id: str, version: int | None) -> Dataset | None:
+        """One dataset version, or ``None``. The latest when ``version`` is omitted.
+
+        Returns archived datasets. That asymmetry with :meth:`find_datasets` is
+        deliberate: a run holding a pin must keep reading a dataset that has
+        since been archived.
+        """
+        ...
+
+    def find_datasets(self, q: DatasetQuery) -> list[DatasetSummary]:
+        """Discovery. One row per dataset id - its latest version - **excluding
+        archived**, ordered deterministically by ``(created_at, id)``.
+        """
+        ...
+
+    def set_archived(self, dataset_id: str, archived: bool) -> DatasetSummary:
+        """Flip the archive flag across every version of ``dataset_id``.
+
+        A flag, not a deletion, and not a new version: archiving must not
+        change what a pinned run reads. Raises :class:`RecordNotFoundError` if no
+        such dataset exists.
+        """
+        ...
+
+    # skeletons: partial fill state
+
+    def put_skeleton(self, sk: Skeleton) -> Skeleton:
+        """Write a skeleton, replacing any earlier state for the same id.
+
+        Re-filling a section is explicitly allowed (ruling R-06), so this is an
+        upsert rather than an append.
+        """
+        ...
+
+    def get_skeleton(self, skeleton_id: str) -> Skeleton | None:
+        """One skeleton, or ``None`` - including for a malformed id."""
+        ...
+
+    def mark_skeleton_submitted(self, skeleton_id: str, dataset_id: str) -> None:
+        """Record which dataset a skeleton became.
+
+        Raises :class:`RecordNotFoundError` for an unknown skeleton. Marking the
+        same dataset twice is a no-op; marking a *different* one raises, since
+        SK-005 (M5) owns the rule id and the alternative here is overwriting
+        lineage.
+        """
+        ...
+
+    # runs
+
+    def put_run(self, run: Run) -> Run:
+        """Write a run, keyed by its client-generated id, and return it as stored.
+
+        ``path`` has no column: it is reconstructed from ``run_steps`` in
+        ``seq`` order, because the ordered sequence of calls carrying a run id
+        *is* the traversal and an agent must not be able to declare a path it
+        did not take. Any ``steps`` carried on the model are written through
+        :meth:`upsert_step`, so they inherit its idempotency.
+        """
+        ...
+
+    def get_run(self, run_id: str) -> Run | None:
+        """One run with its steps and reconstructed path, or ``None``."""
+        ...
+
+    def find_runs(self, q: RunQuery) -> list[RunSummary]:
+        """Run summaries - the ``runs`` columns minus ``outcome`` (ruling R-05)."""
+        ...
+
+    def upsert_step(self, run_id: str, step: StepRecord) -> StepRecord:
+        """Record a served step. **Idempotent** on ``(run_id, node_id, iteration)``.
+
+        A second call with the same key is a no-op that returns the existing
+        record, which is what makes ``fetch_step`` idempotent at the storage
+        layer rather than in application code: a retry an hour later resolves
+        to the same fixture and the same ``seq``.
+
+        ``seq`` is allocated here - a per-run monotonic counter - because it is
+        an authoritative fact about serve order rather than caller data. Any
+        ``seq`` on the incoming model is ignored.
+        """
+        ...
+
+    def health(self) -> StoreHealth:
+        """Liveness plus row counts. Never raises, never gates.
+
+        ``counts.datasets`` **includes archived datasets** (ruling R-05): this
+        is a store-health number, not a discovery number.
+        """
+        ...
