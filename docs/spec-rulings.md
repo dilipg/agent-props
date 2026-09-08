@@ -1003,6 +1003,34 @@ paging parameter on a bounded response is complexity with no payoff.
 
 **Cost if wrong.** All three are single-value or single-parameter changes.
 
+### R-43 — the `AP-*` boundary-code family and the one-named-key `data` convention
+
+M4 made two additions to the record that no ruling authorised. Both are well-reasoned and
+both are already drift-guarded, but both bind M8's client and M9's web app, so they are
+ratified explicitly here rather than left standing as an implementer edit to the spec.
+
+**(a) `contracts.md` section 3.5, the `AP-*` boundary codes.** Ratified, and it fills a gap I
+left. R-12 scoped the catalogue-drift test to `{BP-*, DS-*, SK-*}`, which means the boundary
+genuinely produces errors that **no registry rule can own** — a malformed argument, an
+unknown id, an unparseable document. Section 1 already promises the envelope covers "a
+validation **or resolution** failure", so those errors were always in scope; they simply had
+no documented home and would otherwise have become ad-hoc strings invented per tool.
+
+A separate table, with a test asserting the codes are **disjoint** from the rule catalogue,
+is strictly better than either alternative: minting `DS-*` ids for conditions no dataset rule
+describes, or leaving each tool to improvise. R-42(a) ratified `AP-004`'s *behaviour*; this
+ratifies the family it belongs to.
+
+**(b) Section 1's one-named-key `data` convention.** Ratified. `SuccessEnvelope.data` is
+typed `dict[str, Any]`, so an array payload cannot sit there directly and every success
+payload goes under one named key. That is worth being an explicit convention rather than an
+accident of the type: M8's client and M9's web app both unwrap `data`, and a surface where
+some tools return a bare list and others a keyed object is one both of them would have to
+special-case per tool.
+
+**Cost if wrong.** Both are documentation of what the code already does, each with a guard
+test. Reversing either is a record edit plus one guard.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
