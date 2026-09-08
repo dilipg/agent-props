@@ -58,13 +58,29 @@ downstream of it, **or unreachable from it**". Downstream means a path exists; u
 means none does. The union is every possible pair, so a literal implementation rejects
 every `entity@revision` reference that can exist — and the golden fixture carries three.
 
-**Ruling.** Error when `after_node` is a descendant of the referencing node (reachable
-from it by following edges), or when the referencing node is not reachable from
-`after_node` at all. Equivalently: `after_node` must be an ancestor of the referencing
-node via **at least one** path. The "every path" reading would reject `assign_training`,
-which is reachable from `check_docs` without passing through `request_docs` on the
-`documents_complete == true` branch. PRD 5.6 point 4 supports "some path": the author
-declares what a run *may* observe, not what holds on every branch.
+**Ruling.** `after_node` must be an ancestor of the referencing node via **at least one**
+path. That is: DS-010 fires when the referencing node is **not reachable from
+`after_node`**. The "every path" reading would reject `assign_training`, which is reachable
+from `check_docs` without passing through `request_docs` on the `documents_complete == true`
+branch. PRD 5.6 point 4 supports "some path": the author declares what a run *may* observe,
+not what holds on every branch.
+
+**Corrected during M2** (this ruling was wrong as first written). The original text also
+said "error when `after_node` is a descendant of the referencing node", and called that
+equivalent to the ancestor formulation. **In a cyclic graph the two are not equivalent, and
+the golden blueprint is cyclic.** `request_docs → recheck_store → check_docs →
+request_docs`: `recheck_store` observes `store@after_docs`, whose `after_node` is
+`request_docs` — which is *also* a descendant of `recheck_store` through the loop. So the
+descendant clause rejects `priya-missing-docs.json`, the very fixture this ruling exists to
+keep passing. The clause is struck; the ancestor formulation above is the rule.
+
+Semantically the ancestor reading is also the right one: `recheck_store` runs after
+`request_docs` inside the loop, so the store state after documents were requested is
+exactly what it should observe.
+
+Reachability is **strict** — one or more edges. A node referencing a revision whose
+`after_node` is *itself* fires DS-010 unless a cycle returns to it, because a revision is
+the state produced *by* `after_node`, so that node's own fixture shows the pre-state.
 
 DS-010 is **skipped** when DS-009 has already reported an unknown revision for the same
 reference, so the DS-009 corpus case reports one id rather than two.
@@ -531,6 +547,124 @@ that only works when there is exactly one prose catalogue.
 
 **Cost if wrong.** Four small edits to a specification document, each individually
 revertible, with the register preserving why they were made.
+
+### R-26 — five more precedence overlaps, all ratified as implemented
+
+M2 found five overlaps beyond R-18's three. Each is implemented as a skip inside the
+lower-priority rule, so rules stay independent and order-free. All five are **ratified**:
+
+| Overlap | Owner | Why |
+|---|---|---|
+| BP-005 vs BP-006 when `entry_node` names no node | BP-006 | reachability from a nonexistent node is empty, so BP-005 would report *every* node on top of BP-006's single finding |
+| DS-004/DS-005 vs DS-003 on an unknown `nodes` key | DS-003 | there is no schema to validate against |
+| DS-010 vs DS-011 when `after_node` names no node | DS-011 | the same shape as R-02's DS-009 skip |
+| DS-019 vs DS-018 on a `pools` key that is not a pool node | DS-018 | same reasoning as DS-003 |
+| every blueprint-dependent DS rule vs DS-001 | DS-001 | nothing to check a fixture against; the DS-001 case must report one id, not twenty |
+
+Also ratified: **DS-019 skips the schema check on a faulted pool entry**, extending R-07's
+DS-004 reasoning. Without it a faulted pool fixture is unauthorable, since R-18 gives pools
+to DS-019 and DS-019's text does not mention `fault`.
+
+The general principle behind all of these, worth stating for the rules still to come: when
+one rule's violation removes the thing a second rule would check against, the first rule
+owns the finding and the second skips.
+
+**Cost if wrong.** Each is a skip condition in one predicate, and the exact-set gate makes
+a wrong choice fail loudly rather than silently.
+
+### R-27 — BP-011 also covers entity schemas
+
+M2 found a real hole: BP-011 covers `input_schema` and `output_schema`, BP-012 covers
+`outcome_schema`, and R-18 has BP-011 check syntax with `entity:` refs **stripped** — so
+`entities[*].schema` is never checked for being valid Draft 2020-12. A blueprint with a
+malformed entity schema publishes, and the first symptom is a confusing DS-004 finding at
+dataset time, one milestone away from the cause.
+
+**Ruling.** Extend BP-011 rather than adding a rule id: its row becomes "Every
+`input_schema`, `output_schema` and entity `schema` is valid Draft 2020-12 JSON Schema."
+Extending the existing owner keeps the registry and the corpus stable, and needs no new
+coverage case. Amend the `contracts.md` row (this authorises the catalogue edit) and widen
+the implementation.
+
+**Cost if wrong.** A blueprint that previously published now fails validation — which is
+the point, and it fails at the milestone that can explain why.
+
+### R-28 — DS-019 also covers a pool entry's `input`
+
+Same class of hole. R-18 gives every pool fixture to DS-019, whose text checks only `output`
+against `output_schema`; DS-005 covers `nodes` only. So a pool entry's `input` is validated
+by nothing. Neither golden pool entry has an `input`, so nothing is broken today — it is
+latent, and it will bite the first author who writes one.
+
+**Ruling.** Extend DS-019's row to "Every pool has at least one fixture, and each validates
+against the node's `output_schema`, and each `input`, when present, against its
+`input_schema`." This preserves R-18's one-owner principle rather than splitting pool
+entries between two rules.
+
+**Cost if wrong.** One predicate widens; no id changes.
+
+### R-29 — BP-016 is idempotent for a byte-identical re-publish
+
+`contracts.md` 3.1 says BP-016 rejects "any upsert against an existing published
+`{agent_id, version}`", which rejects even a re-publish of the identical document. M2
+implemented the literal text and flagged it.
+
+**Ruling.** BP-016 fires only when the submitted document **differs** from the stored
+published version. A byte-identical upsert is a no-op success.
+
+Two reasons. M7's `dataset_import` takes a bundle carrying "blueprint version plus
+datasets", so re-importing into a store that already holds that version identically would
+fail under the literal reading — import would not be idempotent, which defeats the
+promotion path the milestone exists to build. And a CI pipeline that publishes on every run
+is the normal case, not an abuse.
+
+Immutability is fully preserved: nothing changes, because the documents are identical.
+Comparison uses the same canonical form DS-008 uses (`json.dumps(sort_keys=True)`), so key
+re-ordering is not a difference.
+
+**Cost if wrong.** Revert to strict rejection — one comparison removed. The `Resolver`
+already returns the stored document, so the machinery is in place either way.
+
+### R-30 — `entity_refs` is partly declarative, and the golden fixtures require that
+
+M2 defined DS-008's mechanism as: for every fixture listing entity `E` in `entity_refs`,
+walk the node's schemas to each `{"$ref": "entity:E"}`, read the value at the matching
+location in `input`/`output`, and compare against `entities.E.base`. Consequence: a fixture
+that references an entity **without embedding a copy of its state** contributes no
+comparison site and cannot drift.
+
+**Ruling.** Correct as implemented, and **required** by the fixtures. Both golden datasets
+depend on it: `verify_compliance` declares the `store` ref but takes a `store_id` and
+returns `{compliant, findings}`, embedding no store state. A rule saying "a fixture that
+declares an entity ref must embed that entity's state" would reject both golden datasets, so
+the looser reading is what the spec's own examples intend.
+
+The residue is real and worth naming: `entity_refs` is partly an authorial assertion — "this
+step is about the store" — that no rule can contradict. That is acceptable for a field whose
+purpose is documentation and timeline anchoring rather than enforcement.
+
+Ratified alongside it: "byte-identical" in DS-008 means **canonically** identical
+(`json.dumps(sort_keys=True)`), so re-ordered keys are not drift, while `1` vs `1.0` and
+`true` vs `1` are. Literal bytes would make key order part of the rule; Python's `==` would
+let a fixture change JSON type and still pass a rule whose whole subject is identity.
+
+**Cost if wrong.** Adding the stricter rule later invalidates both golden fixtures and needs
+an owner decision on them.
+
+### R-31 — BP-006's inbound-edge half gets a named exemption
+
+Every node in the golden blueprint is reachable from `receive_request`, so any mutation
+adding an edge *into* the entry node also creates a cycle without a loop node and BP-018
+fires alongside BP-006 — breaking the exact-set assertion. The corpus case therefore
+exercises BP-006's existence half, and the inbound half is covered by a unit test.
+
+**Ruling.** Accept, with a **named** exemption in the coverage gate, exactly as R-20 handles
+DS-013. A second base blueprint would reach it and costs more than the coverage is worth.
+The principle: a rule half that no mutation of the single base fixture can isolate gets a
+unit test plus a named exemption — never a silent gap.
+
+**Cost if wrong.** If a second base blueprint arrives for other reasons, fold the case in
+and drop the exemption.
 
 ## Rulings that bind later milestones
 
