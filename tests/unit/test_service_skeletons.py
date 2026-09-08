@@ -9,12 +9,17 @@ Three groups are here because of a specific instruction rather than for
 completeness:
 
 **The losing side of every concurrency claim.** ``skeleton_id`` is
-caller-supplied on two of the three tools and the partial state is mutable
-across calls, so whatever this milestone claims about concurrency needs a test
-of the *bad* interleaving, not a docstring. Three milestones running, the
-blocking review finding sat behind a confident record entry with no test behind
-the residue. So: a double submit, a fill after a submit, and two interleaved
-fills - the last of which **loses data**, and says so.
+caller-supplied on two of the three tools and the partial state is mutable, so whatever this
+milestone claims about concurrency needs a test of the *bad* interleaving, not a
+docstring. Three milestones running, the blocking review finding sat behind a
+confident record entry with no test behind the residue.
+
+Both interleavings are here and they now end differently, which is rulings R-47
+and R-48 rather than an inconsistency. A concurrent **submit** is closed:
+``mark_skeleton_submitted`` is a compare-and-set, so the loser gets SK-005 and
+writes nothing. A concurrent **fill** of a different section still loses one,
+because R-48 accepts that: a lost fill is visible in the next response's
+``remaining`` and self-correcting, while a lost submit was silent.
 
 **Both ends of every boundary the record reasons about.** ``_claim``'s
 generation walk has three cases (free, unsubmitted, submitted) and an
@@ -369,14 +374,20 @@ def test_running_out_of_generations_is_reported_rather_than_overwriting(
     ``put_skeleton`` over a **submitted** skeleton's row and destroy the
     ``submitted_as`` lineage nothing else records. The pointer is at ``/seed``
     because that is the argument the caller changes to get served.
+
+    The code is ``AP-006``, added by ruling R-49(b). It was ``AP-001`` in the
+    first implementation, which told the caller to fix an argument that is
+    perfectly well formed; the two codes now split "this value is wrong" from
+    "this value is right and its id space is full".
     """
     monkeypatch.setattr(skeletons, "SKELETON_GENERATIONS", 1)
     first = filled(context, dataset_document)
     skeletons.submit(context, first)
 
     reply = skeletons.skeleton(context, AGENT, VERSION, LABELS, SEED)
-    assert rules(reply) == ["AP-001"]
+    assert rules(reply) == ["AP-006"]
     assert findings(reply)[0].pointer == "/seed"
+    assert findings(reply)[0].context["generations"] == 1
     stored = context.store.get_skeleton(first)
     assert stored is not None and stored.submitted_as is not None
 
@@ -456,6 +467,31 @@ def test_a_content_key_the_section_does_not_own_is_ap_001(
     assert rules(reply) == ["AP-001"]
     assert findings(reply)[0].pointer == "/content/narrative"
     assert findings(reply)[0].context["unknown_key"] == "narrative"
+
+
+def test_content_with_no_owned_field_is_ap_001(
+    context: ServiceContext, published: BlueprintView
+) -> None:
+    """An empty object marked a section filled while contributing nothing.
+
+    And the submit then said nothing about it either: with ``entities`` and
+    ``nodes.core`` both filled as ``{}``, the submit reported eight DS-002
+    findings scoped to ``nodes.core`` and not one word about the empty
+    ``entities`` - because SK-004 only looks at whether a section is *in*
+    ``parts``.
+
+    This is a different question from ruling R-45's, which is about an
+    individually absent **field**: ``{"provenance": {...}}`` without
+    ``narrative`` is still accepted, and DS-021 still reports it at submit. The
+    test below that one pins that, and the two together are the line.
+    """
+    skeleton_id = start(context)
+    reply = skeletons.fill_part(context, skeleton_id, "provenance", {})
+    assert rules(reply) == ["AP-001"]
+    assert findings(reply)[0].pointer == "/content"
+    assert findings(reply)[0].context["owned"] == ["provenance", "narrative"]
+    stored = context.store.get_skeleton(skeleton_id)
+    assert stored is not None and stored.parts == {}, "an empty fill marks nothing filled"
 
 
 def test_an_owned_field_of_the_wrong_json_type_is_ap_001(
@@ -598,6 +634,48 @@ def test_a_never_filled_provenance_section_is_sk_004_not_ds_025(
     assert set(rules(reply)) == {"SK-004"}
     assert [finding.section for finding in findings(reply)] == list(SECTIONS)
     assert not any(finding.rule.startswith("DS-") for finding in findings(reply))
+
+
+def test_sk_004_suppresses_only_the_sections_that_are_unfilled(
+    context: ServiceContext, published: BlueprintView, dataset_document: dict[str, Any]
+) -> None:
+    """Ruling R-45, read exactly: *those* sections, not every section.
+
+    Four of five sections filled, with a blank ``provenance.title`` in one of
+    them. The submit reports SK-004 for the unfilled ``expected`` **and** DS-025
+    for the filled ``provenance``, in one response.
+
+    The first implementation returned before the catalogue ran at all, so this
+    reported SK-004 alone and the author paid a whole extra round trip to
+    discover the second problem - in the repair loop PRD 6 flow B is built
+    around. Harmless in the sense that nothing was wrong with the data; costly
+    in the sense that a rejection is supposed to tell you everything it knows.
+
+    Still suppressed: every finding scoped to ``expected`` itself - DS-014,
+    DS-017 and DS-033 all have opinions about a section that was never filled,
+    and none of them is what the author needs to read.
+    """
+    parts = sections_of(dataset_document)
+    provenance = {**parts["provenance"]["provenance"], "title": "   "}
+    skeleton_id = start(context)
+    for section_id in ("provenance", "entities", "nodes.core", "nodes.branches"):
+        content = (
+            {"provenance": provenance, "narrative": parts["provenance"]["narrative"]}
+            if section_id == "provenance"
+            else parts[section_id]
+        )
+        assert data(skeletons.fill_part(context, skeleton_id, section_id, content))["fill"]
+
+    reply = skeletons.submit(context, skeleton_id)
+    reported = findings(reply)
+    assert {finding.rule for finding in reported} == {"SK-004", "DS-025"}
+    assert [(finding.rule, finding.section) for finding in reported] == [
+        ("SK-004", "expected"),
+        ("DS-025", "provenance"),
+    ]
+    assert not any(
+        finding.section == "expected" and finding.rule.startswith("DS-") for finding in reported
+    ), "a DS-* finding scoped to the unfilled section is still suppressed (ruling R-45)"
 
 
 @pytest.mark.parametrize("title", ["   ", None], ids=["blank", "absent"])
@@ -803,9 +881,14 @@ def test_a_concurrent_fill_of_another_section_is_lost(
     This test *is* the claim. It replays the interleaving with two reads taken
     up front, which is what two concurrent calls do, and asserts the loss - so
     a future reader finds the behaviour stated as a fact instead of discovering
-    it. `DECISIONS.md` carries the remedy (a CAS on the Protocol) and the
-    trigger for building it; an authoring session is one caller filling one
-    skeleton in sequence, which is why it is not built now.
+    it.
+
+    **Ruling R-48 accepts this**, and the asymmetry with the submit above is
+    deliberate rather than an inconsistency: a lost fill is immediately
+    observable and self-correcting, because every ``dataset_fill_part`` response
+    carries ``remaining`` and R-06 permits re-filling a section, while a lost
+    submit was silent. The second assertion below is the recovery, which is why
+    accepting the loss is affordable.
     """
     skeleton_id = start(context)
     parts = sections_of(dataset_document)
@@ -825,37 +908,60 @@ def test_a_concurrent_fill_of_another_section_is_lost(
     stored = context.store.get_skeleton(skeleton_id)
     assert stored is not None
     assert set(stored.parts) == {"provenance", "nodes.core"}
-    assert "entities" not in stored.parts, "if this passes, a CAS has landed - update DECISIONS.md"
+    assert "entities" not in stored.parts, "the earlier writer's section is gone"
+
+    recovered = skeletons.fill_part(context, skeleton_id, "entities", parts["entities"])
+    assert data(recovered)["fill"]["remaining"] == ["nodes.branches", "expected"], (
+        "the response told the caller what was still outstanding, and re-filling fixed it "
+        "(ruling R-48's reason for accepting the loss)"
+    )
 
 
-def test_two_interleaved_submits_both_write_and_the_second_becomes_version_two(
-    context: ServiceContext, published: BlueprintView, dataset_document: dict[str, Any]
+def test_the_loser_of_two_interleaved_submits_gets_sk_005_and_writes_nothing(
+    context: ServiceContext,
+    published: BlueprintView,
+    dataset_document: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The losing side of the double-submit guard, and the honest limit of SK-005.
+    """Ruling R-47's compare-and-set, tested from the losing side.
 
-    Sequentially, a second submit is SK-005 and writes nothing - the test above
-    proves that. **Concurrently it is not closed**: both calls read
-    ``submitted_as`` as null before either writes, so both pass SK-005 and both
-    reach ``put_dataset``, which allocates version 2 for the loser. The dataset
-    id is derived from the skeleton, so ``mark_skeleton_submitted`` sees the same
-    id twice and its replay tolerance accepts it.
+    **This test inverted at the fix round**, and it is worth saying what it used
+    to assert: that both interleaved submits wrote, and the loser silently
+    became version 2 of the same dataset. It carried "if this changes, a CAS has
+    landed - update DECISIONS.md". A CAS has landed.
 
-    Reproduced with two service calls around one hand-held read, which is the
-    interleaving two processes produce. The remedy is a compare-and-set on the
-    skeleton - ``mark_skeleton_submitted`` dropping its replay tolerance, or a
-    ``claim_skeleton`` method - and it is a ``Store`` Protocol change three
-    adapters pay for, so it is recorded rather than smuggled into M5.
+    The interleaving is reproduced by giving the second submit a **stale read**
+    of the skeleton - the state it would have loaded before the first submit
+    claimed it - which is exactly what two processes produce and what makes the
+    SK-005 fast path in ``_load`` miss. The stale copy is served once, so
+    ``_lost_the_claim``'s re-read sees the truth and the finding names the
+    dataset id the winner claimed.
+
+    Three assertions, because the shape of the answer matters as much as the
+    rejection: the loser gets **SK-005**, the same rule id a sequential second
+    submit gets, rather than a boundary code it would have to learn; the
+    finding names the winner's dataset; and the dataset is still at version 1,
+    which is what catches a write that happened anyway.
     """
     skeleton_id = filled(context, dataset_document)
-    first = data(skeletons.submit(context, skeleton_id))["dataset"]
+    stale = context.store.get_skeleton(skeleton_id)
+    assert stale is not None and stale.submitted_as is None
 
-    stored = context.store.get_skeleton(skeleton_id)
-    assert stored is not None
-    context.store.put_skeleton(stored.model_copy(update={"submitted_as": None}))
+    winner = data(skeletons.submit(context, skeleton_id))["dataset"]
 
-    second = data(skeletons.submit(context, skeleton_id))["dataset"]
-    assert second["id"] == first["id"]
-    assert second["version"] == 2, "if this changes, a CAS has landed - update DECISIONS.md"
+    real = context.store.get_skeleton
+    pending = [stale]
+
+    def one_stale_read(wanted: str) -> Skeleton | None:
+        return pending.pop() if pending else real(wanted)
+
+    monkeypatch.setattr(context.store, "get_skeleton", one_stale_read)
+    loser = skeletons.submit(context, skeleton_id)
+
+    assert rules(loser) == ["SK-005"]
+    assert findings(loser)[0].context["submitted_as"] == winner["id"]
+    assert not pending, "the stale read was consumed, so the CAS is what refused this"
+    assert data(datasets.get(context, winner["id"], None))["dataset"]["version"] == 1
 
 
 def test_a_skeleton_row_carries_the_two_inputs_it_needs_at_submit(

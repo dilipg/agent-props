@@ -1,4 +1,4 @@
-"""The two envelopes, the five ``AP-*`` boundary codes, and the warning conversion.
+"""The two envelopes, the six ``AP-*`` boundary codes, and the warning conversion.
 
 The load-bearing test here is
 :func:`test_boundary_codes_are_disjoint_from_the_catalogue`. ``AP-*`` ids sit in
@@ -173,7 +173,7 @@ def test_boundary_codes_are_disjoint_from_the_catalogue() -> None:
 
 def test_the_boundary_codes_are_all_distinct_and_all_used() -> None:
     """Five constants, five values, and the set is the whole of them."""
-    assert len(BOUNDARY_CODES) == 5
+    assert len(BOUNDARY_CODES) == 6
     assert all(code.startswith("AP-") for code in BOUNDARY_CODES)
 
 

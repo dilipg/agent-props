@@ -699,7 +699,7 @@ def test_skeleton_round_trip_and_submission(
     assert written.seed == dataset.seed, "M5's seed column, for every adapter"
 
     store.put_dataset(dataset)
-    store.mark_skeleton_submitted(str(skeleton.id), str(dataset.id))
+    assert store.mark_skeleton_submitted(str(skeleton.id), str(dataset.id)) is True
     submitted = store.get_skeleton(str(skeleton.id))
     assert submitted is not None and submitted.submitted_as == dataset.id
 
@@ -747,37 +747,48 @@ def test_a_dotted_section_id_is_a_legal_parts_key(store: Store, skeleton: Skelet
     assert sorted(filled.parts) == ["nodes.branches", "nodes.core", "provenance"]
 
 
-def test_marking_the_same_dataset_twice_is_a_no_op(
-    store: Store, published: Blueprint, dataset: Dataset, skeleton: Skeleton
-) -> None:
-    store.put_skeleton(skeleton)
-    store.put_dataset(dataset)
-    store.mark_skeleton_submitted(str(skeleton.id), str(dataset.id))
-    store.mark_skeleton_submitted(str(skeleton.id), str(dataset.id))
-    stored = store.get_skeleton(str(skeleton.id))
-    assert stored is not None and stored.submitted_as == dataset.id
-
-
-def test_marking_a_different_dataset_is_refused(
+def test_claiming_a_skeleton_succeeds_once_and_only_once(
     store: Store, published: Blueprint, dataset: Dataset, other_dataset: Dataset, skeleton: Skeleton
 ) -> None:
-    """SK-005 is M5's rule; this is the guard that stops lineage being overwritten."""
+    """Ruling R-47: ``mark_skeleton_submitted`` is a compare-and-set.
+
+    **This test inverted at M5's fix round.** It used to pin a *replay
+    tolerance* - marking the same dataset twice was a no-op success, and only a
+    *different* dataset id raised. R-47 replaced that with a claim: the first
+    call wins and returns ``True``, and every later call returns ``False``,
+    whichever dataset id it names.
+
+    The tolerance was what left `dataset_submit` open under concurrency. Two
+    callers both read ``submitted_as`` as null, both passed SK-005, both wrote,
+    and the loser received a success envelope for a dataset version it did not
+    mean to create - the id being derived from the skeleton, so the second mark
+    looked exactly like a harmless replay. A duplicate row is not corruption; a
+    silent one is worse than an error.
+
+    Both the same-id and different-id repeats are asserted, because the point of
+    a CAS is that the *state*, not the argument, decides.
+    """
     store.put_skeleton(skeleton)
     store.put_dataset(dataset)
-    store.mark_skeleton_submitted(str(skeleton.id), str(dataset.id))
-    with pytest.raises(StoreError):
-        store.mark_skeleton_submitted(str(skeleton.id), str(other_dataset.id))
+    store.put_dataset(other_dataset)
+
+    assert store.mark_skeleton_submitted(str(skeleton.id), str(dataset.id)) is True
+    assert store.mark_skeleton_submitted(str(skeleton.id), str(dataset.id)) is False
+    assert store.mark_skeleton_submitted(str(skeleton.id), str(other_dataset.id)) is False
+
     stored = store.get_skeleton(str(skeleton.id))
-    assert stored is not None and stored.submitted_as == dataset.id
+    assert stored is not None and stored.submitted_as == dataset.id, (
+        "the winner's lineage survives every later claim"
+    )
 
 
-def test_an_unknown_skeleton_reads_as_none_and_refuses_a_mark(store: Store) -> None:
+def test_an_unknown_skeleton_reads_as_none_and_refuses_a_claim(store: Store) -> None:
+    """ "No such skeleton" is not a false answer to "did this call claim it"."""
     assert store.get_skeleton("3f8c1a20-0000-4000-8000-00000000ffff") is None
     assert store.get_skeleton("not-a-uuid") is None
-    with pytest.raises(RecordNotFoundError):
-        store.mark_skeleton_submitted(
-            "3f8c1a20-0000-4000-8000-00000000ffff", "3f8c1a20-0000-4000-8000-000000000001"
-        )
+    for unknown in ("3f8c1a20-0000-4000-8000-00000000ffff", "not-a-uuid"):
+        with pytest.raises(RecordNotFoundError):
+            store.mark_skeleton_submitted(unknown, "3f8c1a20-0000-4000-8000-000000000001")
 
 
 # --------------------------------------------------------------------------

@@ -21,6 +21,14 @@ One field is excluded from that comparison, and it is named at the assertion:
 ``(seed, salt)``. ``validated_at`` would have been the second, so the clock
 here is frozen at the fixture's own ``validated_at`` and that field is
 **compared** rather than excused.
+
+And the **repair loop**, which is the product's headline authoring flow and the
+thing PRD 6 flow B is written about:
+:func:`test_a_rejected_submit_is_repaired_by_refilling_one_section` drives
+reject -> re-fill the named section -> submit, through the same client. Re-fill
+was proven at the rule layer and at the service layer separately; the loop as a
+caller experiences it was not, and that is the one assertion that says the
+error envelope is actually useful to the LLM it was designed for.
 """
 
 from __future__ import annotations
@@ -160,6 +168,73 @@ async def test_the_worked_example_fills_in_five_calls_and_reproduces_the_fixture
         "the clock is frozen at the fixture's instant, so validated_at is compared rather "
         "than excused"
     )
+
+
+async def test_a_rejected_submit_is_repaired_by_refilling_one_section(
+    spec_context: ServiceContext,
+) -> None:
+    """PRD 6 flow B, end to end: reject, repair one part, submit.
+
+    "A rejection returns structured errors, scoped to the section that caused
+    them, so the LLM repairs one part rather than regenerating everything."
+    That sentence is the reason SK-002 permits a re-fill (ruling R-06), the
+    reason every finding carries a ``section``, and the reason
+    ``dataset_fill_part`` replaces a section rather than merging into it. It had
+    no end-to-end test, so the loop it describes was three separately-proven
+    pieces rather than a working flow.
+
+    The break is ``expected.comparison: "vibes"`` - DS-017's vocabulary - chosen
+    because it is one word in one section, which is exactly the shape of mistake
+    an LLM makes and a repair should cost one call to fix.
+
+    Four things are asserted, in the order a caller depends on them:
+
+    1. the submit is **rejected**, with the rule id and nothing else;
+    2. every finding names ``expected`` in ``section``, so the caller knows
+       which of the five parts to regenerate without guessing;
+    3. one ``dataset_fill_part`` on that section is accepted, and ``remaining``
+       is empty - so the caller can tell it is ready to submit again;
+    4. the submit then **succeeds**, and produces the golden dataset. The
+       repaired document is byte-identical to the one the clean fill produced,
+       which is what makes a re-fill a repair rather than a second draft.
+    """
+    golden = load_document(DATASET_FIXTURE)
+    broken = {**golden, "expected": {**golden["expected"], "comparison": "vibes"}}
+
+    async with connected(spec_context) as client:
+        await publish(client)
+        payload = await start(client, golden)
+        skeleton_id = payload["skeleton_id"]
+        await fill_every_section(client, skeleton_id, payload["manifest"], broken)
+
+        rejected = await invoke(client, "dataset_submit", skeleton_id=skeleton_id)
+        assert rejected["ok"] is False, rejected
+        assert [error["rule"] for error in rejected["errors"]] == ["DS-017"]
+        named = {error["section"] for error in rejected["errors"]}
+        assert named == {"expected"}, "the caller is told which part to repair"
+        assert rejected["errors"][0]["pointer"] == "/expected/comparison"
+
+        wanted = next(iter(named))
+        section = next(entry for entry in payload["manifest"] if entry["id"] == wanted)
+        repaired = await invoke(
+            client,
+            "dataset_fill_part",
+            skeleton_id=skeleton_id,
+            section=section["id"],
+            content=content_for(section, golden),
+        )
+        assert repaired["ok"] is True, repaired
+        assert repaired["data"]["fill"]["remaining"] == [], "ready to submit again"
+
+        submitted = await invoke(client, "dataset_submit", skeleton_id=skeleton_id)
+
+    assert submitted["ok"] is True, submitted
+    stored = submitted["data"]["dataset"]
+    differing = {field for field in golden if stored[field] != golden[field]}
+    assert differing == UNREPRODUCIBLE, (
+        f"a repaired dataset is the golden dataset, not a second draft: {sorted(differing)}"
+    )
+    assert stored["version"] == 1, "the repair happened before the write, so there is one version"
 
 
 async def test_the_reassembled_dataset_round_trips_like_the_fixture(
