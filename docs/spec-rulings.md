@@ -500,6 +500,38 @@ carry a substantial `rationale`.
 
 **Cost if wrong.** All three are bookkeeping; none affects stored data.
 
+### R-25 — `contracts.md` stays the catalogue of record, so M2 amends it
+
+R-12's drift test asserts `documented == set(RULE_REGISTRY.keys())`, reading the documented
+set from `docs/contracts.md` sections 3.1-3.3. Two earlier rulings change the rule set, so
+as things stand that test cannot pass: R-21 **adds** DS-033, which `contracts.md` does not
+list, and R-03 **deletes** RT-E05, which it still does.
+
+**Ruling.** `docs/contracts.md` section 3 remains the single catalogue of record, and M2
+amends it to match the register rather than teaching the drift test to read two files. M2
+makes exactly these edits:
+
+1. Add a **DS-033** row to section 3.2: "`expected.rationale` is present and at least 30
+   characters."
+2. Delete the **RT-E05** row from section 3.4, per R-03.
+3. Add one line under the section 3 preamble stating that **section 3.4 is a response-code
+   table, not part of the rule registry** — which R-12 already requires — so the parser's
+   scope is documented where the parser's author will look.
+4. Correct the `"section": "nodes.compliance"` value in section 1's example envelope to
+   `nodes.core`, per R-06.
+
+Each edit carries a parenthetical pointing at the ruling that made it, so the reasoning
+stays in this register and the catalogue stays scannable. This register does not become a
+second catalogue the drift test has to merge.
+
+**Why amend rather than teach the test.** A drift test whose "documented" set is spread
+across two files, one of which is a narrative document, is a test that will itself drift.
+The whole point of the drift test is that the prose catalogue and the code cannot diverge —
+that only works when there is exactly one prose catalogue.
+
+**Cost if wrong.** Four small edits to a specification document, each individually
+revertible, with the register preserving why they were made.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
