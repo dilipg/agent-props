@@ -51,7 +51,8 @@ than doing so quietly.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from collections.abc import Mapping
+from typing import Any, Protocol, runtime_checkable
 
 from agentprops.models import (
     Blueprint,
@@ -68,7 +69,6 @@ from agentprops.models import (
 )
 
 __all__ = [
-    "STATUSES",
     "STATUS_DRAFT",
     "STATUS_PUBLISHED",
     "PublishedVersionImmutableError",
@@ -81,7 +81,6 @@ __all__ = [
 #: BP-016 makes ``published`` immutable; a ``draft`` is freely overwritten.
 STATUS_DRAFT = "draft"
 STATUS_PUBLISHED = "published"
-STATUSES = (STATUS_DRAFT, STATUS_PUBLISHED)
 
 
 class StoreError(RuntimeError):
@@ -169,6 +168,13 @@ class Store(Protocol):
         overwritten: every earlier version stays independently readable by
         :meth:`get_dataset`, which is what lets a run pinned to version 1 keep
         reading version 1 for its whole life.
+
+        ``ds.archived`` is ignored too, on every version after the first: the
+        flag belongs to the lineage, not to a version (ruling R-34), so a new
+        version inherits whatever :meth:`set_archived` last set. Otherwise an
+        edit would silently un-hide an archived dataset, and a half-archived
+        lineage has no coherent answer for :meth:`find_datasets`, which returns
+        one row per lineage.
         """
         ...
 
@@ -182,8 +188,14 @@ class Store(Protocol):
         ...
 
     def find_datasets(self, q: DatasetQuery) -> list[DatasetSummary]:
-        """Discovery. One row per dataset id - its latest version - **excluding
-        archived**, ordered deterministically by ``(created_at, id)``.
+        """Discovery. One row per dataset **lineage** - its latest version -
+        **excluding archived**, ordered deterministically by ``(created_at, id)``.
+
+        The lineage grain is ruling R-38, and it is forced rather than chosen:
+        ``created_at`` comes from ``provenance.created_at`` (ruling R-09), which
+        is identical across every version of one dataset, so per-version rows
+        would share both sort keys and the specified ordering could not be
+        total. ``get_dataset(dataset_id, version)`` reaches a version.
         """
         ...
 
@@ -191,8 +203,10 @@ class Store(Protocol):
         """Flip the archive flag across every version of ``dataset_id``.
 
         A flag, not a deletion, and not a new version: archiving must not
-        change what a pinned run reads. Raises :class:`RecordNotFoundError` if no
-        such dataset exists.
+        change what a pinned run reads. It takes no version because the flag is
+        lineage-level (ruling R-34), which is also why :meth:`put_dataset`
+        inherits it. Raises :class:`RecordNotFoundError` if no such dataset
+        exists.
         """
         ...
 
@@ -249,9 +263,37 @@ class Store(Protocol):
         layer rather than in application code: a retry an hour later resolves
         to the same fixture and the same ``seq``.
 
-        ``seq`` is allocated here - a per-run monotonic counter - because it is
-        an authoritative fact about serve order rather than caller data. Any
-        ``seq`` on the incoming model is ignored.
+        ``seq`` is allocated here - a per-run monotonic counter, guarded by
+        ``UNIQUE (run_id, seq)`` (ruling R-37) - because it is an authoritative
+        fact about serve order rather than caller data. Any ``seq`` on the
+        incoming model is ignored.
+
+        This records **what was served**, and only that. Writing ``actual``
+        later is :meth:`set_step_actual`'s job, because a no-op repeat cannot
+        also be a merge.
+        """
+        ...
+
+    def set_step_actual(
+        self, run_id: str, node_id: str, iteration: int, actual: Mapping[str, Any]
+    ) -> StepRecord:
+        """Record **what the agent did** at a step. Write-once per key.
+
+        Ruling R-33's method, on the Protocol from M3 so that M7's adapters
+        implement it rather than M8 reopening three signed-off ones. The
+        division of labour with :meth:`upsert_step` is deliberate and both
+        halves matter: ``upsert_step``'s repeat must stay a literal no-op,
+        because M6's gate is that "fetching the same step key twice returns
+        byte-identical fixtures and advances nothing", so it can never be the
+        thing that merges in an ``actual``.
+
+        Raises :class:`RecordNotFoundError` when no step record exists - an
+        actual cannot be reported for a step that was never served - and
+        :class:`StoreError` when a *different* actual is already recorded.
+        Re-recording an identical one is a no-op success, the same replay
+        tolerance :meth:`mark_skeleton_submitted` and BP-016 have.
+
+        Ground rule 1 is untouched: this writes to a run, never to a dataset.
         """
         ...
 

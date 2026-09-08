@@ -16,7 +16,6 @@ will let M7 add two adapters by adding two fixture parameters.
 from agentprops.storage.base import (
     STATUS_DRAFT,
     STATUS_PUBLISHED,
-    STATUSES,
     PublishedVersionImmutableError,
     RecordNotFoundError,
     Store,
@@ -34,7 +33,6 @@ from agentprops.storage.sql import (
 __all__ = [
     "METADATA",
     "POSTGRES_ONLY_INDEXES",
-    "STATUSES",
     "STATUS_DRAFT",
     "STATUS_PUBLISHED",
     "PublishedVersionImmutableError",

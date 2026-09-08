@@ -27,6 +27,13 @@ Three settings here are decisions rather than boilerplate:
 ``render_as_batch``
     SQLite cannot ``ALTER`` most things. Batch mode makes Alembic rebuild the
     table instead, so a future column change is writable once rather than twice.
+
+``compare_server_default``
+    On, which is not Alembic's default, for one column: under ruling R-09
+    ``datasets.created_at`` must have **no** default, since a ``DEFAULT now()``
+    would be re-stamped on re-import and ``dataset_find``'s ordering would stop
+    being reproducible. Off, that is the one load-bearing default in the schema
+    sitting outside ``alembic check``.
 """
 
 from __future__ import annotations
@@ -88,6 +95,7 @@ def run_migrations_offline() -> None:
         include_object=include_object,
         render_as_batch=True,
         compare_type=True,
+        compare_server_default=True,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -119,6 +127,7 @@ def run_migrations_online() -> None:
                 include_object=include_object,
                 render_as_batch=True,
                 compare_type=True,
+                compare_server_default=True,
             )
             with context.begin_transaction():
                 context.run_migrations()
