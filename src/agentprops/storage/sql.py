@@ -343,6 +343,13 @@ skeletons = Table(
     Column("id", Uuid, primary_key=True),
     Column("agent_id", Text, nullable=False),
     Column("bp_version", Text, nullable=False),
+    # `labels` and `seed` are `dataset_skeleton`'s two non-section inputs
+    # (ruling R-06), added to the DDL at M5 for the reason `Skeleton.labels`
+    # records: `dataset_submit(skeleton_id)` takes nothing else, so they have
+    # to survive here or the dataset cannot be assembled. Same column types as
+    # `datasets`, so a skeleton and the dataset it becomes agree.
+    Column("labels", JsonDocument, nullable=False),
+    Column("seed", BigInteger, nullable=False),
     Column("manifest", JsonDocument, nullable=False),
     Column("parts", JsonDocument, nullable=False, server_default=text("'{}'")),
     Column("submitted_as", Uuid, nullable=True),
@@ -955,6 +962,8 @@ class SqlStore:
         values = {
             "agent_id": sk.agent_id,
             "bp_version": sk.bp_version,
+            "labels": dict(sk.labels),
+            "seed": sk.seed,
             "manifest": [section.model_dump(mode="json") for section in sk.manifest],
             "parts": sk.parts,
             "submitted_as": sk.submitted_as,
@@ -1577,6 +1586,8 @@ def _skeleton(row: Row[Any]) -> Skeleton:
         id=row.id,
         agent_id=str(row.agent_id),
         bp_version=str(row.bp_version),
+        labels=dict(row.labels),
+        seed=int(row.seed),
         manifest=list(row.manifest),
         parts=dict(row.parts),
         submitted_as=row.submitted_as,

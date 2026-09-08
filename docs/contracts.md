@@ -509,6 +509,8 @@ CREATE TABLE skeletons (
   id            UUID        PRIMARY KEY,
   agent_id      TEXT        NOT NULL,
   bp_version    TEXT        NOT NULL,
+  labels        JSONB       NOT NULL,   -- dataset_skeleton's labels input (added at M5)
+  seed          BIGINT      NOT NULL,   -- dataset_skeleton's seed input (added at M5)
   manifest      JSONB       NOT NULL,
   parts         JSONB       NOT NULL DEFAULT '{}'::jsonb,
   submitted_as  UUID        NULL,
@@ -550,6 +552,8 @@ CREATE TABLE run_steps (
   UNIQUE (run_id, seq)                         -- what makes seq allocation sound (R-37)
 );
 ```
+
+`skeletons.labels` and `skeletons.seed` were added at M5. `dataset_skeleton` takes both as inputs, ruling R-06 settles that neither is a *fillable section*, and `dataset_submit(skeleton_id)` takes no other argument - so a skeleton that does not carry them cannot be assembled into a dataset, and neither value exists anywhere else to be derived from. Same class of omission as the missing `runs.declared_bp_version` column (ruling R-32). DS-012, DS-024 and DS-020 still own the values, at submit, against the assembled document.
 
 Note what the run tables do **not** contain: any copy of the fixtures. `served` holds the fixture actually handed over, which is needed for evidence, but the dataset is referenced, not duplicated. The `PRIMARY KEY (run_id, node_id, iteration)` is what makes `fetch_step` idempotent at the storage layer rather than in application code.
 

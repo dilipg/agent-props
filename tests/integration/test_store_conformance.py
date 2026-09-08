@@ -695,6 +695,8 @@ def test_skeleton_round_trip_and_submission(
     ]
     assert written.parts == {}
     assert written.submitted_as is None
+    assert written.labels == dataset.labels, "M5's labels column, for every adapter"
+    assert written.seed == dataset.seed, "M5's seed column, for every adapter"
 
     store.put_dataset(dataset)
     store.mark_skeleton_submitted(str(skeleton.id), str(dataset.id))

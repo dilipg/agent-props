@@ -14,9 +14,10 @@ from datetime import datetime
 from typing import Any, Final
 from uuid import UUID
 
-from pydantic import Field, StrictBool
+from pydantic import Field, StrictBool, StrictInt
 
 from agentprops.models.base import StrictModel
+from agentprops.models.labels import Labels
 
 __all__ = ["SECTION_IDS", "Section", "Skeleton"]
 
@@ -78,6 +79,28 @@ class Skeleton(StrictModel):
 
     agent_id: str
     bp_version: str
+
+    labels: Labels
+    """``dataset_skeleton``'s ``labels`` input, carried until submit.
+
+    **Added at M5, and the DDL in contracts section 7 is amended with it.** The
+    same class of omission as ruling R-32's missing ``runs.declared_bp_version``
+    column: ``dataset_skeleton`` takes ``labels`` and ``seed`` as inputs, ruling
+    R-06 settles that neither is a *fillable section*, and
+    ``dataset_submit(skeleton_id)`` takes no further arguments - so the two
+    inputs have to survive on the skeleton or the dataset cannot be assembled at
+    all. They exist nowhere else and cannot be derived.
+
+    DS-012 and DS-024 still own this value, at submit, against the assembled
+    document. Nothing here constrains it (ruling R-04)."""
+
+    seed: StrictInt
+    """``dataset_skeleton``'s ``seed`` input. See :attr:`labels`.
+
+    Also the seed the dataset id is derived from, through ``Seeded.uuid()``
+    (ruling R-10), so it has to be the *same* value at submit that the caller
+    gave at skeleton time. ``StrictInt`` per ruling R-23, and DS-020 still owns
+    the check against the assembled document."""
 
     manifest: list[Section]
     """The five sections of :data:`SECTION_IDS`, in order."""

@@ -29,7 +29,14 @@ five places, each of which is a place autogenerate cannot know the intent:
    section 7 authorised by ruling R-37, and the constraint that makes
    ``upsert_step``'s ``seq`` allocation sound. See the note at the column.
 
-Amended in M3's first fix round rather than superseded by a second revision.
+6. **``skeletons.labels`` and ``skeletons.seed``** - an addition to contracts
+   section 7 made at M5, for the reason ``Skeleton.labels`` records:
+   ``dataset_skeleton`` takes both as inputs, ruling R-06 settles that neither
+   is a fillable section, and ``dataset_submit(skeleton_id)`` takes nothing
+   else, so they have to survive on the skeleton row.
+
+Amended in M3's first fix round, and again at M5, rather than superseded by a
+second revision.
 This is the *initial* schema of an unreleased milestone on an unmerged branch:
 no database outside a temporary test file has ever been migrated by it, so
 there is nothing for an additive revision to migrate *from*. A follow-up
@@ -106,6 +113,8 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("agent_id", sa.Text(), nullable=False),
         sa.Column("bp_version", sa.Text(), nullable=False),
+        sa.Column("labels", JsonDocument, nullable=False),
+        sa.Column("seed", sa.BigInteger(), nullable=False),
         sa.Column("manifest", JsonDocument, nullable=False),
         sa.Column("parts", JsonDocument, server_default=sa.text("'{}'"), nullable=False),
         sa.Column("submitted_as", sa.Uuid(), nullable=True),

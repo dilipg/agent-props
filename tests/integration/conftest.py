@@ -116,12 +116,19 @@ def published(store: Store, blueprint: Blueprint) -> Blueprint:
 
 
 @pytest.fixture
-def skeleton(blueprint: Blueprint) -> Skeleton:
-    """A skeleton with the five-section manifest ruling R-06 fixes."""
+def skeleton(blueprint: Blueprint, dataset: Dataset) -> Skeleton:
+    """A skeleton with the five-section manifest ruling R-06 fixes.
+
+    ``labels`` and ``seed`` are the golden dataset's, because they are
+    ``dataset_skeleton``'s two inputs and M5 added them to the row: a skeleton
+    that does not carry them cannot be assembled into a dataset.
+    """
     return Skeleton(
         id=UUID("3f8c1a20-0000-4000-8000-00000000aaaa"),
         agent_id=blueprint.agent_id,
         bp_version=blueprint.version,
+        labels=dict(dataset.labels),
+        seed=dataset.seed,
         manifest=[
             Section(
                 id=section_id,
