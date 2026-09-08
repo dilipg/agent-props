@@ -19,10 +19,18 @@ There is a second, narrower exemption shape for a rule *half* that no exact-set
 case can isolate: :data:`RULE_HALF_EXEMPTIONS` names the unit test that covers
 the half, and a test asserts that test still exists (ruling R-31).
 
-Scope is a parameter, not a constant (ruling R-12). At M2 the registry holds
-``BP-*`` and ``DS-*``; ``SK-*`` is documented and unimplemented until M5, which
-widens :data:`IMPLEMENTED_PREFIXES` by one entry. ``RT-E*`` never enters: those
-are `fetch_step` response codes, and section 3.4 is not part of the registry.
+And a third, for the five ``SK-*`` rules: :data:`PIPELINE_ONLY`. The corpus
+mutates a *document*, and a skeleton rule's subject is the server-side fill
+state a ``skeleton_id`` names - there is no document to patch, so no mutation
+can reach one. Each entry names the test that covers the rule, in the same
+shape and for the same reason as R-31's: an exemption is only worth what the
+test it names is worth.
+
+Scope is a parameter, not a constant (ruling R-12). At M2 the registry held
+``BP-*`` and ``DS-*``; M5 widened :data:`IMPLEMENTED_PREFIXES` to include
+``SK-*`` and inverted the test that pinned their absence. ``RT-E*`` never
+enters: those are `fetch_step` response codes, and section 3.4 is not part of
+the registry.
 """
 
 from __future__ import annotations
@@ -31,7 +39,14 @@ import ast
 from pathlib import Path
 from typing import Final
 
-from agentprops.validation import RULE_REGISTRY
+from agentprops.validation import (
+    FILL_RULES,
+    RULE_REGISTRY,
+    SUBMIT_RULES,
+    TARGET_DATASET,
+    TARGET_SKELETON,
+    TARGETS,
+)
 from agentprops.validation.context import WARNING_RULES
 from catalogue import parse_catalogue_ids, parse_runtime_codes
 from corpus import CASES, COVERED_RULE_IDS, RAW_TEXT_CASES
@@ -42,8 +57,10 @@ from corpus import CASES, COVERED_RULE_IDS, RAW_TEXT_CASES
 #: that prevents drift with a FileNotFoundError instead of comparing.
 CATALOGUE_PATH: Final[Path] = Path(__file__).parents[2] / "docs" / "contracts.md"
 
-#: The prefixes M2 implements. M5 adds "SK".
-IMPLEMENTED_PREFIXES: Final[frozenset[str]] = frozenset({"BP", "DS"})
+#: The prefixes the registry implements. M2 had ``{"BP", "DS"}``; M5 added
+#: ``"SK"`` with the skeleton pipeline, which is the widening ruling R-12
+#: describes and the reason the scope is a parameter at all.
+IMPLEMENTED_PREFIXES: Final[frozenset[str]] = frozenset({"BP", "DS", "SK"})
 
 #: Rules no JSON Patch against a golden fixture can reach, with the reason.
 #: Ruling R-20 requires this to be a named exemption rather than a silent gap,
@@ -55,6 +72,31 @@ MUTATION_UNREACHABLE: Final[dict[str, str]] = {
         "so the violation only exists in the raw text; covered by a raw_text_cases entry and "
         "detected at the tool boundary via json.loads(object_pairs_hook=...)"
     ),
+}
+
+#: The rules the mutation corpus cannot reach *by construction*, each naming
+#: the test that covers it instead. The five ``SK-*`` rules are all of them.
+#:
+#: This is not the same exemption as :data:`MUTATION_UNREACHABLE`, which is for
+#: a rule whose violation cannot survive being parsed, and whose coverage
+#: therefore comes from a raw-text case. A skeleton rule has no document at
+#: all: its subject is the ``parts``/``manifest``/``submitted_as`` state of a
+#: skeleton row, so `broken/manifest.json` - a list of JSON Patches against two
+#: golden *documents* - has nothing to patch. Extending the corpus to carry
+#: skeleton fixtures would mean a second, differently-shaped manifest for five
+#: rules, and the state those rules read is exactly what the service builds
+#: anyway.
+#:
+#: Keyed by rule id, valued by the name of the covering test, so deleting that
+#: test fails :func:`test_every_pipeline_exemption_names_a_test_that_exists`
+#: rather than silently dropping the only coverage the rule has. Ruling R-12
+#: asks for "corpus coverage or a **named** exemption"; this is the named half.
+PIPELINE_ONLY: Final[dict[str, str]] = {
+    "SK-001": "test_sk_001_rejects_a_section_that_is_not_in_the_manifest",
+    "SK-002": "test_sk_002_rejects_a_section_filled_before_an_earlier_one",
+    "SK-003": "test_sk_003_rejects_a_node_section_referencing_an_undeclared_entity",
+    "SK-004": "test_sk_004_reports_every_unfilled_required_section",
+    "SK-005": "test_sk_005_rejects_an_already_submitted_skeleton",
 }
 
 #: Rule *halves* that no exact-set corpus case can isolate, each naming the unit
@@ -77,7 +119,8 @@ RULE_HALF_EXEMPTIONS: Final[dict[tuple[str, str], str]] = {
     ("BP-006", "inbound-edge"): "test_bp_006_reports_an_inbound_edge_into_the_entry_node",
 }
 
-#: Where :data:`RULE_HALF_EXEMPTIONS`' covering tests are looked for.
+#: Where the covering tests named by :data:`RULE_HALF_EXEMPTIONS` and
+#: :data:`PIPELINE_ONLY` are looked for.
 UNIT_TEST_DIR: Final[Path] = Path(__file__).parent
 
 
@@ -116,7 +159,7 @@ def test_every_rule_has_an_implementation() -> None:
 def test_every_rule_has_a_broken_fixture() -> None:
     """Every registry id is exercised by a corpus case, modulo named exemptions."""
     catalogue = set(RULE_REGISTRY)
-    uncovered = catalogue - COVERED_RULE_IDS - set(MUTATION_UNREACHABLE)
+    uncovered = catalogue - COVERED_RULE_IDS - set(MUTATION_UNREACHABLE) - set(PIPELINE_ONLY)
     assert uncovered == set(), f"rules with no broken fixture: {sorted(uncovered)}"
 
 
@@ -208,28 +251,77 @@ def test_the_parser_excludes_the_response_code_table() -> None:
     )
 
 
-def test_skeleton_rules_are_documented_and_not_yet_implemented() -> None:
-    """M5's widening, pinned so it is a deliberate change rather than a surprise.
+def test_the_skeleton_rules_are_documented_and_implemented() -> None:
+    """M5's widening, and the inversion of the test that pinned its absence.
 
-    SK-* is in the catalogue and out of the registry. When M5 implements the
-    skeleton pipeline it adds "SK" to IMPLEMENTED_PREFIXES and deletes this
-    test, and the equality test above starts covering the five rules.
+    Until M5 this test asserted the opposite - that ``SK-*`` was documented and
+    *not* registered - so that widening ``IMPLEMENTED_PREFIXES`` had to be a
+    deliberate edit rather than something a new registry entry did quietly. The
+    five rules are now implemented, so the assertion is inverted rather than
+    deleted: the count is what a sixth skeleton rule would have to change.
     """
     documented = parse_catalogue_ids(CATALOGUE_PATH)
     skeleton = {rule for rule in documented if rule.startswith("SK-")}
     assert skeleton == {"SK-001", "SK-002", "SK-003", "SK-004", "SK-005"}
-    assert not skeleton & set(RULE_REGISTRY), "SK-* is M5's; M2 must not implement it"
+    assert skeleton <= set(RULE_REGISTRY), "SK-* is M5's, and M5 has landed"
+
+
+def test_every_skeleton_rule_runs_in_exactly_one_phase() -> None:
+    """A rule the runners never call is a rule that cannot fire.
+
+    ``SK-001`` to ``SK-003`` read a section name and its content, which a submit
+    does not have; ``SK-004`` only means anything at submit; ``SK-005`` guards
+    both. So the two lists overlap on SK-005 by design, and their **union** has
+    to be the whole skeleton registry - otherwise a sixth rule could be added,
+    documented, registered, and never run.
+    """
+    registered = {rule for rule in RULE_REGISTRY if rule.startswith("SK-")}
+    assert set(FILL_RULES) | set(SUBMIT_RULES) == registered
+    assert set(FILL_RULES) & set(SUBMIT_RULES) == {"SK-005"}
+    for rule in FILL_RULES + SUBMIT_RULES:
+        assert RULE_REGISTRY[rule].target == TARGET_SKELETON
+
+
+def test_every_pipeline_exemption_names_a_test_that_exists() -> None:
+    """The assertion that gives :data:`PIPELINE_ONLY` teeth.
+
+    Same reasoning as ruling R-31's rule-half exemptions: an exemption whose
+    covering test has been renamed or deleted is cover for a gap, and the whole
+    point of the coverage gate is that a rule cannot be registered without
+    something exercising it.
+    """
+    defined = module_level_test_names()
+    missing = {
+        f"{rule} -> {test_name}"
+        for rule, test_name in PIPELINE_ONLY.items()
+        if test_name not in defined
+    }
+    assert not missing, (
+        f"a pipeline-only exemption names a test that does not exist in {UNIT_TEST_DIR}: "
+        f"{sorted(missing)}. Restore the test or drop the exemption - the rule has no other "
+        "coverage."
+    )
+
+
+def test_no_pipeline_exemption_is_stale() -> None:
+    """A skeleton rule the mutation manifest reaches after all would be news."""
+    unknown = set(PIPELINE_ONLY) - set(RULE_REGISTRY)
+    assert not unknown, f"PIPELINE_ONLY names unregistered rules: {sorted(unknown)}"
+    reached = set(PIPELINE_ONLY) & COVERED_RULE_IDS
+    assert not reached, f"these rules are exempted but a corpus case covers them: {sorted(reached)}"
+    overlap = set(PIPELINE_ONLY) & set(MUTATION_UNREACHABLE)
+    assert not overlap, f"these rules are exempted twice: {sorted(overlap)}"
 
 
 def test_registry_metadata_is_consistent() -> None:
     """Severity comes from one table, and every rule states its own check."""
     for rule, spec in RULE_REGISTRY.items():
         assert spec.rule == rule
-        assert spec.target in {"blueprint", "dataset"}
+        assert spec.target in TARGETS
         assert spec.severity == ("warning" if rule in WARNING_RULES else "error")
         assert spec.summary, f"{rule} has no docstring summary"
-        assert not (spec.target == "blueprint" and spec.needs_blueprint), (
-            f"{rule}: needs_blueprint is meaningless for a blueprint rule"
+        assert not (spec.target != TARGET_DATASET and spec.needs_blueprint), (
+            f"{rule}: needs_blueprint is meaningless outside a dataset rule"
         )
 
 

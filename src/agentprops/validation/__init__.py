@@ -1,9 +1,18 @@
 """Pure validation functions. No I/O, no clock, no random source, no store.
 
-The public surface is two functions:
+The public surface is four functions:
 
     validate_blueprint(document, resolver=NullResolver()) -> ErrorEnvelope
     validate_dataset(document, resolver, duplicate_keys=()) -> ErrorEnvelope
+    validate_fill(skeleton_context) -> ErrorEnvelope
+    validate_submit(skeleton_context) -> ErrorEnvelope
+
+The first two take a raw document; the second two take a
+:class:`~agentprops.validation.skeleton.SkeletonContext`, because the subject of
+an ``SK-*`` rule is the server-side fill state a ``skeleton_id`` names rather
+than a document. They are two functions rather than one because SK-001 to
+SK-003 need a section name and its content, which a submit does not have - see
+`skeleton.py`'s docstring.
 
 Four properties of that surface are rulings later milestones depend on:
 
@@ -48,22 +57,38 @@ from agentprops.validation.registry import (
     RULE_REGISTRY,
     TARGET_BLUEPRINT,
     TARGET_DATASET,
+    TARGET_SKELETON,
+    TARGETS,
     RuleSpec,
 )
 from agentprops.validation.resolver import NullResolver, Resolver
+from agentprops.validation.skeleton import (
+    FILL_RULES,
+    SUBMIT_RULES,
+    SkeletonContext,
+)
 
 __all__ = [
+    "FILL_RULES",
     "RULE_REGISTRY",
+    "SUBMIT_RULES",
+    "TARGETS",
+    "TARGET_BLUEPRINT",
+    "TARGET_DATASET",
+    "TARGET_SKELETON",
     "WARNING_RULES",
     "BlueprintContext",
     "DatasetContext",
     "NullResolver",
     "Resolver",
     "RuleSpec",
+    "SkeletonContext",
     "envelope",
     "parse_with_duplicate_keys",
     "validate_blueprint",
     "validate_dataset",
+    "validate_fill",
+    "validate_submit",
 ]
 
 
@@ -142,3 +167,45 @@ def _resolve_blueprint(document: Mapping[str, Any], resolver: Resolver) -> Mappi
     if not isinstance(agent_id, str) or not isinstance(version, str):
         return None
     return resolver.get_published_blueprint(agent_id, version)
+
+
+def validate_fill(ctx: SkeletonContext) -> ErrorEnvelope:
+    """Run the fill-phase ``SK-*`` rules. Stops at the first rule that reports.
+
+    Stopping *is* the precedence `skeleton.py` documents, made operational:
+    SK-005 removes the skeleton SK-001 needs a manifest from, and SK-001 removes
+    the ordinal SK-002 needs. Running on would report the consequences of a
+    condition already named, and the caller would have to work out which finding
+    to act on.
+
+    This differs deliberately from :func:`validate_dataset`, which runs **every**
+    rule so that one pass reports every problem. A dataset document is complete
+    and independent findings are all actionable; a fill request is a single
+    action, and the second finding is a consequence of the first.
+    """
+    return _first_reporting(ctx, FILL_RULES)
+
+
+def validate_submit(ctx: SkeletonContext) -> ErrorEnvelope:
+    """Run the submit-phase ``SK-*`` rules. Stops at the first rule that reports.
+
+    SK-005 then SK-004. A submit that passes both is what lets
+    `service/skeletons.py` assemble the document and run the ``DS-*`` catalogue
+    against it - ruling R-45's precedence, in one place.
+    """
+    return _first_reporting(ctx, SUBMIT_RULES)
+
+
+def _first_reporting(ctx: SkeletonContext, rules: Sequence[str]) -> ErrorEnvelope:
+    """The first rule in ``rules`` that reports anything, or a clean envelope.
+
+    Reached through :data:`RULE_REGISTRY` rather than by calling the rule
+    functions directly, so that the registry stays the single index of what a
+    rule id means - which is what makes the drift test's guarantee worth
+    anything.
+    """
+    for rule in rules:
+        findings = RULE_REGISTRY[rule].check(ctx)
+        if findings:
+            return envelope(findings)
+    return envelope([])

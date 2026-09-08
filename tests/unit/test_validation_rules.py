@@ -19,16 +19,29 @@ and three of those are load-bearing rulings:
 Plus the precedence decisions from R-18 and the ones this milestone had to make
 itself: whichever rule *does not* fire is as much a part of the contract as the
 one that does, because the gate asserts exact sets.
+
+M5 adds the five ``SK-*`` rules to this module for a stronger version of the
+same reason: the corpus is a list of JSON Patches against two golden
+*documents*, and a skeleton rule's subject is the fill state a ``skeleton_id``
+names, so **no mutation can reach one at all**. `PIPELINE_ONLY` in
+`test_validation_drift.py` names each test below as that rule's only coverage,
+and a gate test fails if one disappears.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 import pytest
 
 from agentprops.models import Dataset
-from agentprops.validation import validate_blueprint, validate_dataset
+from agentprops.validation import (
+    SkeletonContext,
+    validate_blueprint,
+    validate_dataset,
+    validate_fill,
+    validate_submit,
+)
 from agentprops.validation.blueprint import condition_var_paths
 from agentprops.validation.graph import Graph
 from agentprops.validation.jsonschemas import (
@@ -38,7 +51,12 @@ from agentprops.validation.jsonschemas import (
     resolve_entity_refs,
     strip_entity_refs,
 )
-from agentprops.validation.pointers import escape_token, pointer, section_for_pointer
+from agentprops.validation.pointers import (
+    SECTIONS,
+    escape_token,
+    pointer,
+    section_for_pointer,
+)
 from agentprops.validation.rawjson import parse_with_duplicate_keys
 from agentprops.validation.timeline import split_ref
 from corpus import DATASET_RESOLVER, GOLDEN_BLUEPRINT, CorpusResolver, base_document, mutated
@@ -657,3 +675,265 @@ def test_a_clean_document_reports_an_ok_envelope_with_no_findings() -> None:
     envelope = validate_dataset(base_document("dataset"), DATASET_RESOLVER)
     assert envelope.ok is True
     assert envelope.errors == []
+
+
+# --------------------------------------------------------------------------- #
+# The five SK-* rules (ruling R-06's manifest, R-45's precedence).
+#
+# These are the rules with no corpus case, by construction: `PIPELINE_ONLY` in
+# `test_validation_drift.py` names each test here and a gate test fails if one
+# is renamed away. `test_service_skeletons.py` exercises the same rules through
+# the pipeline; this module pins the predicates.
+# --------------------------------------------------------------------------- #
+
+FILLED_PROVENANCE: Final[dict[str, Any]] = {"provenance": {"title": "t"}, "narrative": "n"}
+FILLED_ENTITIES: Final[dict[str, Any]] = {"entities": {"store": {"base": {}}}}
+
+
+#: The fields each section owns, spelled out here rather than imported from
+#: `service/skeletons.py`: `validation/` knows nothing about `service/` and
+#: neither should its tests. The service's own manifest is checked against
+#: `section_for_pointer` by
+#: `test_service_skeletons.py::test_every_manifest_pointer_maps_back_to_its_section`,
+#: which is the tie that matters; what a rule needs is *a* manifest.
+SECTION_POINTERS: Final[dict[str, tuple[str, ...]]] = {
+    "provenance": ("provenance", "narrative"),
+    "entities": ("entities",),
+    "nodes.core": ("nodes",),
+    "nodes.branches": ("pools",),
+    "expected": ("expected",),
+}
+
+
+def manifest(*, optional: str = "") -> list[dict[str, Any]]:
+    """The five-section manifest as the rules see it - plain mappings.
+
+    ``optional`` marks one section ``required: False``, which is how SK-004's
+    filter is exercised: the manifest the service builds makes all five
+    required, so nothing else in the suite would ever run that branch.
+    """
+    return [
+        {
+            "id": section_id,
+            "required": section_id != optional,
+            "pointers": [pointer(field) for field in SECTION_POINTERS[section_id]],
+            "description": f"fill {section_id}",
+        }
+        for section_id in SECTIONS
+    ]
+
+
+def fill_context(section: str, content: dict[str, Any], **parts: dict[str, Any]) -> SkeletonContext:
+    return SkeletonContext(
+        "3f8c1a20-0000-4000-8000-00000000aaaa",
+        manifest=manifest(),
+        parts=parts,
+        section=section,
+        content=content,
+    )
+
+
+def fill_rules(ctx: SkeletonContext) -> list[str]:
+    return [error.rule for error in validate_fill(ctx).errors]
+
+
+def submit_rules(ctx: SkeletonContext) -> list[str]:
+    return [error.rule for error in validate_submit(ctx).errors]
+
+
+def test_sk_001_rejects_a_section_that_is_not_in_the_manifest() -> None:
+    """And ``section`` is null: a name outside the five is not a section to re-fill.
+
+    ``nodes.compliance`` is the value contracts section 1's example carried
+    before ruling R-06 corrected it to ``nodes.core``, which makes it the most
+    likely wrong name a caller will send.
+    """
+    ctx = fill_context("nodes.compliance", {"nodes": {}}, provenance=FILLED_PROVENANCE)
+    errors = validate_fill(ctx).errors
+    assert [error.rule for error in errors] == ["SK-001"]
+    assert errors[0].section is None
+    assert errors[0].pointer == "/section"
+    assert errors[0].context["manifest"] == list(SECTIONS)
+
+
+def test_sk_002_rejects_a_section_filled_before_an_earlier_one() -> None:
+    """M5's acceptance criterion 2, at the rule level: entities before provenance.
+
+    The finding is scoped to ``provenance`` - the section the caller has to go
+    and fill - not to ``entities``, which is the one it asked for. One finding,
+    with every blocking section in ``context``.
+    """
+    errors = validate_fill(fill_context("entities", FILLED_ENTITIES)).errors
+    assert [error.rule for error in errors] == ["SK-002"]
+    assert errors[0].section == "provenance"
+    assert errors[0].context["requested"] == "entities"
+    assert errors[0].context["blocked_by"] == ["provenance"]
+
+
+def test_sk_002_reports_the_earliest_of_several_unfilled_predecessors() -> None:
+    """Four unfilled predecessors, one finding, pointed at the first."""
+    errors = validate_fill(fill_context("expected", {"expected": {}})).errors
+    assert [error.rule for error in errors] == ["SK-002"]
+    assert errors[0].section == "provenance"
+    assert errors[0].context["blocked_by"] == [
+        "provenance",
+        "entities",
+        "nodes.core",
+        "nodes.branches",
+    ]
+
+
+def test_sk_002_allows_a_refill_of_an_already_filled_section() -> None:
+    """Ruling R-06: re-filling is explicitly allowed, and PRD 6 flow B needs it.
+
+    A repair loop that cannot re-fill is not a repair loop. Both directions are
+    here: re-filling the first section, and re-filling an earlier section once a
+    later one is filled.
+    """
+    filled = {"provenance": FILLED_PROVENANCE, "entities": FILLED_ENTITIES}
+    assert fill_rules(fill_context("provenance", FILLED_PROVENANCE, **filled)) == []
+    assert fill_rules(fill_context("entities", FILLED_ENTITIES, **filled)) == []
+
+
+def test_sk_002_is_skipped_when_sk_001_fired() -> None:
+    """An unknown section has no ordinal, so the order question has no answer.
+
+    Ruling R-26's principle. Without the skip this call would report SK-001 and
+    SK-002 together, and a caller repairing "fill provenance first" would still
+    have the wrong section name.
+    """
+    assert fill_rules(fill_context("nodes.compliance", {"nodes": {}})) == ["SK-001"]
+
+
+def test_sk_003_rejects_a_node_section_referencing_an_undeclared_entity() -> None:
+    """The entity id segment only, and the pointer addresses the caller's content."""
+    content = {"nodes": {"check_docs": {"output": {}, "entity_refs": ["franchisee"]}}}
+    ctx = fill_context(
+        "nodes.core", content, provenance=FILLED_PROVENANCE, entities=FILLED_ENTITIES
+    )
+    errors = validate_fill(ctx).errors
+    assert [error.rule for error in errors] == ["SK-003"]
+    assert errors[0].pointer == "/nodes/check_docs/entity_refs/0"
+    assert errors[0].section == "nodes.core"
+    assert errors[0].context["entity"] == "franchisee"
+
+
+def test_sk_003_reads_the_entity_id_and_never_the_revision() -> None:
+    """``store@after_docs`` resolves to ``store``; DS-009 owns the revision half.
+
+    Ruling R-18 makes the same split between DS-006 and DS-009, and SK-003 has
+    to agree with it or a fill would reject a reference the submit would accept.
+    """
+    content = {"nodes": {"recheck_store": {"output": {}, "entity_refs": ["store@after_docs"]}}}
+    ctx = fill_context(
+        "nodes.core", content, provenance=FILLED_PROVENANCE, entities=FILLED_ENTITIES
+    )
+    assert fill_rules(ctx) == []
+
+
+def test_sk_003_covers_pool_fixtures_in_the_branches_section() -> None:
+    """``nodes.branches`` owns ``/pools``, so a pool entry's refs are checked too."""
+    content = {"pools": {"request_docs": [{"output": {}, "entity_refs": ["ghost"]}]}}
+    ctx = fill_context(
+        "nodes.branches",
+        content,
+        provenance=FILLED_PROVENANCE,
+        entities=FILLED_ENTITIES,
+        **{"nodes.core": {"nodes": {}}},
+    )
+    errors = validate_fill(ctx).errors
+    assert [error.rule for error in errors] == ["SK-003"]
+    assert errors[0].pointer == "/pools/request_docs/0/entity_refs/0"
+    assert errors[0].section == "nodes.branches"
+
+
+def test_sk_003_is_skipped_when_the_entities_section_is_unfilled() -> None:
+    """SK-002 owns it: it fires for every node section when entities is unfilled.
+
+    The two can never both fire, which the exact-set assertion here is what
+    proves - a version of SK-003 without the skip would report one finding per
+    reference on top of SK-002's one.
+    """
+    content = {"nodes": {"check_docs": {"output": {}, "entity_refs": ["store"]}}}
+    ctx = fill_context("nodes.core", content, provenance=FILLED_PROVENANCE)
+    assert fill_rules(ctx) == ["SK-002"]
+
+
+def test_sk_003_ignores_a_section_that_is_not_a_node_section() -> None:
+    """``expected`` can carry no ``entity_refs``, so there is nothing to resolve."""
+    filled = {
+        "provenance": FILLED_PROVENANCE,
+        "entities": FILLED_ENTITIES,
+        "nodes.core": {"nodes": {}},
+        "nodes.branches": {"pools": {}},
+    }
+    ctx = fill_context("expected", {"expected": {"entity_refs": ["ghost"]}}, **filled)
+    assert fill_rules(ctx) == []
+
+
+def test_sk_004_reports_every_unfilled_required_section() -> None:
+    """One finding per unfilled section, in manifest order, each scoped to itself.
+
+    This is the response an LLM reads as a list of what to fill, which is why
+    the order is the manifest's and the pointer is the section's own.
+    """
+    ctx = SkeletonContext("sk", manifest=manifest(), parts={"provenance": FILLED_PROVENANCE})
+    errors = validate_submit(ctx).errors
+    assert [error.rule for error in errors] == ["SK-004"] * 4
+    assert [error.section for error in errors] == [
+        "entities",
+        "nodes.core",
+        "nodes.branches",
+        "expected",
+    ]
+    assert [error.pointer for error in errors] == ["/entities", "/nodes", "/pools", "/expected"]
+
+
+def test_sk_004_ignores_an_unfilled_optional_section() -> None:
+    """``required`` is a filter, not decoration.
+
+    The service's own manifest makes all five sections required, so this is the
+    only exercise the ``required: False`` branch gets - and it is what stops
+    ``required`` becoming a field nothing reads.
+    """
+    parts = {
+        "provenance": FILLED_PROVENANCE,
+        "entities": FILLED_ENTITIES,
+        "nodes.core": {"nodes": {}},
+        "expected": {"expected": {}},
+    }
+    ctx = SkeletonContext("sk", manifest=manifest(optional="nodes.branches"), parts=parts)
+    assert submit_rules(ctx) == []
+
+
+def test_sk_005_rejects_an_already_submitted_skeleton() -> None:
+    """A skeleton becomes exactly one dataset, and this is the rule that says so.
+
+    Both tools: a submit *and* a fill are refused, because a submitted skeleton
+    is frozen - datasets are immutable, so filling another part of one could
+    only mislead.
+    """
+    dataset_id = "3f8c1a20-0000-4000-8000-000000000001"
+    parts: dict[str, dict[str, Any]] = {section_id: {} for section_id in SECTIONS}
+    submitted = SkeletonContext(
+        "sk", submitted_as=dataset_id, manifest=manifest(), parts=parts, section="provenance"
+    )
+    assert submit_rules(submitted) == ["SK-005"]
+    assert fill_rules(submitted) == ["SK-005"]
+    errors = validate_submit(submitted).errors
+    assert errors[0].context["submitted_as"] == dataset_id
+    assert errors[0].pointer == "/skeleton_id"
+    assert errors[0].section is None
+
+
+def test_sk_005_rejects_an_unknown_skeleton_id_on_both_tools() -> None:
+    """The existence half. It is SK-005's rather than ``AP-004``'s.
+
+    The catalogue names the check ("``skeleton_id`` exists and has not already
+    been submitted"), so a caller learns one vocabulary for one condition. A
+    missing skeleton also removes the manifest SK-001 and SK-004 read, which is
+    why nothing else fires alongside it.
+    """
+    missing = SkeletonContext("nope", exists=False, section="provenance")
+    assert fill_rules(missing) == ["SK-005"]
+    assert submit_rules(missing) == ["SK-005"]

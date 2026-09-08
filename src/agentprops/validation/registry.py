@@ -32,9 +32,15 @@ one heterogeneous table plus a runner that knows which context to build is
 simpler than a generic registry, and ``target`` is what makes the pairing
 explicit.
 
-``SK-*`` is deliberately absent: skeleton rules arrive at M5 with the skeleton
-pipeline, and the drift test takes the prefix set as a parameter so their
-absence is correct now rather than a failure.
+``SK-*`` arrived at M5 with the skeleton pipeline, and with one difference
+worth knowing: a skeleton rule's ``target`` is :data:`TARGET_SKELETON` and its
+context is a
+:class:`~agentprops.validation.skeleton.SkeletonContext` rather than a
+document view, because the subject of an ``SK-*`` rule is the server-side fill
+state a ``skeleton_id`` names. ``validate_dataset`` and ``validate_blueprint``
+filter on ``target``, so they never see them; ``validate_fill`` and
+``validate_submit`` run them, split by phase - see
+:data:`~agentprops.validation.skeleton.FILL_RULES`.
 """
 
 from collections.abc import Callable, Mapping
@@ -44,18 +50,27 @@ from typing import Any, Final
 from agentprops.models.errors import SEVERITY_ERROR, SEVERITY_WARNING, RuleError
 from agentprops.validation import blueprint as bp
 from agentprops.validation import dataset as ds
+from agentprops.validation import skeleton as sk
 from agentprops.validation import timeline as tl
 from agentprops.validation.context import WARNING_RULES
 
 __all__ = [
     "RULE_REGISTRY",
+    "TARGETS",
     "TARGET_BLUEPRINT",
     "TARGET_DATASET",
+    "TARGET_SKELETON",
     "RuleSpec",
 ]
 
 TARGET_BLUEPRINT: Final = "blueprint"
 TARGET_DATASET: Final = "dataset"
+
+#: A skeleton rule's subject is the fill state, not a document. Its context is
+#: a :class:`~agentprops.validation.skeleton.SkeletonContext`.
+TARGET_SKELETON: Final = "skeleton"
+
+TARGETS: Final[frozenset[str]] = frozenset({TARGET_BLUEPRINT, TARGET_DATASET, TARGET_SKELETON})
 
 
 @dataclass(frozen=True)
@@ -146,5 +161,11 @@ RULE_REGISTRY: Final[Mapping[str, RuleSpec]] = dict(
         _spec("DS-031", TARGET_DATASET, ds.ds_031),
         _spec("DS-032", TARGET_DATASET, ds.ds_032),
         _spec("DS-033", TARGET_DATASET, ds.ds_033),
+        # 3.3 Skeleton rules
+        _spec("SK-001", TARGET_SKELETON, sk.sk_001),
+        _spec("SK-002", TARGET_SKELETON, sk.sk_002),
+        _spec("SK-003", TARGET_SKELETON, sk.sk_003),
+        _spec("SK-004", TARGET_SKELETON, sk.sk_004),
+        _spec("SK-005", TARGET_SKELETON, sk.sk_005),
     ]
 )
