@@ -266,6 +266,112 @@ Alternative rejected: a ruff banned-API config plus a CI grep. Deferred to which
 this extended to `validation/` and `expansion/`; the AST test generalises by adding a directory to
 its table.
 
+## [M1, fix round 1] Every `int` and `bool` field is `StrictInt`/`StrictBool` (ruling R-23)
+M1's review showed that `seed: int` swallows DS-020, whose entire check is "`seed` is an integer".
+Ruling R-23 settles the underlying question — the validator operates on the **raw document**, the
+`dict` off `json.loads`, and a model is constructed only after validation passes — so `seed` stays
+typed `int` and DS-020 is implemented against the raw dict at M2 with a real corpus case. What
+changed here is the hardening R-23 requires: every `int` and `bool` field in `models/` is now
+`StrictInt` or `StrictBool`.
+Reason: lax Pydantic *silently rewrites* values. Measured: `seed: "42"` parsed as `42` and
+`seed: true` parsed as `1`, both of which then fail R-08's round-trip criterion — a document that
+parses and is stored in a form it cannot be re-emitted as, which is worse than either accepting or
+rejecting it. Under strict typing `"42"`, `true`, `3.7` and `3.0` all raise `int_type`, and `"no"`
+and `0` raise `bool_type`. Coercion can no longer be the reason a stored document stops
+round-tripping. The emitted JSON Schemas are byte-identical either way (JSON Schema has no notion of
+coercion), so `schemas/` did not change.
+Nothing is taken from the catalogue by this. Two consequences for M2, and they are constraints on
+the corpus, not on the rules: **BP-008's corpus case must use `0` or `-1`**, never a non-integer
+(the "is an integer" half is now enforced at parse time *and* by the catalogue against the raw
+document; the "greater than 0" half is the catalogue's alone). And **any BP-017 case must use
+`{"op": "replace"}` on `/nodes/*/pool`**, never `{"op": "remove"}` — `pool` is a required field — and
+never `0`, which is no longer a boolean. Both are asserted in
+`tests/unit/test_models_accept_broken_documents.py` so the constraint is discoverable from code.
+Alternative rejected: widening `seed` to `int | str | float | None` so DS-020 could own it alone.
+R-23 rejects this explicitly, and it would have spread through every numeric field, given M3 a union
+to store and M9 a schema that permits nonsense. Also rejected: `ConfigDict(strict=True)` on
+`StrictModel`, which applies to every field — in strict mode a `datetime` field accepts only
+`datetime` objects and a `UUID` field only `UUID` objects, so no JSON document would parse at all.
+
+## [M1, fix round 1] The model is the timestamp canonicaliser (ruling R-24)
+`Provenance.created_at` accepts several valid ISO 8601 spellings of one instant and canonicalises
+them: `…22+00:00` and `…22.000Z` both become `…22Z`, `…22.500Z` and `…22.5Z` both become
+`…22.500000Z`, `2026-09-08 10:14:22Z` gains its `T`, and a non-UTC offset such as `+05:30` is
+preserved rather than normalised to UTC. Both golden fixtures happen to use the one spelling that
+survives unchanged, so nothing failed — which is what made it a latent trap rather than a bug.
+R-24 rules that this is correct: "round-trips without loss" means the model's canonical output, not
+the author's original bytes.
+Reason: recording it now costs a test; discovering it later costs a debugging session with three
+backends in play. It lands at M5, where an LLM fills the provenance section and will plausibly emit
+fractional seconds or `+00:00` — the document validates and stores, and then `dataset_export` emits
+different bytes than were submitted, which is exactly the byte-stability M7's "exported from SQLite,
+imported into Postgres" gate depends on. `tests/unit/test_models_roundtrip.py` now pins eight
+spellings against their canonical forms, asserts canonicalisation is a **fixed point** (twice equals
+once, so a document that has been through the model round-trips byte-for-byte forever after), and
+asserts the rewrite never changes *which instant* is denoted.
+Alternative rejected: typing the timestamps as `str` to preserve the author's bytes, which R-24
+names as the fallback if byte-preservation is ever required. Rejected now because it moves timestamp
+comparison into the catalogue and gives M3 a `str` to put in a `TIMESTAMPTZ` column.
+
+## [M1, fix round 1] R-04's coverage is a table keyed by rule id, not an inherited corpus
+`tests/unit/test_models_accept_broken_documents.py` previously parametrised solely over
+`manifest.json`'s 28 cases. Those reach 7 of the 11 rule ids R-04 names and miss DS-017, DS-020,
+BP-002 and BP-008 — which is exactly how the `seed: int` problem stayed hidden. Added
+`EXTRA_PARSE_CASES` (hand-written, keyed by rule id, must parse), `STRICT_BY_DESIGN_CASES` (must
+raise, per R-23), and `test_ruling_r04_ids_are_all_covered`, which asserts the union of all three
+tables covers the eleven.
+Reason: the corpus is the wrong place to look for R-04 coverage, and the spec says so — R-14 quotes
+`worked-example.md` calling it "a starting set, not the complete one". Deriving a ruling's coverage
+from someone else's incomplete input is what failed. A named set of the eleven ids, with an assertion
+that every one is exercised, means the next ruling is added to a table rather than discovered
+missing two milestones later. `test_the_corpus_alone_does_not_cover_ruling_r04` pins *why* the
+hand-written tables exist, and is designed to fail — and be deleted — if R-14's corpus extension
+ever does reach all eleven.
+Alternative rejected: a named coverage exemption for DS-020, which the review offered and R-23
+explicitly declines.
+
+## [M1, fix round 1] `FaultSpec` keeps `extra="allow"`; R-07 was amended to say so
+No code change. The review adjudicated in favour of the M1 reasoning and R-07 now carries an
+amendment: "no additional properties" describes the shape **DS-022 enforces**, not the model's
+config, because under `extra="forbid"` the model would raise before DS-022 could report the unknown
+key and no DS-022 corpus case would be writable.
+Reason: recorded here because the amendment carries two consequences forward that are easy to lose.
+**DS-022 implements the unknown-key check itself** (M2) — it is not inherited from Pydantic. And
+**the web app's live schema validation will not flag an unknown fault key** (M9), because
+`$defs/FaultSpec` emits `additionalProperties: true` while every other definition emits `false`.
+
+## [M1, fix round 1] The R-04 AST guard also covers constrained types and model-wide config
+The guard caught `Field(min_length=...)`, `Literal[...]` and `@field_validator`, but not the routes
+that need no `Field()` call: `PositiveInt`, `conint(gt=0)`, `Annotated[int, Ge(0)]`,
+`StringConstraints(...)`, `AfterValidator(...)`, or a model-wide `ConfigDict(str_min_length=...)`.
+`max_iterations: PositiveInt` is the single most likely future violation of R-04 and would have
+passed. Added a `CONSTRAINED_TYPE_NAMES` denylist matched on the bare identifier anywhere in the
+module — so the *import* of one of those names is flagged too, which is the earliest possible
+warning — plus an allowlist for `ConfigDict` keywords. `StrictInt`/`StrictBool` are deliberately
+absent from the denylist: they constrain coercion, not value, and R-23 requires them. Verified by
+mutation: all five routes injected into `models/labels.py` were reported by name, then reverted.
+The layering guard also missed relative imports: `from ..validation import x` has no `agentprops`
+segment to anchor on, so `node.level > 0` is now matched against the forbidden layers directly. Both
+relative spellings (`from ..validation import x` and `from .. import validation`) were
+mutation-verified.
+Reason: a guard that covers one route to a violation and not the four others gives false confidence,
+which is worse than no guard, because it is the thing everyone points at when asking whether R-04
+still holds.
+`tests/unit/test_schemas.py`'s forbidden-keyword set gained `maximum`, `exclusiveMaximum`,
+`multipleOf`, `minItems`, `maxItems` and `uniqueItems` for the same reason, on the artefact the web
+app actually consumes.
+
+## [M1, fix round 1] Fixture-specific assertions moved out of the parametrised test
+`test_dataset_parses_into_the_expected_shape` ran over the `datasets/*.json` glob but asserted
+`agent_id == "location-onboarding"`, `len(nodes) == 8` and `"request_docs" in pools`, so a future
+fixture for a different blueprint would have failed spuriously — contradicting the suite's own stated
+design. The parametrised test now asserts only what is true of any dataset for any blueprint
+(`set(pools) & set(nodes) == set()`, and that every `entity@revision` reference resolves against the
+declared cast); the counts and ids moved to `test_the_golden_location_onboarding_datasets`, which
+names its two fixtures explicitly.
+Reason: a table-driven suite whose assertions are not table-driven is a trap for whoever adds the
+next fixture, and the failure would look like their fixture being wrong.
+
 ---
 
 ## Questions for the owner
@@ -308,3 +414,17 @@ its table.
   so it is required, and a blueprint that omits it gets a shape error rather than BP-017. Defaulting
   it to `false` would turn that into a rule id, which is friendlier; not done because the two
   specifications agree it is a required field and R-08 says build contracts' shapes.
+- **M1 fix round 1: rulings R-23 and R-24 close two of the four questions above, and narrow one.**
+  Recorded here because the file is append-only and the entries above now read as more open than
+  they are. **R-23 closes** the "is present" question for the *numeric* rules: DS-020 and BP-008's
+  "is an integer" half are implemented against the raw document, so nothing is swallowed. It also
+  answers a question nobody had asked in writing — whether the validator takes a raw `dict` or a
+  parsed model — with "the raw `dict`, and the model is built afterwards". **R-24 closes** the
+  timestamp half of the round-trip contract: the model canonicalises and that is correct.
+  What still stands, unchanged, is the *presence* half for the four string rules — DS-021, DS-025,
+  DS-026, DS-028 — where a corpus case must mutate the value rather than remove the key. R-23's
+  reasoning does not extend to it, because a *missing* key is not something a raw-document check and
+  a model constraint can both hold: whichever runs first owns it, and R-04 assigns presence to the
+  model. Two further constraints on M2's corpus follow from the R-23 hardening and are asserted in
+  `tests/unit/test_models_accept_broken_documents.py`: BP-008's case must use `0`/`-1`, and BP-017's
+  must `replace` `/nodes/*/pool` with `false` rather than `remove` it or set it to `0`.
