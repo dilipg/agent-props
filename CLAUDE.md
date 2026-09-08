@@ -20,6 +20,7 @@ previous one's criteria pass.
 
 | Document | Contains | Read when |
 |---|---|---|
+| [docs/spec-rulings.md](docs/spec-rulings.md) | **Authoritative.** Corrections and binding interpretations applied to the spec after a consistency scan found 35 disagreements between the four documents. Where a ruling and another document conflict, the ruling wins | Before any code, every session — read it alongside the handoff |
 | [docs/build-handoff.md](docs/build-handoff.md) | Locked stack, repo layout, the eleven milestones and their acceptance criteria, testing strategy, non-goals | Before any code, every session |
 | [docs/contracts.md](docs/contracts.md) | Error envelope, model shapes, the full validation rule catalogue (`BP-*`, `DS-*`, `SK-*`, `RT-*`), MCP tool signatures, step-resolution algorithm, storage `Protocol`, SQL DDL, Mongo indexes, seeded-expansion API | Before touching `models/`, `validation/`, `server/`, `storage/` or `expansion/` |
 | [docs/worked-example.md](docs/worked-example.md) | The `location-onboarding` blueprint, two golden datasets, the rejection-corpus mutation manifest, the M8 end-to-end scenario | At M0 (commit these as fixtures) and whenever writing tests |
