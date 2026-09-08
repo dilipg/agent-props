@@ -242,12 +242,12 @@ Sections 3.1 to 3.3 are the rule registry. **Section 3.4 is a response-code tabl
 | BP-008 | `kind: loop` nodes declare `max_iterations` as an integer greater than 0 |
 | BP-009 | Every `entity:` ref in any node schema resolves to a declared entity |
 | BP-010 | Every `var` path in an edge condition exists as a property in the source node's `output_schema` |
-| BP-011 | Every `input_schema` and `output_schema` is valid Draft 2020-12 JSON Schema |
+| BP-011 | Every `input_schema`, `output_schema` and entity `schema` is valid Draft 2020-12 JSON Schema (entity schemas added by ruling R-27: nothing checked them, because BP-011 strips `entity:` refs) |
 | BP-012 | `outcome_schema` is valid Draft 2020-12 JSON Schema |
 | BP-013 | Every `label_schema` dimension has at least one value, and values within a dimension are unique |
 | BP-014 | If two nodes share a `tool_name`, they must not both be reachable in one step from any single node. Otherwise resolution is ambiguous and cannot be repaired at runtime |
 | BP-015 | Entity ids are unique |
-| BP-016 | A `published` blueprint version cannot be modified. Any upsert against an existing published `{agent_id, version}` is rejected |
+| BP-016 | A `published` blueprint version cannot be modified. An upsert against an existing published `{agent_id, version}` is rejected unless the submitted document is identical to the stored one (ruling R-29: a byte-identical re-publish changes nothing, and M7's import must stay idempotent) |
 | BP-017 | `kind: loop` implies `pool: true` |
 | BP-018 | Every cycle in the graph passes through at least one `kind: loop` node |
 | BP-019 | *(warning)* A node declares `notes`. Absent notes produce weaker generated data |
@@ -259,7 +259,7 @@ Sections 3.1 to 3.3 are the rule registry. **Section 3.4 is a response-code tabl
 | DS-001 | `blueprint` references an existing published blueprint at that exact version |
 | DS-002 | Every node in the blueprint has an entry in `nodes` |
 | DS-003 | `nodes` contains no key that is not a blueprint node |
-| DS-004 | Each fixture `output` validates against its node's `output_schema`, unless `fault` is set |
+| DS-004 | Each fixture `output` is present and validates against its node's `output_schema`; when `fault` is set the schema check is skipped and `output` may be absent (presence moved here from the model by ruling R-07's second amendment) |
 | DS-005 | Each fixture `input`, when present, validates against its node's `input_schema` |
 | DS-006 | Every id in `entity_refs` resolves to a declared entity |
 | DS-007 | *(warning)* Every declared entity is referenced by at least one fixture |
@@ -274,7 +274,7 @@ Sections 3.1 to 3.3 are the rule registry. **Section 3.4 is a response-code tabl
 | DS-016 | Every key in `expected.node_expectations` is an existing node |
 | DS-017 | `expected.comparison` is one of `exact`, `schema`, `subset` |
 | DS-018 | `pools` has an entry for every `pool: true` node and no entry for any other node |
-| DS-019 | Every pool has at least one fixture, and each validates against the node's `output_schema` |
+| DS-019 | Every pool has at least one fixture, and each validates against the node's `output_schema`, and each `input`, when present, against its `input_schema` (the `input` half added by ruling R-28: nothing validated it, since DS-005 covers `nodes` only) |
 | DS-020 | `seed` is an integer |
 | DS-021 | `narrative` is present and at least 30 characters |
 | DS-022 | When `fault` is set, it conforms to the FaultSpec shape |

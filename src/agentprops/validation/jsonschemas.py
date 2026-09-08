@@ -221,6 +221,14 @@ def _walk_sites(
     if not isinstance(schema, Mapping) or depth > MAX_ENTITY_REF_DEPTH:
         return
     if _entity_ref_target(schema) == entity:
+        # Stops here rather than descending: the whole value at this location
+        # *is* the entity's state, so there is nothing finer to point at. The
+        # consequence, unreachable in the golden fixtures and worth knowing
+        # anyway: an entity embedded inside *another* entity's schema
+        # contributes no site of its own, because the walk never enters the
+        # outer entity's substituted body. DS-008 compares the outer state,
+        # which contains the inner one, so drift is still caught - just
+        # reported one level up.
         sites.append((path, instance))
         return
     properties = schema.get("properties")
@@ -272,11 +280,24 @@ def entity_ref_sites(
 
 
 def canonical(value: Any) -> str:
-    """A stable text form of a JSON value, for DS-008's identity comparison.
+    """A stable text form of a JSON value, for identity comparison.
+
+    Used by DS-008 (an entity's state is the same everywhere) and BP-016 (a
+    re-publish is identical, ruling R-29).
 
     "Byte-identical" (DS-008's wording) is read as *canonically* identical: keys
     sorted, so a re-ordered object is not drift, but ``1`` and ``1.0`` - and
     ``true`` and ``1`` - are drift, because they are different JSON values that
-    Python's ``==`` treats as equal. See DECISIONS.md.
+    Python's ``==`` treats as equal. See DECISIONS.md and ruling R-30.
+
+    A value ``json.dumps`` cannot serialise falls back to ``repr``. That is
+    unreachable from ``json.loads`` output, but ruling R-23 notes that
+    ``dataset_validate(dataset: object)`` may be handed an already-parsed
+    object - a ``datetime``, a ``UUID``, a ``Decimal`` - and a rule must report
+    rather than raise. ``repr`` is stable within a process, which is all an
+    identity comparison needs.
     """
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except TypeError:
+        return repr(value)

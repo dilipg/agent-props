@@ -12,7 +12,8 @@ and three of those are load-bearing rulings:
   out; these tests are that author.
 - **R-02's cyclic reachability.** DS-010 hinges on ``after_node`` being an
   ancestor "via at least one path", and the loop is what makes the two readings
-  of the catalogue's wording differ. The graph is tested directly.
+  of the catalogue's wording differ - the reason R-02's "descendant" clause was
+  struck. The graph is tested directly.
 - **R-20's duplicate-key detection**, which only exists before parsing.
 
 Plus the precedence decisions from R-18 and the ones this milestone had to make
@@ -26,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from agentprops.models import Dataset
 from agentprops.validation import validate_blueprint, validate_dataset
 from agentprops.validation.blueprint import condition_var_paths
 from agentprops.validation.graph import Graph
@@ -39,13 +41,15 @@ from agentprops.validation.jsonschemas import (
 from agentprops.validation.pointers import escape_token, pointer, section_for_pointer
 from agentprops.validation.rawjson import parse_with_duplicate_keys
 from agentprops.validation.timeline import split_ref
-from corpus import DATASET_RESOLVER, GOLDEN_BLUEPRINT, base_document, mutated
+from corpus import DATASET_RESOLVER, GOLDEN_BLUEPRINT, CorpusResolver, base_document, mutated
 
 ENTITY_SCHEMAS = {entity["id"]: entity["schema"] for entity in GOLDEN_BLUEPRINT["entities"]}
 
 
-def rules_for_blueprint(document: dict[str, Any]) -> set[str]:
-    return {error.rule for error in validate_blueprint(document).errors}
+def rules_for_blueprint(
+    document: dict[str, Any], resolver: CorpusResolver | None = None
+) -> set[str]:
+    return {error.rule for error in validate_blueprint(document, resolver).errors}
 
 
 def rules_for_dataset(document: dict[str, Any]) -> set[str]:
@@ -142,13 +146,14 @@ def test_cycle_ignoring_finds_a_loop_free_cycle_and_nothing_else() -> None:
 
 
 def test_ds_010_accepts_a_reference_from_inside_the_loop() -> None:
-    """The golden graph's cycle is why ruling R-02's two readings differ.
+    """The golden graph's cycle is why ruling R-02 had to be corrected.
 
     ``recheck_store`` observes ``store@after_docs``, whose ``after_node`` is
     ``request_docs``. ``request_docs`` is *also* downstream of
-    ``recheck_store``, through the loop - so the catalogue's literal "downstream
-    of it" wording would reject the golden fixture. R-02's equivalent form,
-    "an ancestor via at least one path", accepts it.
+    ``recheck_store``, through the loop - so both the catalogue's literal
+    "downstream of it" wording and R-02's original "descendant" clause reject
+    the golden fixture. The clause is now struck: DS-010 fires when the
+    referencing node is not reachable *from* ``after_node``, and nothing else.
     """
     document = base_document("dataset")
     assert document["nodes"]["recheck_store"]["entity_refs"] == ["store@after_docs"]
@@ -211,15 +216,119 @@ def test_bp_006_alone_when_the_entry_node_does_not_exist() -> None:
     assert rules_for_blueprint(document) == {"BP-006"}
 
 
+def test_bp_006_reports_an_inbound_edge_into_the_entry_node() -> None:
+    """BP-006's *other* half, and the only way to cover it (ruling R-31).
+
+    Membership, not an exact set, and that is forced rather than lazy: any
+    blueprint with an edge into ``entry_node`` must also carry either a cycle
+    (BP-018) or a predecessor unreachable from the entry (BP-005), so no
+    mutation can ever report BP-006 alone. Here the added edge closes a cycle
+    through no loop node, so BP-018 rides along.
+
+    `RULE_HALF_EXEMPTIONS` in `test_validation_drift.py` names *this test* as
+    the coverage for the half, and a gate test fails if it disappears - which is
+    the defect R-31's correction fixes, since the ruling previously claimed a
+    test that did not exist and `bp_006`'s inbound branch was the one predicate
+    branch in M2 with no test of it firing.
+    """
+    document = base_document("blueprint")
+    document["edges"].append(
+        {"from": "assign_training", "to": "receive_request", "condition": None}
+    )
+    reported = rules_for_blueprint(document)
+    assert "BP-006" in reported
+    errors = [error for error in validate_blueprint(document).errors if error.rule == "BP-006"]
+    assert errors[0].context["inbound_from"] == ["assign_training"]
+    assert errors[0].pointer == "/entry_node"
+
+
 def test_ds_004_skipped_entirely_when_a_fault_is_set() -> None:
-    """Ruling R-07, both halves: no schema check, and `output` must be an object."""
+    """Ruling R-07, all three halves: no schema check, absent is fine, else an object."""
     document = base_document("dataset")
     document["nodes"]["verify_compliance"]["fault"] = {"kind": "error", "code": "BOOM"}
     document["nodes"]["verify_compliance"]["output"] = {"anything": True}
     assert rules_for_dataset(document) == set()
 
+    # R-07's second amendment: absent is explicitly blessed on a faulted
+    # fixture. Every earlier version of this test supplied an output, which is
+    # how the absent path went untested.
+    document["nodes"]["verify_compliance"].pop("output")
+    assert rules_for_dataset(document) == set()
+
     document["nodes"]["verify_compliance"]["output"] = "a string, not an object"
     assert rules_for_dataset(document) == {"DS-004"}
+
+
+def test_ds_004_owns_output_presence_when_no_fault_is_set() -> None:
+    """The other direction of R-07's second amendment.
+
+    `output` is optional on the model *because* a ruling blesses its absence on
+    a faulted fixture, so the rule has to be the thing that requires it
+    otherwise - or an absent output validates clean and raises at parse time.
+    """
+    document = base_document("dataset")
+    document["nodes"]["complete"].pop("output")
+    assert rules_for_dataset(document) == {"DS-004"}
+    errors = [
+        error
+        for error in validate_dataset(document, DATASET_RESOLVER).errors
+        if error.rule == "DS-004"
+    ]
+    assert errors[0].pointer == "/nodes/complete/output"
+
+
+def test_a_faulted_fixture_with_no_output_validates_and_parses() -> None:
+    """The composite M2's review found, pinned in one place.
+
+    Before ruling R-07's second amendment this document returned **zero
+    findings and ok: True** and then raised
+    ``('nodes','verify_compliance','output') missing`` from
+    ``Dataset.model_validate`` - an exception where a rule id belongs, landing
+    in `service/` at M4/M5 under R-23's validate-then-parse ordering.
+    `test_validation_corpus.py` now asserts the general invariant for every
+    case; this states the specific one that failed.
+    """
+    document = base_document("dataset")
+    document["nodes"]["verify_compliance"]["fault"] = {"kind": "timeout", "after_ms": 250}
+    document["nodes"]["verify_compliance"].pop("output")
+    envelope = validate_dataset(document, DATASET_RESOLVER)
+    assert (envelope.ok, envelope.errors) == (True, [])
+    assert Dataset.model_validate(document).nodes["verify_compliance"].output is None
+
+
+def test_ds_019_validates_a_pool_entry_input() -> None:
+    """Ruling R-28: before it, a pool entry's `input` was validated by nothing.
+
+    R-18 gives every pool fixture to DS-019, whose text named only
+    `output_schema`, and DS-005 covers `nodes` only - so the check fell between
+    the two rules. It stays DS-019's rather than becoming DS-005's, to preserve
+    R-18's one-owner-per-pool-fixture principle.
+    """
+    document = base_document("dataset")
+    document["pools"]["request_docs"][0]["input"] = {"doc_type": "fssai"}
+    assert rules_for_dataset(document) == set()
+
+    document["pools"]["request_docs"][0]["input"] = {"doc_type": 12345}
+    assert rules_for_dataset(document) == {"DS-019"}
+
+    errors = validate_dataset(document, DATASET_RESOLVER).errors
+    assert errors[0].pointer == "/pools/request_docs/0/input/doc_type"
+    assert errors[0].section == "nodes.branches"
+
+
+def test_ds_019_owns_output_presence_and_the_fault_skip_for_pools() -> None:
+    """The pool half of R-07's second amendment, and R-26's ratified fault skip.
+
+    `NodeFixture` is shared with pool entries, so making `output` optional made
+    a pool entry with no output parse - and DS-019 has to be what rejects it, or
+    `fetch_step` serves a fixture with nothing in it.
+    """
+    document = base_document("dataset")
+    document["pools"]["request_docs"][0].pop("output")
+    assert rules_for_dataset(document) == {"DS-019"}
+
+    document["pools"]["request_docs"][0]["fault"] = {"kind": "timeout"}
+    assert rules_for_dataset(document) == set()
 
 
 def test_ds_004_and_ds_005_skip_a_node_key_that_is_not_a_blueprint_node() -> None:
@@ -319,6 +428,68 @@ def test_canonical_treats_key_order_as_equal_and_json_type_as_different(
 # --------------------------------------------------------------------------- #
 # Schema helpers.
 # --------------------------------------------------------------------------- #
+
+
+def test_bp_011_reports_an_invalid_entity_schema() -> None:
+    """Ruling R-27's hole, closed. Nothing checked `entities[*].schema` before.
+
+    BP-011 covered node schemas, BP-012 `outcome_schema`, and R-18 has BP-011
+    strip the very refs that reach an entity - so a malformed entity schema
+    published, and the first symptom was a DS-004 finding one milestone later,
+    against a schema that could not be applied.
+    """
+    document = base_document("blueprint")
+    document["entities"][0]["schema"] = {"type": "not-a-json-schema-type"}
+    assert rules_for_blueprint(document) == {"BP-011"}
+
+    errors = [error for error in validate_blueprint(document).errors if error.rule == "BP-011"]
+    assert errors[0].pointer == "/entities/0/schema"
+    assert errors[0].context["entity"] == "store"
+
+
+def test_a_dataset_reports_rather_than_raises_when_an_entity_schema_is_unusable() -> None:
+    """The defensive path behind R-27, still needed for a blueprint stored before it.
+
+    `instance_findings` catches an unusable schema and reports it as the owning
+    rule's finding. A raise here would be an exception where a rule id belongs.
+    """
+    blueprint = base_document("blueprint")
+    blueprint["entities"][0]["schema"] = {"type": "not-a-json-schema-type"}
+    resolver = CorpusResolver(published=[blueprint])
+    envelope = validate_dataset(base_document("dataset"), resolver)
+    assert envelope.ok is False
+    assert {error.rule for error in envelope.errors} == {"DS-004", "DS-005"}
+
+
+def test_bp_016_is_silent_on_a_byte_identical_republish() -> None:
+    """Ruling R-29: an identical upsert changes nothing, so it is not a modification.
+
+    M7's `dataset_import` carries a blueprint version alongside its datasets, so
+    under the literal "any upsert" reading re-importing into a store that
+    already holds that version identically would fail - defeating the promotion
+    path M7 exists to build.
+    """
+    stored = base_document("blueprint")
+    resolver = CorpusResolver(published=[stored])
+    assert rules_for_blueprint(base_document("blueprint"), resolver) == set()
+
+
+def test_bp_016_ignores_key_order_but_not_content() -> None:
+    """Comparison uses DS-008's canonical form, so re-ordering is not an edit."""
+    stored = base_document("blueprint")
+    resolver = CorpusResolver(published=[stored])
+
+    reordered = {key: stored[key] for key in reversed(list(stored))}
+    assert "BP-016" not in rules_for_blueprint(reordered, resolver)
+
+    edited = base_document("blueprint")
+    edited["description"] = "Edited after publication."
+    assert rules_for_blueprint(edited, resolver) == {"BP-016"}
+
+
+def test_bp_016_never_fires_without_a_resolver() -> None:
+    """`blueprint_validate` checks a document on its own terms; a first publish is not an edit."""
+    assert "BP-016" not in rules_for_blueprint(base_document("blueprint"))
 
 
 def test_resolve_entity_refs_substitutes_and_keeps_siblings() -> None:

@@ -158,7 +158,7 @@
     },
     "FaultSpec": {
       "additionalProperties": true,
-      "description": "A fixture that represents a failure rather than a success.\n\nShape supplied by ruling R-07, since no document defined it and neither\ngolden fixture sets ``fault``. When ``fault`` is set, DS-004 skips\n``output_schema`` validation entirely and requires ``output`` to be absent\nor an object.\n\n``extra=\"allow\"`` overrides the package default: DS-022 owns conformance to\nthis shape, so an unexpected key must reach the validator as a rule id\nrather than raise at parse time, and ``allow`` (not the Pydantic default\n``ignore``) is what keeps such a key intact for DS-022 to find - and keeps\nthe round trip lossless.",
+      "description": "A fixture that represents a failure rather than a success.\n\nShape supplied by ruling R-07, since no document defined it and neither\ngolden fixture sets ``fault``. When ``fault`` is set, DS-004 skips\n``output_schema`` validation entirely and allows ``output`` to be absent -\nwhich is why :attr:`NodeFixture.output` is optional (R-07's second\namendment).\n\n``extra=\"allow\"`` overrides the package default: DS-022 owns conformance to\nthis shape, so an unexpected key must reach the validator as a rule id\nrather than raise at parse time, and ``allow`` (not the Pydantic default\n``ignore``) is what keeps such a key intact for DS-022 to find - and keeps\nthe round trip lossless.",
       "properties": {
         "kind": {
           "title": "Kind",
@@ -247,9 +247,17 @@
           "title": "Input"
         },
         "output": {
-          "additionalProperties": true,
-          "title": "Output",
-          "type": "object"
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output"
         },
         "entity_refs": {
           "items": {
@@ -283,7 +291,6 @@
         }
       },
       "required": [
-        "output",
         "entity_refs"
       ],
       "title": "NodeFixture",

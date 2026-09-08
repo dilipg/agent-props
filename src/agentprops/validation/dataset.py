@@ -12,13 +12,17 @@ The rules that are not what the catalogue literally says:
 - **DS-003** additionally covers a ``pool: true`` node appearing in *both*
   ``nodes`` and ``pools`` (ruling R-01).
 - **DS-004** covers ``nodes`` only - pool fixtures are DS-019's (ruling R-18) -
-  is skipped entirely when ``fault`` is set, and then requires ``output`` to be
-  absent or an object (ruling R-07).
+  skips ``output_schema`` entirely when ``fault`` is set, and then requires
+  ``output`` to be absent or an object (ruling R-07). It also owns whether
+  ``output`` is *present*, which R-07's second amendment moved here from the
+  model, because a ruling that blesses an absent value cannot leave a model
+  requiring it.
 - **DS-013** is unreachable through a parsed JSON document, because a mapping
   cannot hold one key twice. It reads the duplicate keys the *tool boundary*
   found in the raw text (ruling R-20).
-- **DS-019** owns every pool fixture, including the ``fault`` skip DS-004 gets,
-  for the same reason (see DECISIONS.md).
+- **DS-019** owns every pool fixture: its ``output``, its presence, the
+  ``fault`` skip DS-004 gets (ruling R-26), and - since ruling R-28 - its
+  ``input``, which nothing validated before.
 - **DS-022** implements the unknown-key check itself, because ``FaultSpec`` is
   deliberately ``extra="allow"`` so the key reaches this rule instead of raising
   (ruling R-07).
@@ -175,52 +179,88 @@ def ds_003(ctx: DatasetContext) -> list[RuleError]:
     return findings
 
 
-def _fault_of(fixture: Any) -> Any:
-    """A fixture's ``fault``, or ``None`` when it is absent or null."""
-    return as_mapping(fixture).get("fault")
+def _output_findings(
+    ctx: DatasetContext, node_id: str, fixture: Any, at: str, **context: Any
+) -> list[RuleError]:
+    """The shared ``output`` check behind DS-004 and DS-019.
+
+    Ruling R-07's second amendment moved *presence* here from the model, and the
+    rule id the caller passes is the only difference between the two:
+
+    - ``fault`` set: skip ``output_schema`` entirely, and accept an absent
+      ``output``. If one is present it must be an object - "not the node's
+      success shape" is what R-07 reads "the fault shape" as.
+    - ``fault`` unset: ``output`` must be **present** and must validate.
+
+    Presence cannot stay with the model here, because R-07 blesses the absent
+    form: a required field would make a faulted fixture with no ``output``
+    validate clean and then raise at parse time, which is an exception where a
+    rule id belongs.
+    """
+    rule = context.pop("rule")
+    label = context.pop("label")
+    if fixture.get("fault") is not None:
+        output = fixture.get("output")
+        if "output" in fixture and output is not None and not isinstance(output, dict):
+            return [
+                ctx.error(
+                    rule,
+                    at,
+                    f"faulted {label} must carry no output or an object, "
+                    f"got {type(output).__name__}.",
+                    node_id=node_id,
+                    **context,
+                )
+            ]
+        return []
+    if fixture.get("output") is None:
+        return [
+            ctx.error(
+                rule,
+                at,
+                f"{label} declares no output; only a faulted fixture may omit one.",
+                node_id=node_id,
+                **context,
+            )
+        ]
+    schema = resolve_entity_refs(
+        ctx.blueprint.schema_of(node_id, "output_schema"), ctx.blueprint.entity_schemas
+    )
+    return [
+        ctx.error(
+            rule,
+            finding.pointer_under(at),
+            f"output for {label} violates output_schema: {finding.message}",
+            node_id=node_id,
+            **context,
+        )
+        for finding in instance_findings(fixture.get("output"), schema)
+    ]
 
 
 def ds_004(ctx: DatasetContext) -> list[RuleError]:
-    """Each fixture ``output`` validates against its node's ``output_schema``,
-    unless ``fault`` is set.
+    """Each fixture ``output`` is present and validates against its node's
+    ``output_schema``, unless ``fault`` is set.
 
     ``nodes`` only (ruling R-18: pool fixtures are DS-019's), and skipped
     entirely for an unknown node key (DS-003's) or a pool node (DS-003/DS-018's).
     When ``fault`` is set, ruling R-07 replaces the schema check with "``output``
-    is absent or an object".
+    is absent or an object"; when it is unset, R-07's second amendment makes the
+    presence of ``output`` this rule's business rather than the model's.
     """
     findings: list[RuleError] = []
     for node_id in sorted(ctx.ds.nodes):
         if node_id not in ctx.blueprint.node_by_id or node_id in ctx.blueprint.pool_node_ids:
             continue
-        fixture = ctx.ds.nodes[node_id]
-        at = pointer("nodes", node_id, "output")
-        if _fault_of(fixture) is not None:
-            output = fixture.get("output")
-            if "output" in fixture and not isinstance(output, dict):
-                findings.append(
-                    ctx.error(
-                        "DS-004",
-                        at,
-                        f"faulted fixture {node_id!r} must carry no output or an object, "
-                        f"got {type(output).__name__}.",
-                        node_id=node_id,
-                    )
-                )
-            continue
-        if "output" not in fixture:
-            continue  # a required field: the model owns presence (ruling R-04)
-        schema = resolve_entity_refs(
-            ctx.blueprint.schema_of(node_id, "output_schema"), ctx.blueprint.entity_schemas
-        )
         findings.extend(
-            ctx.error(
-                "DS-004",
-                finding.pointer_under(at),
-                f"fixture output for {node_id!r} violates output_schema: {finding.message}",
-                node_id=node_id,
+            _output_findings(
+                ctx,
+                node_id,
+                ctx.ds.nodes[node_id],
+                pointer("nodes", node_id, "output"),
+                rule="DS-004",
+                label=f"fixture {node_id!r}",
             )
-            for finding in instance_findings(fixture.get("output"), schema)
         )
     return findings
 
@@ -480,13 +520,16 @@ def ds_018(ctx: DatasetContext) -> list[RuleError]:
 
 
 def ds_019(ctx: DatasetContext) -> list[RuleError]:
-    """Every pool has at least one fixture, and each validates against the node's
-    ``output_schema``.
+    """Every pool has at least one fixture, each ``output`` validates against the
+    node's ``output_schema``, and each ``input``, when present, against its
+    ``input_schema``.
 
     Ruling R-18 gives DS-019 the whole of ``pools``, so DS-004 and DS-005 never
-    look here. Pool keys that are not ``pool: true`` nodes are DS-018's and are
-    skipped. A faulted pool entry skips the schema check exactly as DS-004 does
-    (ruling R-07's reasoning, extended - see DECISIONS.md).
+    look here - which is why ruling R-28 widened *this* rule to cover a pool
+    entry's ``input`` rather than sending it to DS-005: before R-28 nothing
+    validated it at all. Pool keys that are not ``pool: true`` nodes are
+    DS-018's and are skipped. The ``fault`` and presence handling is DS-004's,
+    applied through the same helper (rulings R-07 and R-26).
     """
     findings: list[RuleError] = []
     for node_id in sorted(ctx.ds.pools):
@@ -503,25 +546,34 @@ def ds_019(ctx: DatasetContext) -> list[RuleError]:
                 )
             )
             continue
-        schema = resolve_entity_refs(
-            ctx.blueprint.schema_of(node_id, "output_schema"), ctx.blueprint.entity_schemas
+        input_schema = resolve_entity_refs(
+            ctx.blueprint.schema_of(node_id, "input_schema"), ctx.blueprint.entity_schemas
         )
         for index, entry in enumerate(entries):
-            if _fault_of(entry) is not None:
+            findings.extend(
+                _output_findings(
+                    ctx,
+                    node_id,
+                    entry,
+                    pointer("pools", node_id, index, "output"),
+                    rule="DS-019",
+                    label=f"pool fixture {index} for {node_id!r}",
+                    iteration=index,
+                )
+            )
+            if entry.get("input") is None:
                 continue
-            if "output" not in entry:
-                continue  # a required field: the model owns presence (ruling R-04)
-            at = pointer("pools", node_id, index, "output")
+            at = pointer("pools", node_id, index, "input")
             findings.extend(
                 ctx.error(
                     "DS-019",
                     finding.pointer_under(at),
-                    f"pool fixture {index} for {node_id!r} violates output_schema: "
+                    f"input for pool fixture {index} of {node_id!r} violates input_schema: "
                     f"{finding.message}",
                     node_id=node_id,
                     iteration=index,
                 )
-                for finding in instance_findings(entry.get("output"), schema)
+                for finding in instance_findings(entry.get("input"), input_schema)
             )
     return findings
 

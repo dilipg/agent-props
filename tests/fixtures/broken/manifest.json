@@ -45,7 +45,7 @@
       "mutate": [ { "op": "remove", "path": "/edges/6" } ] },
 
     { "id": "BP-006-entry-node-unknown", "target": "blueprint", "expect": ["BP-006"],
-      "note": "BP-005 is skipped when entry_node names no node - otherwise every node in the graph reports as unreachable on top of this one finding. The inbound-edge half of BP-006 cannot be reached from a mutation: every node is reachable from the entry node, so any edge into it also creates a loop-free cycle and fires BP-018.",
+      "note": "BP-005 is skipped when entry_node names no node - otherwise every node in the graph reports as unreachable on top of this one finding. This case covers BP-006's existence half only. The inbound-edge half cannot be isolated by ANY blueprint: an edge into entry_node forces either a cycle (BP-018) or a predecessor unreachable from the entry (BP-005), so an exact-set case is impossible. Ruling R-31 gives that half a rule-half exemption in the coverage gate, naming the membership-style unit test that covers it: see RULE_HALF_EXEMPTIONS in tests/unit/test_validation_drift.py.",
       "mutate": [ { "op": "replace", "path": "/entry_node", "value": "kickoff" } ] },
 
     { "id": "BP-007-terminal-with-outbound-edge", "target": "blueprint", "expect": ["BP-007"],
@@ -120,6 +120,10 @@
       "mutate": [ { "op": "replace", "path": "/nodes/fetch_store_profile/output/store/status",
                     "value": "unknown_state" } ] },
 
+    { "id": "DS-004-output-absent-without-fault", "target": "dataset", "expect": ["DS-004"],
+      "note": "Ruling R-07's second amendment: `output` is optional on NodeFixture, because R-07 blesses an absent output on a faulted fixture - so DS-004 owns presence. With no fault set, an absent output is this rule's finding rather than a parse-time exception.",
+      "mutate": [ { "op": "remove", "path": "/nodes/complete/output" } ] },
+
     { "id": "DS-005-input-violates-schema", "target": "dataset", "expect": ["DS-005"],
       "mutate": [ { "op": "replace", "path": "/nodes/receive_request/input/request_id",
                     "value": 42 } ] },
@@ -183,6 +187,15 @@
       "note": "DS-004 must NOT fire here: ruling R-18 gives every pool fixture to DS-019, and DS-004/DS-005 cover `nodes` only.",
       "mutate": [ { "op": "replace", "path": "/pools/request_docs/0/output/requested",
                     "value": "fssai" } ] },
+
+    { "id": "DS-019-pool-input-violates-schema", "target": "dataset", "expect": ["DS-019"],
+      "note": "Ruling R-28: before it, a pool entry's `input` was validated by nothing - R-18 gives pools to DS-019, whose text named only `output_schema`, and DS-005 covers `nodes` only. request_docs takes a `doc_type` string.",
+      "mutate": [ { "op": "add", "path": "/pools/request_docs/0/input",
+                    "value": { "doc_type": 12345 } } ] },
+
+    { "id": "DS-019-pool-entry-without-output", "target": "dataset", "expect": ["DS-019"],
+      "note": "The pool half of ruling R-07's second amendment. `output` became optional on NodeFixture, which every pool entry also uses, so DS-019 has to own presence for pools exactly as DS-004 does for nodes - otherwise a pool entry with no output and no fault validates clean, parses clean, and fetch_step serves a fixture with nothing in it.",
+      "mutate": [ { "op": "remove", "path": "/pools/request_docs/0/output" } ] },
 
     { "id": "DS-020-seed-not-an-integer", "target": "dataset", "expect": ["DS-020"],
       "parse_raises": true,
@@ -255,7 +268,13 @@
       "mutate": [ { "op": "add", "path": "/nodes/verify_compliance/fault",
                     "value": { "kind": "timeout", "code": "UPSTREAM_TIMEOUT", "after_ms": 3000 } },
                   { "op": "replace", "path": "/nodes/verify_compliance/output",
-                    "value": { "error": "compliance service timed out" } } ] }
+                    "value": { "error": "compliance service timed out" } } ] },
+
+    { "id": "VALID-fault-with-no-output", "target": "dataset", "expect": [],
+      "note": "The other direction of ruling R-07's second amendment, and the composite M2's review found: this document must validate clean AND parse. Before the amendment it did the first and not the second - zero findings, then `('nodes','verify_compliance','output') missing` from Dataset.model_validate, which is an exception where a rule id belongs.",
+      "mutate": [ { "op": "add", "path": "/nodes/verify_compliance/fault",
+                    "value": { "kind": "error", "code": "COMPLIANCE_UNAVAILABLE" } },
+                  { "op": "remove", "path": "/nodes/verify_compliance/output" } ] }
   ],
 
   "raw_text_cases": [

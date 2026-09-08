@@ -11,7 +11,7 @@ each carries the ruling that changed it:
 - **BP-005** is skipped when ``entry_node`` names no node. Reachability from a
   node that does not exist is empty, so a literal implementation reports every
   node in the graph as unreachable on top of BP-006's one finding. BP-006 owns
-  the existence half. (Not in the ruling register - recorded in DECISIONS.md.)
+  the existence half (ruling R-26).
 - **BP-011** checks syntax with ``entity:`` refs *stripped*, so an unresolvable
   entity is BP-009 alone (ruling R-18).
 - **BP-018** is checked by deleting the loop nodes and looking for a remaining
@@ -20,6 +20,13 @@ each carries the ruling that changed it:
 - **BP-019** fires when a node is **missing** ``notes``. The catalogue states
   the satisfied condition; ruling R-13 reads it as the violation, and makes it a
   warning.
+
+Two rules were widened after M2's review, each closing a hole M2 reported:
+
+- **BP-011** also checks ``entities[*].schema`` (ruling R-27). Nothing did
+  before, because R-18 has BP-011 strip the very refs that reach an entity.
+- **BP-016** does *not* fire on a byte-identical re-publish (ruling R-29), so
+  M7's import stays idempotent.
 """
 
 import re
@@ -29,6 +36,7 @@ from typing import Any, Final
 from agentprops.models.errors import RuleError
 from agentprops.validation.context import BlueprintContext, as_int, as_text
 from agentprops.validation.jsonschemas import (
+    canonical,
     declared_properties,
     entity_ref_names,
     schema_error,
@@ -335,10 +343,19 @@ def bp_010(ctx: BlueprintContext) -> list[RuleError]:
 
 
 def bp_011(ctx: BlueprintContext) -> list[RuleError]:
-    """Every ``input_schema`` and ``output_schema`` is valid Draft 2020-12 JSON Schema.
+    """Every ``input_schema``, ``output_schema`` and entity ``schema`` is valid
+    Draft 2020-12 JSON Schema.
 
     Checked with ``entity:`` refs stripped (ruling R-18), so an unresolvable
     entity reports BP-009 and nothing else.
+
+    Entity schemas were the hole ruling R-27 closed. BP-011 covered node
+    schemas, BP-012 ``outcome_schema``, and R-18's stripping meant nobody ever
+    looked at ``entities[*].schema`` - so a malformed entity schema published,
+    and the first symptom was a confusing DS-004 finding one milestone later,
+    when a fixture failed to validate against a schema that could not be
+    applied. Extending the existing owner keeps the registry and the corpus
+    stable.
     """
     findings: list[RuleError] = []
     for node_id in ctx.bp.node_ids:
@@ -355,6 +372,19 @@ def bp_011(ctx: BlueprintContext) -> list[RuleError]:
                         schema_key=key,
                     )
                 )
+    for index, entity in enumerate(ctx.bp.entities):
+        reason = schema_error(strip_entity_refs(entity.get("schema")))
+        if reason is not None:
+            findings.append(
+                ctx.error(
+                    "BP-011",
+                    pointer("entities", index, "schema"),
+                    f"schema of entity {entity.get('id')!r} is not valid Draft 2020-12 "
+                    f"JSON Schema: {reason}",
+                    entity=entity.get("id"),
+                    schema_key="schema",
+                )
+            )
     return findings
 
 
@@ -459,23 +489,38 @@ def bp_015(ctx: BlueprintContext) -> list[RuleError]:
 
 
 def bp_016(ctx: BlueprintContext) -> list[RuleError]:
-    """A ``published`` blueprint version cannot be modified.
+    """A ``published`` blueprint version cannot be **modified**.
 
     The resolver answers "is there already a published version at this
-    ``{agent_id, version}``?" (ruling R-11). ``validate_blueprint`` defaults to
-    a resolver that always says no, so validating a document on its own terms -
-    which is what ``blueprint_validate`` does - never fires this. The publish
-    path passes a real resolver, and then any upsert against an existing
-    published pair is rejected, byte-identical or not: contracts 3.1 says "any
-    upsert", and an idempotent-republish exemption would need the store to
-    compare documents, which is a policy nobody has asked for.
+    ``{agent_id, version}``, and what is it?" (ruling R-11).
+    ``validate_blueprint`` defaults to a resolver that always says no, so
+    validating a document on its own terms - which is what
+    ``blueprint_validate`` does - never fires this. The publish path passes a
+    real resolver.
+
+    **A byte-identical re-publish is a no-op success, not an error** (ruling
+    R-29). contracts 3.1 says "any upsert against an existing published
+    ``{agent_id, version}`` is rejected", and the literal reading was
+    implemented first and flagged; R-29 rules that the rule fires only when the
+    submitted document *differs* from the stored one. Two reasons: M7's
+    ``dataset_import`` carries a blueprint version alongside its datasets, so
+    re-importing into a store that already holds that version identically would
+    fail, defeating the promotion path M7 exists to build; and a CI pipeline
+    that publishes on every run is the normal case, not an abuse. Immutability
+    is untouched - nothing changes, because the documents are identical.
+
+    Comparison uses the same canonical form DS-008 uses, so a re-ordered key is
+    not a modification.
     """
     agent_id = ctx.bp.agent_id
     version = ctx.bp.version
     if agent_id is None or version is None:
         return []  # BP-001 and BP-002 own these
-    if ctx.resolver.get_published_blueprint(agent_id, version) is None:
+    stored = ctx.resolver.get_published_blueprint(agent_id, version)
+    if stored is None:
         return []
+    if canonical(dict(stored)) == canonical(dict(ctx.doc)):
+        return []  # ruling R-29: an identical upsert changes nothing
     return [
         ctx.error(
             "BP-016",

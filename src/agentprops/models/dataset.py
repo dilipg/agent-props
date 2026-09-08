@@ -20,6 +20,12 @@ DS-026 and DS-028 is a Pydantic requirement and only the content half is a
 rule. A corpus case for one of those rules must therefore mutate the value
 (the shipped cases use ``"   "``, ``""``, ``"testing"``) rather than remove
 the key.
+
+**One field is the exception, and it proves the rule.**
+:attr:`NodeFixture.output` is optional, because ruling R-07 explicitly blesses
+an absent ``output`` on a faulted fixture. Where a ruling says a value may be
+absent, the model cannot be the thing that requires it - so DS-004 and DS-019
+own presence there. See R-07's second amendment.
 """
 
 from datetime import datetime
@@ -136,8 +142,9 @@ class FaultSpec(StrictModel):
 
     Shape supplied by ruling R-07, since no document defined it and neither
     golden fixture sets ``fault``. When ``fault`` is set, DS-004 skips
-    ``output_schema`` validation entirely and requires ``output`` to be absent
-    or an object.
+    ``output_schema`` validation entirely and allows ``output`` to be absent -
+    which is why :attr:`NodeFixture.output` is optional (R-07's second
+    amendment).
 
     ``extra="allow"`` overrides the package default: DS-022 owns conformance to
     this shape, so an unexpected key must reach the validator as a rule id
@@ -169,9 +176,22 @@ class NodeFixture(StrictModel):
     ``input_schema`` when present; the golden datasets omit it on the two
     terminal nodes and on every pool entry."""
 
-    output: dict[str, Any]
-    """What the mocked step returns. DS-004 validates it against the node's
-    ``output_schema``, unless ``fault`` is set."""
+    output: dict[str, Any] | None = None
+    """What the mocked step returns, or ``None`` on a faulted fixture.
+
+    Optional per ruling R-07's second amendment, and it is the one place where
+    R-04's "a required field stays required" exception had to be withdrawn.
+    R-07 blesses an absent ``output`` when ``fault`` is set, so a model that
+    required the field disagreed with a ruling: a faulted fixture with no
+    ``output`` validated clean and then raised ``ValidationError`` at parse
+    time, which under R-23's validate-then-parse ordering is an exception where
+    a rule id belongs.
+
+    **DS-004 owns presence now.** ``fault`` set: ``output`` may be absent, and
+    must be an object if present. ``fault`` unset: ``output`` must be present
+    and must validate against the node's ``output_schema``. DS-019 applies the
+    same rule to pool fixtures. A faulted step genuinely has no output, so
+    consumers of this field handle ``None``."""
 
     entity_refs: list[str]
     """``entity_id`` for the base state, ``entity_id@revision_id`` for a

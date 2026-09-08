@@ -17,6 +17,12 @@ submitted document.
 **Warnings do not reject** (ruling R-13). A case whose declared rules are all
 warning-severity must report ``ok is True`` *and* the warning. Asserting only
 the rule id would pass even if the validator wrongly rejected the document.
+
+**Whatever the validator accepts must parse.**
+:func:`test_a_case_the_validator_accepts_also_parses` is the general form of the
+defect M2's review found in ruling R-07's fault handling: a clean envelope
+followed by a ``ValidationError`` is an exception where a rule id belongs, and
+under R-23's validate-then-parse ordering it lands in `service/`.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from typing import Any
 
 import pytest
 
+from agentprops.models import Blueprint, Dataset
 from agentprops.models.errors import ERROR_ENVELOPE_SEVERITIES, SEVERITY_ERROR, RuleError
 from agentprops.validation import (
     RULE_REGISTRY,
@@ -48,6 +55,8 @@ from corpus import (
     resolve,
 )
 
+MODELS: dict[str, type[Blueprint] | type[Dataset]] = {"blueprint": Blueprint, "dataset": Dataset}
+
 
 def run_case(case: dict[str, Any]) -> tuple[bool, list[RuleError]]:
     """Validate one mutation case, choosing the entry point and resolver for it."""
@@ -62,6 +71,10 @@ def run_case(case: dict[str, Any]) -> tuple[bool, list[RuleError]]:
 
 def run_raw_text_case(case: dict[str, Any]) -> tuple[bool, list[RuleError]]:
     """Validate one raw-text case through the tool boundary's duplicate-key parse."""
+    assert case["target"] == "dataset", (
+        f"{case['id']}: raw-text cases go through validate_dataset; a blueprint target would be "
+        "silently validated as a dataset"
+    )
     document, duplicates = parse_with_duplicate_keys(raw_text(case))
     envelope = validate_dataset(document, DATASET_RESOLVER, duplicate_keys=duplicates)
     return envelope.ok, envelope.errors
@@ -145,6 +158,29 @@ def test_case_findings_carry_a_usable_envelope(case: dict[str, Any]) -> None:
             assert error.section is None or error.section in SECTIONS
         else:
             assert error.section is None, "a blueprint has no skeleton section"
+
+
+@pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+def test_a_case_the_validator_accepts_also_parses(case: dict[str, Any]) -> None:
+    """The composite invariant of R-23's ordering: validate, then construct.
+
+    A document the validator accepts is one `service/` will hand to the model
+    and store, so it must parse. If it does not, the service raises where a rule
+    id belongs - which CLAUDE.md forbids and which M2's review found for real: a
+    faulted fixture with no ``output`` returned zero findings and then raised
+    ``('nodes','verify_compliance','output') missing``. Ruling R-07's second
+    amendment fixed that instance; this test is the general gate, so the *class*
+    of defect cannot come back through some other field.
+
+    A ``parse_raises`` case is the deliberate inverse - the validator rejects it
+    and the model would too - and is skipped here by the ``ok`` guard.
+    """
+    ok, _ = run_case(case)
+    if not ok:
+        return
+    model = MODELS[case["target"]]
+    parsed = model.model_validate(mutated(case))
+    assert parsed is not None, case["id"]
 
 
 def test_every_case_declares_at_most_the_registry() -> None:
