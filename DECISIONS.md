@@ -1135,3 +1135,194 @@ None of these block the build; each has a working decision above.
    blueprints, `started_at DESC, id` for runs — the latter being the order `runs_lookup` is built
    for. Both are deterministic, which is the property that matters; if a tool surface wants a
    different one, it is a one-line change at each call site.
+
+---
+
+## [M3, fix round 1] Correction: "computed inside the transaction" was not a safety claim I could make
+The `seq` entry above says `upsert_step` computes the value "inside the transaction", and the M3
+report said the same. **That wording is withdrawn.** A transaction around a read and a write is not
+a lock over the value read, and the review did not argue the point — it *reproduced* the failure,
+replaying `upsert_step`'s statement sequence on two interleaved connections against one file-backed
+SQLite database, and both committed `seq = 1`. pysqlite defers `BEGIN` until the first DML, so
+neither the existence check nor the `max(seq)` read takes any lock; Postgres under READ COMMITTED
+behaves the same way.
+What makes it sound is `UNIQUE (run_id, seq)` plus a bounded retry — ruling R-37, and the entry
+below. The uncomfortable part is that the dataset-version entry above gets this exactly right, names
+the primary key as the guard, says "not a lock", and tests the losing side; `seq` is the one
+allocation where the same author did not apply his own pattern. Recorded rather than quietly edited,
+because the file is append-only and because a wrong safety claim in a decision log is worse than no
+claim.
+
+## [M3, fix round 1] `UNIQUE (run_id, seq)`, and the seq retry that the constraint makes sound (R-37)
+Added to `run_steps` — an addition to `contracts.md` section 7 that ruling R-37 authorises, and
+amended into section 7 in this round. `upsert_step` now allocates with the same
+bounded-retry-on-`IntegrityError` shape `put_dataset` uses, and distinguishes three outcomes after
+the error rather than collapsing them: the step key now exists (another writer served it first, so
+the next pass returns *its* row and this call is the documented no-op), the `(run_id, seq)` pair is
+taken (the race, lost — re-read and take the next number), or neither (a missing run tripping the
+foreign key, re-raised as itself).
+Reason: the same reason `PRIMARY KEY (id, version)` guards dataset versions. A constraint is the only
+mechanism all three backends have — no `SELECT ... FOR UPDATE` on SQLite, no advisory lock on Mongo —
+and it turns a lost race into a retry rather than into two rows that disagree.
+Why it mattered more than it looked: `get_run` orders steps by `seq`, and `Run.path` is what step
+resolution disambiguates against (`contracts.md` section 5 takes `run.path[-1]` as the head). A
+duplicate `seq` would have surfaced at M6 as intermittently wrong tool-name resolution with no
+visible cause — the most expensive shape of bug this build can ship.
+Three tests, all of them the losing side: a stale allocation read must re-allocate to 2 rather than
+duplicate 1; a step key that appears mid-race must return the winner's stored row; and a step for a
+run that does not exist must raise the foreign-key error rather than eight retries reported as an
+allocation failure.
+
+## [M3, fix round 1] The step read order is `(seq, node_id, iteration)` (R-37)
+Was `seq` alone.
+Reason: `UNIQUE (run_id, seq)` means the two extra keys never decide anything today, which is the
+point — the order is total whether or not the constraint holds. R-35 requires every list-returning
+method to have a total order so identical inputs give byte-identical output on every backend, and
+R-37 makes the step order a fourth alongside R-35's three. Free, unconditional, and it is the
+ordering `Run.path` is built from.
+
+## [M3, fix round 1] Revision `0001` was amended rather than superseded by a `0002`
+The unique constraint went into the initial revision.
+Reason: the rule worth keeping is "never edit a revision that has been applied somewhere", and this
+one has not been — it is the initial schema of an unreleased milestone on an unmerged branch, and no
+database outside a temporary test file has ever been migrated by it. There is nothing for an additive
+revision to migrate *from*. A `0002` would instead make every future deployment replay a SQLite
+table rebuild (Alembic batch mode, since SQLite cannot `ALTER TABLE ADD CONSTRAINT`) to add a
+constraint that `0001`'s own `CREATE TABLE` can simply declare.
+Alternative rejected: a second revision, for the sake of demonstrating that a second revision works.
+The migration path is exercised either way — `alembic upgrade head`, `alembic check` and
+`alembic downgrade base` all run in `test_migrations.py` — and buying that demonstration with a
+permanent table rebuild in every deployment's history is the wrong trade.
+
+## [M3, fix round 1] `set_step_actual` joins the Protocol at M3 (R-33)
+`set_step_actual(run_id, node_id, iteration, actual) -> StepRecord`, on the Protocol, the adapter and
+`contracts.md` section 6.
+Reason: `upsert_step`'s documented strict idempotency — "calling it twice with the same key is a
+no-op that returns the existing record" — means it can never be the method that writes `actual`, and
+M6's gate depends on that no-op staying literal. M3 reported this as a seam for M8; R-33 rules it
+into M3 instead, because the method belongs to the Protocol and M7 implements the Protocol against
+two more backends. One method now, versus reopening three signed-off adapters at M8.
+Semantics: write-once per key. `RecordNotFoundError` when no step record exists — an actual cannot be
+reported for a step that was never served, and inventing the row would produce evidence with no
+`served` half. An identical re-record is a no-op success and a differing one raises, the same replay
+tolerance `mark_skeleton_submitted` and BP-016 have. The `UPDATE` carries
+`WHERE actual IS NULL`, so a concurrent second writer cannot clobber, and the loop then re-reads and
+takes the identical-or-refuse decision on the stored value.
+`recorded_at` is stamped by `func.now()` — the *database's* clock, the same mechanism the sibling
+`fetched_at` column uses as its default, which is ruling R-09's first category. R-33's signature
+carries no timestamp, and leaving the column null forever would make it unreachable, since
+`upsert_step` accepts a `recorded_at` only on insert and its repeat is a no-op. There is still no
+clock read in Python anywhere in `storage/`, which is what the AST guard checks.
+
+## [M3, fix round 1] `archived` is inherited from the lineage on every version after the first (R-34)
+`put_dataset` reads the lineage's current archive state and writes that, into the column and into the
+document; `ds.archived` is honoured only when the lineage has no versions yet.
+Reason: R-34 closes the question the first round left open, and it follows from the Protocol's own
+shape — `set_archived(dataset_id, archived)` takes an id and no version, so the flag is a property of
+the dataset. Without the inheritance, editing an archived dataset silently un-hides it, and a
+half-archived lineage has no coherent answer for `find_datasets`, which returns one row per lineage.
+The first-version exception is what keeps an archived dataset importable as archived: whether a
+bundle's dataset is archived is a fact about the bundle, not a state for M7's `dataset_import` to
+reset.
+Mechanically this also closed a smaller gap: `_document` now carries `archived` in its overrides
+alongside `version`, so the column and the document agree on a *write* the same way they already
+agreed after a `set_archived`.
+
+## [M3, fix round 1] The `q` filter folds case in Python, and the match with it
+Was `LOWER(title) LIKE '%term%'` in SQL against a term folded by Python's `str.lower()`. Now
+`str.casefold()` on both sides, applied in `find_datasets` after the SQL filters and the ordering,
+with `limit`/`offset` applied after the filter rather than in SQL.
+Reason: those were two different fold functions inside one comparison, and no SQL expression can fix
+it. Verified rather than assumed — SQLite returns `lower('BENGALŪRU')` as `'bengalŪru'` (its
+`lower()` is ASCII-only), Postgres's is locale-aware, and Mongo's `$regex` with `i` is a third
+answer. Folding the column in SQL therefore returns different rows per backend *whatever* is done
+with the term, which is precisely what "identical results across backends" forbids and what PRD
+design principle 2 rests on. One implementation in Python is the only version that is identical
+everywhere.
+`casefold` rather than `lower` because it is the Unicode operation designed for caseless comparison;
+picking the weaker one would be choosing to be subtly wrong on purpose.
+Two consequences, both accepted deliberately. **Pagination moves into Python for `q` queries only**,
+because a page sliced before the filter runs comes back short — the same class of bug as filtering
+archives after `LIMIT`, which the pagination test now also pins with an archived row that sorts
+first. And **a `q` query materialises every row matching the other filters**, which is fine at "the
+volumes a local authoring instance sees" (contracts section 7's own words) and is bounded by the
+`agent_id`/`labels`/`author` filters. If it ever is not, the two-phase form is to select
+`(id, version, title, intent)` first, fold, then fetch the page's full rows.
+For M7: R-36 already rules that Postgres uses `ILIKE`/`pg_trgm` rather than full-text search, and an
+SQL prefilter there is legitimate *only* as a superset of this Python fold. Postgres's `lower()` and
+Python's `casefold()` are close enough for that to hold; the conformance suite is what would catch it
+if they were not, and it now carries a non-ASCII case for exactly that.
+Escaping is no longer a concern at all: with no `LIKE` in play, `%` and `_` are literal substrings by
+construction. The wildcard test survives unchanged and now proves a property of the implementation
+rather than of an `autoescape` flag.
+
+## [M3, fix round 1] The three writers with a first-write race retry once
+`put_blueprint`, `put_skeleton` and `put_run` took the insert branch on `row is None` with no
+`IntegrityError` handling, so two concurrent first writes of one key surfaced a raw driver error.
+Each now retries once and re-enters the select branch — `FIRST_WRITE_ATTEMPTS = 2` — and on the last
+attempt re-raises the `IntegrityError` as itself rather than translating it.
+Reason: for `put_blueprint` this partly undermined R-29's own motivation. "A CI pipeline that
+publishes on every run is the normal case, not an abuse" — and two runners publishing the identical
+blueprint simultaneously both see no row, both insert, and one loses. The right outcome is R-29's
+no-op success, which is exactly what the second pass produces.
+Re-raising on the last attempt rather than translating is what keeps a *different* `IntegrityError`
+legible: `put_run` with a pin to a missing dataset version trips `runs_dataset_fkey`, fails the same
+way on the retry, and reports the constraint it broke. Two tests cover both halves.
+`put_blueprint`'s select moved into a `_blueprint_row(conn, ...)` helper that takes the connection,
+which keeps the read and the write it decides on inside one transaction — without that, a version
+could go draft → published between them and BP-016 would be checked against a status that no longer
+holds — and makes the losing side of the race testable by monkeypatching one method.
+
+## [M3, fix round 1] `JsonDocument` sets `none_as_null=True`
+SQLAlchemy's default is the other one: a Python `None` bound to a `JSON` column is persisted as the
+JSON value `null`, not as SQL `NULL`.
+Reason: found by writing `set_step_actual`'s `WHERE actual IS NULL` guard and watching it match
+nothing. It round-trips either way, so nothing looked wrong — but the three nullable JSON columns
+(`runs.model`, `runs.outcome`, `run_steps.actual`) held a JSON value where the DDL says `NULL`, and
+any SQL predicate about absence was silently false. "Absent" should be SQL `NULL` on both dialects.
+Not a schema change — the rendered type is unchanged, and `alembic check` stays clean.
+
+## [M3, fix round 1] `compare_server_default=True` in both the drift test and `alembic check`
+Added to `test_migrations.py` and to `migrations/env.py`.
+Reason: one column. Under ruling R-09 `datasets.created_at` must have **no** default, because a
+`DEFAULT now()` would be re-stamped on re-import and `dataset_find`'s ordering would stop being
+reproducible. Without the flag, the one load-bearing default in the schema sat outside the drift
+gate. Clean on SQLite with no false positives, so it went into `env.py` too rather than only the
+test — a gate a human runs should be at least as strict as the one CI runs.
+
+## [M3, fix round 1] `STATUSES` removed
+Unused. `STATUS_DRAFT` and `STATUS_PUBLISHED` are both used and stay.
+
+## [M3, fix round 1] Two test additions that exist to constrain M7 rather than M3
+- **A dotted `parts` key.** Two of ruling R-06's five section ids contain a dot (`nodes.core`,
+  `nodes.branches`), and `parts` is keyed by section id — so a filled skeleton has object keys with
+  dots in them. Legal JSON, legal in a SQL JSON document, and **not** dot-path addressable in Mongo,
+  where `parts.nodes.core` reads as two levels of nesting. The conformance suite now fills one, so
+  M7's Mongo adapter has to store `parts` opaquely rather than reaching into it, instead of M5 or M8
+  discovering it through a section that silently fails to save.
+- **An archived row in the pagination test.** It sorts *first*, so excluding archives in the `WHERE`
+  clause returns a full page and filtering them out after `LIMIT` returns a short one. With two
+  unarchived rows and nothing else, both implementations passed.
+
+## [M3, fix round 1] Notes for M7, recorded so they are not rediscovered
+- **`runs_lookup` is the likelier `alembic check` false positive, not the Postgres-only indexes.**
+  `METADATA` declares `desc(runs.c.started_at)` while the migration writes
+  `sa.text("started_at DESC")`, and Alembic's autogenerate cannot reliably reflect or compare
+  expression and DESC index columns. It is clean on SQLite today. The M3 report singled out
+  `datasets_labels_gin` and `datasets_search` as the drift risk; those are handled by
+  `include_object`, and this one is not handled by anything.
+- **The `sa.text("'{}'")` / `sa.text("'[]'")` server defaults have never run against a live
+  Postgres.** They are verified only as compiled SQL. Postgres coerces an unknown-type literal to
+  `jsonb`, which is why they are written that way, but "coerces" is a claim about the server and no
+  server has been asked. First thing to check at M7.
+- **The `q` filter's Python fold** is the one place a Postgres optimisation could change *results*
+  rather than only speed. See the `q` entry above.
+
+## [M3, fix round 1] One open question closed, one still open
+**Closed by R-34:** whether a dataset version written after an archive inherits the flag. It does.
+The question recorded at the end of M3's first round is answered and should be read as closed.
+**Closed by R-33:** whether `upsert_step`'s strict idempotency leaves `record_step` a seam at M8. It
+does not any more; `set_step_actual` is on the Protocol.
+**Still open, and not a blocker:** nothing. R-32 keeps the `declared_bp_version` column and section 7
+now carries it; R-35 ratifies both list orderings and section 4 now states them; R-36 keeps substring
+`q`; R-38 ratifies the lineage grain. Every question M3's first round raised has a ruling.
