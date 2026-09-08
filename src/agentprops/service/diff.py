@@ -1,10 +1,20 @@
 """``blueprint_diff``'s computation. Pure, total, and never a failure signal.
 
-contracts section 4 names four categories - "nodes added, removed, changed;
+contracts section 4 named four categories - "nodes added, removed, changed;
 edges added, removed; schema changes per node; label vocabulary changes" - and
 one property: **informational, never a failure signal.** Nothing in this module
 can fail. It takes two raw blueprint documents, either of which may be ``None``,
 and always produces a diff.
+
+**Ruling R-41 adds a fifth**, ``blueprint``, covering the blueprint-level fields
+the four left unreportable: ``entry_node``, ``description``, ``outcome_schema``
+and the **entity schemas**. M4 shipped without it and recorded the gap as an
+owner question; R-41 closed the question the other way, and its reasoning is
+worth keeping here: R-27 has just made entity schemas a validated part of a
+blueprint, so a version could change one and this diff - the tool that exists to
+answer "what changed between these two versions" - would have shown nothing. The
+category is additive and inherits totality and "never a failure signal" for
+free, because nothing here can raise.
 
 The shape, which nothing specifies
 ----------------------------------
@@ -35,10 +45,18 @@ Defined here because the contract names the categories and not the payload::
         "dimensions_removed": [],
         "values_added":   [{"dimension": "tier", "values": ["national"]}],
         "values_removed": []
+      },
+      "blueprint": {
+        "changes": [{"field": "entry_node", "from": "receive_request", "to": "intake"}],
+        "entities": {
+          "added":   ["franchisee"],
+          "removed": [],
+          "changed": [{"entity_id": "store", "field": "schema", "from": { }, "to": { }}]
+        }
       }
     }
 
-Five decisions in that shape, each of which could have gone the other way.
+Six decisions in that shape, each of which could have gone the other way.
 
 **``nodes.changed`` and ``schemas`` partition a node's fields; they never
 overlap.** ``changed`` reports the five scalar fields (``tool_name``, ``kind``,
@@ -70,14 +88,30 @@ is not that.
 
 **No timestamp.** For the same reason.
 
-What is deliberately *not* in the diff
---------------------------------------
+**``blueprint.changes`` and ``blueprint.entities`` mirror the shapes already
+here** rather than inventing a third convention. ``changes`` is the same
+``{field, from, to}`` triple ``nodes.changed`` uses, through the same helper, so
+the two cannot drift into two spellings of one thing. ``entities`` is the same
+added/removed/changed split ``nodes`` uses, and its ``changed`` entry carries
+``field: "schema"`` the way a ``schemas`` entry does. An entity has exactly two
+fields - its id, which is the identity, and its schema - so ``schema`` is the
+only field that can appear there today; naming it keeps the entry readable if
+``EntitySchema`` ever gains a second.
 
-``entry_node``, ``outcome_schema``, ``description`` and the **entity schemas**.
-None of the four categories the contract names covers them, and an entity schema
-change is a real change that this diff will not show - recorded in
-`DECISIONS.md` under "Questions for the owner" rather than quietly fixed by
-inventing a fifth category.
+``outcome_schema`` sits in ``blueprint.changes`` rather than in ``schemas``
+because that category is documented as *per-node* and this schema belongs to no
+node.
+
+What is *still* not in the diff
+-------------------------------
+
+Nothing structural. Every top-level field of a blueprint is now covered:
+``agent_id`` and ``version`` are the diff's own subject, ``nodes``, ``edges`` and
+``label_schema`` have their own categories, and ``entry_node``,
+``description``, ``outcome_schema`` and ``entities`` are the fifth. A field
+added to ``Blueprint`` in future is the one thing that could slip through, and
+``test_service_diff.py::test_every_blueprint_field_is_covered_by_some_category``
+is what fails when one does.
 """
 
 from __future__ import annotations
@@ -88,7 +122,14 @@ from typing import Any, Final
 from agentprops.validation.context import as_mapping, as_sequence, as_text
 from agentprops.validation.jsonschemas import canonical
 
-__all__ = ["EDGE_KEYS", "NODE_SCALAR_FIELDS", "SCHEMA_FIELDS", "diff_blueprints"]
+__all__ = [
+    "BLUEPRINT_FIELDS",
+    "EDGE_KEYS",
+    "ENTITY_FIELDS",
+    "NODE_SCALAR_FIELDS",
+    "SCHEMA_FIELDS",
+    "diff_blueprints",
+]
 
 #: The node fields ``nodes.changed`` reports, in the order it reports them.
 NODE_SCALAR_FIELDS: Final[tuple[str, ...]] = (
@@ -104,6 +145,14 @@ SCHEMA_FIELDS: Final[tuple[str, ...]] = ("input_schema", "output_schema")
 
 #: An edge's identity, and the key order of an edge entry in the diff.
 EDGE_KEYS: Final[tuple[str, ...]] = ("from", "to", "condition")
+
+#: The blueprint-level fields the ``blueprint`` category reports, in the order it
+#: reports them (ruling R-41).
+BLUEPRINT_FIELDS: Final[tuple[str, ...]] = ("entry_node", "description", "outcome_schema")
+
+#: The entity field ``blueprint.entities`` compares. An entity has an id and a
+#: schema; the id is the identity, so this is the rest of it.
+ENTITY_FIELDS: Final[tuple[str, ...]] = ("schema",)
 
 
 def diff_blueprints(
@@ -124,6 +173,7 @@ def diff_blueprints(
         "edges": _edges(before, after),
         "schemas": _schemas(before, after),
         "labels": _labels(before, after),
+        "blueprint": _blueprint(before, after),
     }
 
 
@@ -167,9 +217,20 @@ def _nodes(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any
 
 
 def _scalar_changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return _field_changes(old, new, NODE_SCALAR_FIELDS)
+
+
+def _field_changes(
+    old: Mapping[str, Any], new: Mapping[str, Any], fields: Sequence[str]
+) -> list[dict[str, Any]]:
+    """``{field, from, to}`` for each of ``fields`` that differs canonically.
+
+    Shared by ``nodes.changed`` and ``blueprint.changes``, so the two categories
+    cannot drift into two spellings of one triple.
+    """
     return [
         {"field": name, "from": old.get(name), "to": new.get(name)}
-        for name in NODE_SCALAR_FIELDS
+        for name in fields
         if canonical(old.get(name)) != canonical(new.get(name))
     ]
 
@@ -211,6 +272,46 @@ def _edges(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any
     return {
         "added": [new[key] for key in sorted(new.keys() - old.keys())],
         "removed": [old[key] for key in sorted(old.keys() - new.keys())],
+    }
+
+
+def _entities_by_id(document: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Entities keyed by id, skipping anything without a string id.
+
+    The mirror of :func:`_nodes_by_id`, and total for the same reason: BP-015
+    makes entity ids unique in a stored blueprint, but this module must not raise
+    on a document it can be handed.
+    """
+    entities: dict[str, Mapping[str, Any]] = {}
+    for entry in as_sequence(document.get("entities")):
+        entity = as_mapping(entry)
+        entity_id = as_text(entity.get("id"))
+        if entity_id is not None:
+            entities[entity_id] = entity
+    return entities
+
+
+def _blueprint(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+    """Ruling R-41's fifth category: blueprint-level fields and entity schemas."""
+    old = _entities_by_id(before)
+    new = _entities_by_id(after)
+    return {
+        "changes": _field_changes(before, after, BLUEPRINT_FIELDS),
+        "entities": {
+            "added": sorted(new.keys() - old.keys()),
+            "removed": sorted(old.keys() - new.keys()),
+            "changed": [
+                {
+                    "entity_id": entity_id,
+                    "field": name,
+                    "from": old[entity_id].get(name),
+                    "to": new[entity_id].get(name),
+                }
+                for entity_id in sorted(old.keys() & new.keys())
+                for name in ENTITY_FIELDS
+                if canonical(old[entity_id].get(name)) != canonical(new[entity_id].get(name))
+            ],
+        },
     }
 
 
