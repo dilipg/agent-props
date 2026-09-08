@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -28,14 +27,12 @@ from agentprops.models import SECTION_IDS, Blueprint, Dataset, Run, RunPin, Sect
 from agentprops.storage import SqlStore, Store, create_schema, sqlite_url
 from conftest import (
     FIXTURES_DIR,
+    FROZEN_NOW,
     IMPLEMENTED_STORE_BACKENDS,
     selected_store_backends,
 )
 
-#: A frozen clock for the fields `service/`'s injected ``Clock`` will stamp
-#: (ruling R-09). Tests never read a real clock either, so a stored timestamp is
-#: comparable to an expected one.
-FROZEN_NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=UTC)
+__all__ = ["FROZEN_NOW"]
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:

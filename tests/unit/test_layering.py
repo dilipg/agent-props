@@ -23,6 +23,23 @@ depend on staying true:
   that would make ``dataset_find``'s ordering irreproducible after an
   export/import cycle.
 
+M4 adds the two layers above them, and three guards that are the *only*
+mechanical enforcement CLAUDE.md's layering rule has:
+
+- **`server/` reaches `service/` and `models/`, nothing else.** No `storage/`,
+  no `validation/`. That is what keeps business logic out of the tool functions:
+  a tool cannot validate a document or query a store without importing the layer
+  that does it. It is also why
+  :func:`agentprops.service.context.context_from_url` exists - `server/__main__`
+  has to open a store, and doing it through `service/` is what makes this rule
+  literally true rather than true with an exemption.
+- **A tool function stays under 20 lines** (CLAUDE.md, and the M4 brief).
+  Measured on the parsed AST, in physical lines *and* in statements, because
+  either number can be gamed alone.
+- **Only `clock.py` reads a clock** (ruling R-09's "a single injected ``Clock``
+  port, used only in `service/`"). Without this, "a single injected clock" is a
+  sentence in a docstring.
+
 Everything is checked against the parsed AST rather than by grepping text, so
 docstrings that discuss ``min_length``, ``uuid4()`` or ``datetime.now()`` - and
 this file does - cannot trip it.
@@ -36,6 +53,8 @@ from pathlib import Path
 import pytest
 
 import agentprops.models
+import agentprops.server
+import agentprops.service
 import agentprops.storage
 import agentprops.validation
 
@@ -49,6 +68,18 @@ VALIDATION_FILES = sorted(VALIDATION_DIR.glob("*.py"))
 #: the module most likely to reach for something convenient.
 STORAGE_DIR = Path(agentprops.storage.__file__).resolve().parent
 STORAGE_FILES = sorted(STORAGE_DIR.rglob("*.py"))
+
+SERVICE_DIR = Path(agentprops.service.__file__).resolve().parent
+SERVICE_FILES = sorted(SERVICE_DIR.glob("*.py"))
+
+SERVER_DIR = Path(agentprops.server.__file__).resolve().parent
+SERVER_FILES = sorted(SERVER_DIR.glob("*.py"))
+
+#: The modules that register tools, from the package itself rather than from a
+#: glob, so a new tool module is covered by the one edit that registers it.
+TOOL_MODULE_FILES = sorted(
+    Path(module.__file__).resolve() for module in agentprops.server.TOOL_MODULES if module.__file__
+)
 
 #: `models/` may import none of these. `export/` is in the list even though
 #: CLAUDE.md's arrow diagram omits it: it is a sibling layer either way.
@@ -66,6 +97,31 @@ FORBIDDEN_LAYERS_FOR_VALIDATION = frozenset({"storage", "service", "server", "ex
 #: canonical comparison in `sql.py` duplicates three lines rather than crossing
 #: this line.
 FORBIDDEN_LAYERS_FOR_STORAGE = frozenset({"validation", "service", "server", "expansion", "export"})
+
+#: `service/` may reach every layer below it - that is its job - and may not
+#: reach the layer above. One entry, and it is the one that matters: a service
+#: function importing a tool module would invert the whole arrangement.
+FORBIDDEN_LAYERS_FOR_SERVICE = frozenset({"server"})
+
+#: `server/` may import `service/` and `models/`, and nothing else sideways.
+#: `storage/` and `validation/` are the two that carry business logic behind
+#: them, and excluding them is what makes "no business logic in `server/`"
+#: enforceable rather than a matter of taste. `models/` is the shared
+#: vocabulary layer every other layer already imports.
+FORBIDDEN_LAYERS_FOR_SERVER = frozenset({"storage", "validation", "expansion", "export"})
+
+#: The one module in `service/` and `server/` allowed to read a clock.
+CLOCK_MODULE = "clock.py"
+
+#: CLAUDE.md: "a tool function ... stays under 20 lines". Physical lines of the
+#: body, docstring excluded.
+MAX_TOOL_FUNCTION_LINES = 20
+
+#: And a statement budget, because the two numbers fail differently: a
+#: formatter can split one statement across ten lines, and a semicolon-free
+#: author can pack ten statements into ten lines. A tool that needs more than
+#: this is doing something `service/` should be doing.
+MAX_TOOL_FUNCTION_STATEMENTS = 12
 
 #: Calls that read a clock or a random source, by dotted suffix.
 FORBIDDEN_CALLS = frozenset(
@@ -458,3 +514,157 @@ def test_every_protocol_type_from_ruling_r_05_exists() -> None:
     ):
         assert hasattr(agentprops.models, name), f"models.{name} is missing"
         assert name in agentprops.models.__all__, f"models.{name} is not exported"
+
+
+# --------------------------------------------------------------- M4: the two
+# layers above, and the three properties CLAUDE.md's layering rule asserts.
+
+
+def test_the_service_file_table_is_not_empty() -> None:
+    assert len(SERVICE_FILES) > 3, f"no service modules found under {SERVICE_DIR}"
+
+
+def test_the_server_file_table_is_not_empty() -> None:
+    assert len(SERVER_FILES) > 3, f"no server modules found under {SERVER_DIR}"
+
+
+def test_the_tool_module_table_is_not_empty() -> None:
+    """``TOOL_MODULES`` is what makes the guards below cover a *new* tool module."""
+    assert len(TOOL_MODULE_FILES) == 3, f"expected three tool modules, got {TOOL_MODULE_FILES}"
+
+
+@pytest.mark.parametrize("path", SERVICE_FILES, ids=lambda p: p.name)
+def test_service_does_not_import_the_server(path: Path) -> None:
+    offences = sibling_import_offences(path, FORBIDDEN_LAYERS_FOR_SERVICE)
+    assert not offences, f"{path.name} imports the layer above it: {offences}"
+
+
+@pytest.mark.parametrize("path", SERVER_FILES, ids=lambda p: p.name)
+def test_server_imports_only_service_and_models(path: Path) -> None:
+    """The guard that makes "no business logic in `server/`" mechanical.
+
+    A tool function cannot validate a document or query a store without
+    importing `validation/` or `storage/`, so forbidding those two forbids the
+    thing rather than the symptom. ``ServiceContext`` and the ``Reply`` type
+    both reach `server/` through `service/`, which is why `service/__init__.py`
+    re-exports them.
+    """
+    offences = sibling_import_offences(path, FORBIDDEN_LAYERS_FOR_SERVER)
+    assert not offences, f"{path.name} reaches past service/: {offences}"
+
+
+@pytest.mark.parametrize("path", SERVICE_FILES + SERVER_FILES, ids=lambda p: p.name)
+def test_only_the_clock_module_reads_a_clock(path: Path) -> None:
+    """Ruling R-09: **a single** injected ``Clock``, used only in `service/`.
+
+    `service/clock.py` is exempt because it *is* the port - ``SystemClock.now``
+    is the one sanctioned ``datetime.now()`` call in `src/`. Everywhere else, a
+    clock reading would put an unfrozen timestamp into a response and break M4's
+    byte-identical-output criterion, or into a stored row and break
+    ``dataset_find``'s reproducible ordering.
+    """
+    if path.name == CLOCK_MODULE and path.parent == SERVICE_DIR:
+        pytest.skip("service/clock.py is the port; its datetime.now() is the sanctioned one")
+    offences: list[str] = []
+    for node in ast.walk(parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        name = dotted(node.func)
+        if name and (name in FORBIDDEN_CALLS or name.rsplit(".", 1)[-1] in FORBIDDEN_CALLS):
+            offences.append(f"line {node.lineno}: {name}()")
+    assert not offences, (
+        f"{path.name} calls a clock or a random source; the only clock is "
+        f"service/{CLOCK_MODULE}'s injected port: {offences}"
+    )
+
+
+def tool_functions(path: Path) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every module-level function in ``path`` decorated with ``@mcp.tool()``.
+
+    Matched on the decorator rather than on the name, so a helper in a
+    `tools_*.py` module is not measured as a tool and a tool cannot escape the
+    budget by being named something else.
+    """
+    found: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    for node in parse(path).body:
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            if dotted(target).endswith("mcp.tool"):
+                found.append(node)
+                break
+    return found
+
+
+def body_without_docstring(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[ast.stmt]:
+    body = function.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        return body[1:]
+    return body
+
+
+def test_every_tool_module_registers_at_least_one_tool() -> None:
+    """Otherwise the size guard below would pass on an empty list."""
+    for path in TOOL_MODULE_FILES:
+        assert tool_functions(path), f"{path.name} registers no @mcp.tool() function"
+
+
+@pytest.mark.parametrize("path", TOOL_MODULE_FILES, ids=lambda p: p.name)
+def test_a_tool_function_stays_under_twenty_lines(path: Path) -> None:
+    """CLAUDE.md: "a tool function ... parses, delegates, shapes the response,
+    and stays under 20 lines"."""
+    offences: list[str] = []
+    for function in tool_functions(path):
+        body = body_without_docstring(function)
+        if not body:
+            offences.append(f"{function.name}: empty body")
+            continue
+        lines = (body[-1].end_lineno or body[-1].lineno) - body[0].lineno + 1
+        if lines >= MAX_TOOL_FUNCTION_LINES:
+            offences.append(f"{function.name}: {lines} lines")
+        if len(body) > MAX_TOOL_FUNCTION_STATEMENTS:
+            offences.append(f"{function.name}: {len(body)} statements")
+    assert not offences, (
+        f"{path.name} has tool functions over budget ({MAX_TOOL_FUNCTION_LINES} lines, "
+        f"{MAX_TOOL_FUNCTION_STATEMENTS} statements): {offences}"
+    )
+
+
+@pytest.mark.parametrize("path", TOOL_MODULE_FILES, ids=lambda p: p.name)
+def test_a_tool_function_contains_no_control_flow_but_the_argument_guard(path: Path) -> None:
+    """ "No business logic in `server/`", as a shape rather than as a judgement.
+
+    The only branch a tool function is allowed is the one that returns early
+    when an argument reader complained. A loop, a ``try``, a comprehension over
+    store rows or a second ``if`` means a decision is being made here that
+    belongs in `service/`, where it can be tested without an MCP client.
+    """
+    offences: list[str] = []
+    for function in tool_functions(path):
+        for node in ast.walk(function):
+            if isinstance(node, ast.For | ast.While | ast.Try | ast.ListComp | ast.DictComp):
+                offences.append(f"{function.name}: {type(node).__name__} at line {node.lineno}")
+            if isinstance(node, ast.If) and "args.errors" not in ast.unparse(node.test):
+                offences.append(f"{function.name}: if {ast.unparse(node.test)}")
+    assert not offences, f"{path.name} carries logic that belongs in service/: {offences}"
+
+
+@pytest.mark.parametrize("path", TOOL_MODULE_FILES, ids=lambda p: p.name)
+def test_a_tool_function_never_raises(path: Path) -> None:
+    """CLAUDE.md: structured errors, never exceptions, for anything a user causes.
+
+    The same check `validation/` already has on its rule functions. An
+    exception escaping a tool function reaches the caller as an MCP protocol
+    error with no rule id and no pointer, which is the one shape the error
+    envelope exists to prevent.
+    """
+    offences = [
+        f"{function.name}:{node.lineno}"
+        for function in tool_functions(path)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Raise)
+    ]
+    assert not offences, f"a tool function raises instead of returning an envelope: {offences}"

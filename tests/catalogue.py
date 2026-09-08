@@ -74,3 +74,59 @@ def parse_runtime_codes(path: Path | str) -> set[str]:
         if RUNTIME_CODE.match(first_cell):
             codes.add(first_cell)
     return codes
+
+
+SECTION_4 = re.compile(r"^## 4\. ")
+TOOL_NAME = re.compile(r"^`([a-z][a-z0-9_]*)`$")
+
+
+def parse_tool_names(path: Path | str) -> set[str]:
+    """Every tool name section 4 tabulates, so the surface cannot drift from it.
+
+    The same reasoning as :func:`parse_catalogue_ids`, applied to the tool
+    contracts: `docs/contracts.md` section 4 is the record of what tools exist
+    and `tests/unit/test_tool_surface.py` compares it to what the running
+    ``MCPServer`` reports. A tool registered but undocumented, or documented
+    with a typo, is then a failing test rather than a discovery at M9.
+
+    Table rows only, and only the first cell, which is the tool name in
+    backticks. Rows whose name is followed by a *(phase 1.5)* marker are still
+    returned - the phase tag is in the ``Input`` cell, and the surface test's
+    deferral map is where a tool's milestone is recorded.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    names: set[str] = set()
+    in_section_4 = False
+    for line in text.splitlines():
+        if SECTION_4.match(line):
+            in_section_4 = True
+            continue
+        if in_section_4 and NEXT_TOP_SECTION.match(line):
+            break
+        if not in_section_4 or not line.startswith("|"):
+            continue
+        match = TOOL_NAME.match(line.split("|")[1].strip())
+        if match is not None:
+            names.add(match.group(1))
+    return names
+
+
+BOUNDARY_CODE = re.compile(r"^AP-\d{3}$")
+
+
+def parse_boundary_codes(path: Path | str) -> set[str]:
+    """The ``AP-*`` codes section 3.5 tabulates.
+
+    Added at M4 for the same reason :func:`parse_catalogue_ids` exists: the
+    codes are documented in one place and defined in another, and only a test
+    can stop the two diverging. Table rows only, so prose that mentions a code
+    is not mistaken for a row that declares one.
+    """
+    codes: set[str] = set()
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            continue
+        first_cell = line.split("|")[1].strip()
+        if BOUNDARY_CODE.match(first_cell):
+            codes.add(first_cell)
+    return codes
