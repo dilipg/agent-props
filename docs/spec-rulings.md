@@ -337,6 +337,94 @@ hides a rule with no implementation, which the registry half of the drift test s
 
 ---
 
+### R-18 — rule precedence wherever two rules can fire on one document (finding F-30)
+
+M2's gate asserts **exact** rule-id sets, so every overlap must resolve to exactly one id.
+Three overlaps exist in the catalogue as written. Rulings, all three verified against real
+corpus cases:
+
+| Overlap | Ruling |
+|---|---|
+| DS-004/DS-005 (fixture `output`/`input` validates) vs DS-019 (each pool fixture validates) | Pool fixtures are **DS-019's** territory. DS-004 and DS-005 cover `nodes` only. |
+| DS-006 (`entity_refs` id resolves) vs DS-009 (`@revision` is declared) vs DS-010 | DS-006 checks the **`entity_id` segment only**; DS-009 checks the **`@revision` segment**; DS-010 is skipped when DS-009 fired (already R-02). |
+| BP-009 (`entity:` ref resolves) vs BP-011 (schema is valid Draft 2020-12) | BP-011 checks schema syntax **with `entity:` refs stripped**, so an unresolvable entity is **BP-009 alone**. |
+
+Plus the two already ruled elsewhere: DS-004 is skipped entirely when `fault` is set
+(R-07), and DS-010 is skipped after DS-009 (R-02).
+
+**Cost if wrong.** A corpus case reports two ids where the manifest declares one; the exact-set
+gate catches it immediately.
+
+### R-19 — BP-010 walks the condition tree; conditions are never evaluated (finding F-29)
+
+The condition language is JSONLogic and contracts 2.1 states the check, but the accepted
+operator subset, dotted `var` paths, array indices and the `{"var": [path, default]}` form
+are all unspecified. Every golden condition uses a flat top-level `var`, so nothing in this
+build breaks — the first author who writes `{"var": "store.status"}` hits it.
+
+**Ruling.** Implement BP-010 as: recursively collect every `var` operand anywhere in the
+condition tree; accept both the string and `[path, default]` forms; split the path on `.`;
+walk `properties` with `entity:` refs resolved; report BP-010 on the first segment that is
+not a declared property. Conditions are **structurally walked, never evaluated**, so
+JSONLogic is not a dependency and no operator subset needs defining.
+
+`node_expectations[*].args_match` is **deliberately unvalidated** — the service never
+evaluates it, and DS-016 checks only the keys of `node_expectations`. Record that rather
+than adding a rule.
+
+**Cost if wrong.** A blueprint with a dotted `var` path validates when it should not; no
+stored data is affected.
+
+### R-20 — DS-013 keeps its rule and gains a raw-text fixture (finding F-10)
+
+DS-013 ("no label dimension appears twice") cannot be violated by any committed JSON file
+or JSON Patch: duplicate object keys collapse at parse time and a Python dict cannot hold
+one twice. But the coverage gate demands a case for every registered rule.
+
+**Ruling.** Keep the rule. Give it a raw-text fixture outside the mutation manifest — a
+file with a literally duplicated `"persona"` key — and detect duplicates at the **tool
+boundary**, where the raw text still exists, via
+`json.loads(..., object_pairs_hook=...)`. The MCP boundary genuinely does receive raw text,
+so the rule protects something real. The coverage gate gets a named exemption for
+manifest-unreachable rules, never a silent gap.
+
+**Cost if wrong.** If the boundary hook proves awkward, retire DS-013 instead — parsing
+already provides the protection — and remove it from the registry so the drift test stays
+green.
+
+### R-21 — `expected.rationale` gets DS-033 (finding F-28)
+
+contracts 2.2 says of `provenance.intent` and `expected.rationale`: "**Both are required,
+neither substitutes for the other.**" But DS-026 covers only `intent`, and no rule requires
+`rationale` at all — so `rationale: ""` validates clean, contradicting the prose.
+
+**Ruling.** Add **DS-033**: `expected.rationale` is present and at least 30 characters,
+mirroring DS-026. Cheap, symmetric with the existing provenance rules, and consistent with
+PRD 5.7's argument for mandatory human-readable justification. Add its corpus case. Adding
+the id means the drift test is what catches a missing implementation.
+
+This is the one place the register **adds** a rule rather than reinterpreting one. It is
+not a redesign: it makes an existing prose requirement enforceable.
+
+**Cost if wrong.** One rule and one corpus case to remove; both golden fixtures already
+carry a substantial `rationale`.
+
+### R-22 — three catalogue and bookkeeping corrections (findings F-21, F-22, F-23)
+
+- The drift test resolves the catalogue path from the test module
+  (`Path(__file__).parents[2] / "docs" / "contracts.md"`), not the CWD. As written,
+  `parse_catalogue_ids("contracts.md")` resolves to `./contracts.md`, which does not exist,
+  so the one test that prevents catalogue drift would die of `FileNotFoundError` instead of
+  comparing.
+- `build-handoff.md` section 8 says "all eleven milestones"; there are **twelve**, M0..M11.
+  Its section 3 layout omits `schemas/` (M1's output, M9's input), `docs/` and `.github/`.
+- The warning vocabulary is contracts 3.4's three codes — `blueprint_version_mismatch`,
+  `pool_exhausted`, `dataset_archived`. PRD 5.4's `unresolved_step` was **superseded** by
+  RT-E01/RT-E02, not dropped by accident; M6's gate is written against contracts.
+  `Warning.code` stays an open string so the vocabulary grows without a model change.
+
+**Cost if wrong.** All three are bookkeeping; none affects stored data.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
@@ -385,9 +473,11 @@ choice is being made — 14.4 is closed by 10.4.
 
 These findings are real but bind a milestone not yet reached. Each gets a ruling in its
 gating dispatch, recorded here at that point: F-16 (the web app's transport to the service,
-M9), F-17 (`outcome_schema` missing from the evidence bundle, M10), F-25 (`dataset_expand`
-can produce a DS-023 violation, M7), F-29 (BP-010's condition language beyond the flat case,
-M2), F-31 (`pool: true` on a non-loop node, M6), F-32 (Langfuse absent from the stack, M10).
+M9), F-17 (`outcome_schema` missing from the evidence bundle, M10), F-24 (contracts 2.2's
+illustrative dataset is not valid against the golden blueprint — documentation only),
+F-25 (`dataset_expand` can produce a DS-023 violation, M7), F-26 (M8 step 8's re-fetch must
+use `node_id`, M8), F-27 (M5's DS-025 wording and SK-004 precedence, M5), F-31 (`pool: true`
+on a non-loop node, M6), F-32 (Langfuse absent from the stack, M10).
 
 ## Questions for the owner
 
