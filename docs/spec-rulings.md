@@ -227,6 +227,16 @@ explicitly blesses an absent value, so the model can no longer be the thing that
 presence. Both directions need a corpus case — a clean faulted fixture with no `output`, and
 a non-faulted fixture missing `output` reporting DS-004 alone.
 
+**Extended to DS-019, ratified.** The amendment above names DS-004 only, but `NodeFixture`
+is also the pool entry's model — so making `output` optional let a pool entry with **no
+`output` and no `fault`** parse cleanly while DS-019 still deferred presence to the model,
+reopening the same hole one field over. DS-019 therefore carries the identical presence
+check, through a shared helper, with its own corpus case. This follows directly from R-18
+making DS-019 the sole owner of everything about a pool entry: if it owns the schema check
+there, it owns the presence check there too. The alternative — a separate `PoolFixture`
+model with `output` required — was correctly judged larger than the round should take
+unasked, and would split one concept across two models to avoid one shared predicate.
+
 **Cost if wrong.** Consumers of `NodeFixture.output` must handle `None`, which is correct
 anyway: a faulted step genuinely has no output.
 
