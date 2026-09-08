@@ -19,10 +19,26 @@ It forces the paths only a second writer would otherwise reach:
 - **two concurrent first writes of one key** - ``put_blueprint``,
   ``put_skeleton`` and ``put_run`` must converge on their "row exists" branch
   rather than surfacing a raw driver error, and for a blueprint that
-  convergence is R-29's no-op success, which is the case R-29 exists for.
+  convergence is R-29's no-op success, which is the case R-29 exists for;
+- **``set_step_actual``** - a writer that lost the conditional ``UPDATE`` must
+  *raise*, not return the winner's value. Added in fix round 2, because that is
+  exactly what M3's fix round 1 got wrong: it checked that some actual was now
+  stored rather than that it was this caller's.
 
 Untested retry logic is where a store quietly corrupts something. The reviewer's
-standard - test the *losing* side - is the standard here.
+standard - test the *losing* side - is the standard here, and every allocation
+and first-write race in `sql.py` now has a test of it.
+
+**How the races are forced, stated plainly.** One internal read is monkeypatched
+to return a stale answer once - the allocation read, the existence check, or the
+step row - which is exactly what the loser of a real race sees. Nothing else is
+mocked: the ``INSERT`` or ``UPDATE`` that follows, the constraint that rejects
+it, the ``IntegrityError`` and the retry all run against a real file-backed
+SQLite database. These tests do not use threads or a second connection, so what
+they prove is that the *recovery* is correct given a stale read, not that a
+stale read is reachable - and that it is reachable was established separately by
+replaying the statement sequence on two interleaved connections, which is what
+ruling R-37 records.
 """
 
 from __future__ import annotations
@@ -35,8 +51,8 @@ from uuid import UUID
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from agentprops.models import Blueprint, Dataset, StepRecord
-from agentprops.storage import SqlStore, create_schema, sqlite_url
+from agentprops.models import Blueprint, Dataset, Skeleton, StepRecord
+from agentprops.storage import SqlStore, StoreError, create_schema, sqlite_url
 from integration.conftest import make_run
 
 pytestmark = pytest.mark.integration
@@ -256,3 +272,129 @@ def test_a_run_pinned_to_a_missing_dataset_is_not_retried_into_silence(
     with pytest.raises(IntegrityError, match="FOREIGN KEY"):
         sql_store.put_run(make_run("run-unpinned", dataset))
     assert sql_store.health().counts.runs == 0
+
+
+def test_a_losing_set_step_actual_refuses_the_winners_value(
+    sql_store: SqlStore,
+    blueprint: Blueprint,
+    dataset: Dataset,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The losing writer must raise, not inherit the winner's evidence.
+
+    ``WHERE actual IS NULL`` makes the ``UPDATE`` conditional, so a writer that
+    lost changes nothing - and the question is what it *returns*. M3's fix round
+    1 read the row back and returned it whenever *some* actual was stored, so
+    the loser got a successful ``StepRecord`` carrying the winner's value and no
+    exception. A step's recorded actual is evidence; evidence that silently
+    belongs to a different writer is worse than an error, and the write-once
+    contract R-33 exists to guarantee is precisely this one.
+
+    The fix loops back to the single decision site at the top, so both halves of
+    that contract hold under a race: a differing actual raises, an identical one
+    is still the no-op. Both are asserted here.
+    """
+    sql_store.put_blueprint(blueprint, publish=True)
+    stored = sql_store.put_dataset(dataset)
+    run = sql_store.put_run(make_run("run-actual-race", stored))
+    sql_store.upsert_step(run.id, StepRecord(node_id="check_docs", iteration=0, served={}))
+
+    # The row as a losing writer saw it: served, with no actual yet.
+    stale = SqlStore._step_row(sql_store, run.id, "check_docs", 0)
+    assert stale is not None and stale.actual is None
+
+    winner = sql_store.set_step_actual(run.id, "check_docs", 0, {"result": "X-from-A"})
+    assert winner.actual == {"result": "X-from-A"}
+
+    honest = SqlStore._step_row
+    armed = {"stale": False}
+    reads: list[int] = []
+
+    def blind(self: SqlStore, run_id: str, node_id: str, iteration: int) -> Any:
+        reads.append(len(reads))
+        if armed["stale"]:
+            armed["stale"] = False
+            return stale  # what the loser read before the winner committed
+        return honest(self, run_id, node_id, iteration)
+
+    monkeypatch.setattr(SqlStore, "_step_row", blind)
+
+    armed["stale"] = True
+    with pytest.raises(StoreError):
+        sql_store.set_step_actual(run.id, "check_docs", 0, {"result": "Y-from-B"})
+    assert len(reads) == 2, "the losing writer did not loop back to the decision site"
+
+    armed["stale"] = True
+    replayed = sql_store.set_step_actual(run.id, "check_docs", 0, {"result": "X-from-A"})
+    assert replayed.actual == {"result": "X-from-A"}
+
+    read_back = sql_store.get_run(run.id)
+    assert read_back is not None
+    assert read_back.steps[0].actual == {"result": "X-from-A"}, "the winner's value must survive"
+
+
+def test_two_concurrent_first_skeleton_writes_converge(
+    sql_store: SqlStore, skeleton: Skeleton, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loser re-enters the update branch, which is where it belonged.
+
+    Same retry as ``put_blueprint``, with nothing to compare - a skeleton is an
+    in-progress fill and re-filling a section is explicitly allowed (ruling
+    R-06) - so convergence here means last-write-wins on one row rather than a
+    raw driver error.
+    """
+    first = sql_store.put_skeleton(skeleton)
+    assert first.parts == {}
+
+    honest = SqlStore._existing_skeleton
+    hidden: list[int] = []
+
+    def blind(self: SqlStore, conn: Any, skeleton_id: Any) -> Any:
+        hidden.append(len(hidden))
+        if len(hidden) == 1:
+            return None  # the other writer's row, not yet visible
+        return honest(self, conn, skeleton_id)
+
+    monkeypatch.setattr(SqlStore, "_existing_skeleton", blind)
+
+    filled = sql_store.put_skeleton(
+        skeleton.model_copy(update={"parts": {"provenance": {"title": "raced"}}})
+    )
+    assert filled.parts == {"provenance": {"title": "raced"}}
+    assert len(hidden) == 2, "the losing insert did not retry"
+    assert sql_store.get_skeleton(str(skeleton.id)) == filled
+
+
+def test_two_concurrent_first_run_writes_converge(
+    sql_store: SqlStore,
+    blueprint: Blueprint,
+    dataset: Dataset,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One run row, not a primary-key error.
+
+    The companion to ``test_a_run_pinned_to_a_missing_dataset_is_not_retried_into_silence``,
+    which covers the other branch of the same ``except``: that one asserts an
+    unrelated ``IntegrityError`` still surfaces, this one asserts the race the
+    retry exists for actually converges.
+    """
+    sql_store.put_blueprint(blueprint, publish=True)
+    stored = sql_store.put_dataset(dataset)
+    sql_store.put_run(make_run("run-converge", stored))
+
+    honest = SqlStore._existing_run
+    hidden: list[int] = []
+
+    def blind(self: SqlStore, conn: Any, run_id: str) -> Any:
+        hidden.append(len(hidden))
+        if len(hidden) == 1:
+            return None
+        return honest(self, conn, run_id)
+
+    monkeypatch.setattr(SqlStore, "_existing_run", blind)
+
+    raced = sql_store.put_run(make_run("run-converge", stored, status="finished"))
+    assert raced.status == "finished"
+    assert len(hidden) == 2, "the losing insert did not retry"
+    assert sql_store.health().counts.runs == 1
+    assert sql_store.get_run("run-converge") == raced
