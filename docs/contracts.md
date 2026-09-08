@@ -39,6 +39,10 @@ Success shape:
 { "ok": true, "data": { }, "warnings": [ ] }
 ```
 
+`data` always carries the payload under **one named key** — `{"blueprint": {...}}`, `{"blueprints": [...]}`, `{"diff": {...}}`. The "Returns" column in section 4 describes that payload, not where in the envelope it sits. The named key is the only convention that works for the tools whose payload is an array, and using it everywhere means a caller never has to ask which tools wrap (added at M4; see `DECISIONS.md`).
+
+`rule` also carries the five **boundary codes** in section 3.5, for the failures a user can cause that no catalogue rule covers.
+
 ## 2. Domain models
 
 Pydantic v2 in `models/`. JSON Schemas are emitted from these at build time into `schemas/` for the web app.
@@ -226,7 +230,7 @@ The run id is a client-supplied opaque string, 8 to 128 characters, `^[A-Za-z0-9
 
 Every rule needs an entry in `validation/registry.py` and at least one fixture in `tests/fixtures/broken/`. A test enforces both. Severity is `error` unless stated.
 
-Sections 3.1 to 3.3 are the rule registry. **Section 3.4 is a response-code table, not part of the rule registry** (ruling R-12): those codes describe a `fetch_step` response, have no document to validate and no JSON pointer, so they carry no registry entry and no broken fixture. The drift test parses 3.1 to 3.3 only.
+Sections 3.1 to 3.3 are the rule registry. **Sections 3.4 and 3.5 are not part of the rule registry** (ruling R-12, extended at M4): 3.4's codes describe a `fetch_step` response and 3.5's describe a request that never became a document, so neither has a document to validate, a JSON pointer into one, a registry entry or a broken fixture. The drift test parses 3.1 to 3.3 only, and a test asserts the 3.5 codes are disjoint from the registry.
 
 ### 3.1 Blueprint rules
 
@@ -321,6 +325,20 @@ Warnings, attached to both the response and the stored run, never blocking:
 | `pool_exhausted` | A loop drew past pool length. Last entry repeated |
 | `dataset_archived` | The pinned dataset has since been archived. Served anyway |
 
+Warning codes are an open vocabulary (ruling R-22), so a tool may add one. M4 added `blueprint_version_missing`, attached by `blueprint_diff` when a version it was asked to compare does not exist — because that tool is informational and never a failure signal.
+
+### 3.5 Boundary codes
+
+**Not rules, and never registered as ones.** Three failures a user can cause happen before or after a document exists, so no `BP-*`/`DS-*` rule can own them; two more are resolution rather than validation, which section 1's envelope covers explicitly ("on a validation **or resolution** failure"). They appear in `rule`, carry a pointer at the offending *argument*, and are `error` severity. Added at M4; `service/envelope.py` is the implementation and `tests/unit/test_service_envelope.py` asserts they are disjoint from the registry and from this catalogue.
+
+| Code | Meaning |
+|---|---|
+| AP-001 | A request argument is missing, of the wrong JSON type, or mutually exclusive with another that was also given |
+| AP-002 | Raw JSON text did not parse |
+| AP-003 | The document satisfied every catalogue rule and still would not construct as a model — the residue of rulings R-04 and R-23, since no rule owns an unknown key or a list where an object belongs |
+| AP-004 | No record with that id, or no such version |
+| AP-005 | The store refused a write through one of its programming-error guards. Reaching this means a rule that should have caught the condition did not |
+
 ## 4. MCP tool contracts
 
 All tools return the envelope from section 1. Inputs listed as `name: type` with `?` marking optional.
@@ -335,7 +353,7 @@ Every list-returning tool has a **total** order, stated in its row: a partial or
 | `blueprint_get` | `agent_id: str`, `version?: str` | Blueprint. Latest published when version omitted |
 | `blueprint_list` | `status?: str` | Array of `{agent_id, version, status, description}`. **Deterministic ordering** by `(agent_id, version)`, version compared as semver so `1.10.0` sorts after `1.9.0` (ruling R-35) |
 | `blueprint_validate` | `blueprint: object` | `{ok, errors}`. Does not store |
-| `blueprint_diff` | `agent_id: str`, `from_version: str`, `to_version: str` | Structured diff: nodes added, removed, changed; edges added, removed; schema changes per node; label vocabulary changes. **Informational. Never a failure signal** |
+| `blueprint_diff` | `agent_id: str`, `from_version: str`, `to_version: str` | Structured diff: nodes added, removed, changed; edges added, removed; schema changes per node; label vocabulary changes. **Informational. Never a failure signal** — an absent version is `present: false` plus a `blueprint_version_missing` warning on a successful response. The payload shape these four categories take is defined in `service/diff.py` and recorded in `DECISIONS.md` (M4) |
 | `blueprint_infer` | *(phase 1.5)* | Not in phase 1 |
 
 ### Dataset
@@ -345,7 +363,7 @@ Every list-returning tool has a **total** order, stated in its row: a partial or
 | `dataset_skeleton` | `agent_id: str`, `version: str`, `labels: object`, `seed: int` | `{skeleton_id, manifest: Section[], skeleton: object, instructions: str}` |
 | `dataset_fill_part` | `skeleton_id: str`, `section: str`, `content: object` | `{ok, filled: str[], remaining: str[]}` or section-scoped errors |
 | `dataset_submit` | `skeleton_id: str` | The stored dataset, or full validation errors |
-| `dataset_validate` | `dataset: object` | `{ok, errors}`. Does not store |
+| `dataset_validate` | `dataset: object`, `dataset_json?: str` | `{ok, errors}`. Does not store. Exactly one of the two supplies the document; `dataset_json` is raw JSON **text** and is the only form that can report DS-013, because duplicate keys stop existing the moment JSON is parsed. Added at M4 to make ruling R-20's boundary detection reachable: the MCP SDK parses the request and pre-parses a JSON-string argument before any service code runs, so a parameter annotated `object` never sees raw text |
 | `dataset_find` | `agent_id?: str`, `labels?: object`, `author?: str`, `q?: str`, `blueprint_version?: str`, `limit?: int`, `offset?: int` | Array of dataset summaries, **one row per dataset lineage at its latest version** (ruling R-38). Excludes archived. **Deterministic ordering** by `(created_at, id)`. `author` filters on `provenance.author.handle`; `q` is a case-folded substring match over `title` and `intent`, and substring semantics are the contract on every backend (ruling R-36) |
 | `dataset_get` | `dataset_id: str`, `version?: int` | Full dataset. Latest version when omitted. Returns archived datasets by explicit id |
 | `dataset_archive` | `dataset_id: str` | Updated summary |
