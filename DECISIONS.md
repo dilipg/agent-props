@@ -2187,14 +2187,24 @@ Alternative rejected: running DS-012 only, keeping DS-024 for submit. That split
 validation across two moments for no gain in guidance.
 
 ## [M5] `submit` writes the dataset first, then marks the skeleton
-Order matters only for a crash between the two writes.
-Chose: `put_dataset`, then `mark_skeleton_submitted`.
-Reason: a crash then leaves a stored, validated dataset and an unmarked skeleton — visible, and
+**RETRACTED — ruling R-47 reverses this order. See "[M5, fix round 1] Correction: the write order
+is reversed, and the crash residue flips with it" below.** The reasoning recorded here was sound
+about crash recovery and wrong about what it was trading against: it weighed one residue against
+another without noticing that only one of them was *silent*.
+
+~~Order matters only for a crash between the two writes.~~
+~~Chose: `put_dataset`, then `mark_skeleton_submitted`.~~
+~~Reason: a crash then leaves a stored, validated dataset and an unmarked skeleton — visible, and
 recoverable. The reverse leaves a skeleton SK-005 has closed and no dataset, and the filled work is
 unreachable through any tool. It is also the honest order: you cannot record what a skeleton became
-until it became it.
+until it became it.~~
 
 ## [M5] Concurrency: two claims, both with the losing side tested
+**PARTLY SUPERSEDED — ruling R-47 closes the submit half. The fill half stands, ratified by ruling
+R-48.** The two tests named below still exist and still test the losing side; the submit one now
+asserts the opposite outcome, which is what its own "if this changes, a CAS has landed" message
+asked for. See "[M5, fix round 1] Ruling R-47: `mark_skeleton_submitted` becomes a compare-and-set"
+below for what replaced it, including why the trigger this entry named was the wrong one.
 `skeleton_id` is caller-supplied and the partial state is mutable across calls, so both of these are
 tested rather than asserted in a docstring.
 **A concurrent fill of another section is lost.** `dataset_fill_part` is a read-modify-write of the
@@ -2310,27 +2320,181 @@ control exists to prevent.
 
 ## Questions for the owner — M5
 
-1. **`skeletons.labels` and `skeletons.seed` are an addition to contracts section 7.** They are
+1. **RATIFIED by ruling R-49(a).** **`skeletons.labels` and `skeletons.seed` are an addition to
+   contracts section 7.** They are
    forced rather than chosen — `dataset_submit(skeleton_id)` takes no other argument and ruling R-06
    makes both values non-section inputs, so a skeleton that does not carry them cannot be assembled
    into a dataset. Same class as ruling R-32's missing `runs.declared_bp_version`. Flagged because it
    is a schema change, not a code choice.
-2. **How many datasets should one `(agent_id, version, labels, seed)` be able to author?** The
+2. **OPEN. How many datasets should one `(agent_id, version, labels, seed)` be able to author?** The
    answer today is 64, because skeleton ids are derived (ruling R-10) and the `Store` Protocol can
    only *probe* for one, never enumerate. Exhaustion is an `AP-001` telling the caller to vary the
    seed. If the intended answer is "one" — i.e. a repeat request should be refused rather than
    walking to a fresh generation — the walk becomes a single probe.
-3. **Should exhausting the generation walk have its own boundary code?** It is reported as `AP-001`
-   pointed at `/seed`, which is the closest existing code rather than a good fit: nothing is
-   malformed, the arguments simply cannot be served. A sixth `AP-*` code would be the honest answer
-   and would mean amending contracts section 3.5, which M5 was not asked to do.
-4. **Concurrent `dataset_submit` on one skeleton is not closed.** SK-005 refuses a *sequential*
-   second submit and writes nothing; two truly simultaneous submits both pass it and the loser
-   becomes version 2 of the same dataset. Both cases are tested. Closing it needs a compare-and-set
-   on the skeleton — a `Store` Protocol change three adapters pay for — and the named remedy plus its
-   trigger are in the concurrency entry above. Worth an explicit decision before M9 puts a second
-   writer on the store.
-5. **A blueprint with no `pool: true` node still has to fill `nodes.branches` with `{"pools": {}}`.**
+3. **ANSWERED by ruling R-49(b) — `AP-006` exists now.** ~~Should exhausting the generation walk
+   have its own boundary code? It is reported as `AP-001` pointed at `/seed`, which is the closest
+   existing code rather than a good fit: nothing is malformed, the arguments simply cannot be
+   served. A sixth `AP-*` code would be the honest answer and would mean amending contracts section
+   3.5, which M5 was not asked to do.~~
+4. **ANSWERED by ruling R-47 — the CAS is built.** ~~Concurrent `dataset_submit` on one skeleton is
+   not closed. SK-005 refuses a *sequential* second submit and writes nothing; two truly
+   simultaneous submits both pass it and the loser becomes version 2 of the same dataset. Both cases
+   are tested. Closing it needs a compare-and-set on the skeleton — a `Store` Protocol change three
+   adapters pay for — and the named remedy plus its trigger are in the concurrency entry above.
+   Worth an explicit decision before M9 puts a second writer on the store.~~ The answer to "worth an
+   explicit decision *before M9*" was no: **before M7**, because M7 implements this Protocol against
+   two more backends and M9 arrives after it.
+5. **RATIFIED by ruling R-49(c).** **A blueprint with no `pool: true` node still has to fill
+   `nodes.branches` with `{"pools": {}}`.**
    All five sections are `required: True`, because the `Dataset` model requires all their fields and
    the alternative is the service inventing an empty container. One extra call per dataset for such
    a blueprint; the golden blueprint has a pool node, so nothing in this build pays it.
+
+## [M5, fix round 1] Ruling R-50: every integer that can reach a store column is bounded, and a guard says so
+**This was the second milestone running whose blocking finding was an unbounded integer.** M4:
+`limit`, `offset` and `version` overflowed pysqlite and produced `is_error: true` with no envelope.
+M5: `seed` did the same through `dataset_skeleton` —
+`OverflowError: Python int too large to convert to SQLite INTEGER`, verified through the real MCP
+surface. M4's fix was correct and local (`service/limits.py`, `clamp()` and `storable()`), and M5
+then added a new integer entry point and did not use it. That is exactly the failure the M3
+implementer generalised: **the defect sits in the one place a working pattern was not reused.**
+Chose, per R-50's two parts:
+1. `ArgReader.integer` range-checks through `storable()` and reports `AP-001` at the argument. This
+   is the load-bearing half, and worth being precise about why: `_put` catches `StoreError`, and an
+   `OverflowError` from a driver is not one, so routing alone would have fixed nothing.
+2. `_write` is routed through `_put` anyway, so the *first* skeleton write gets the same error
+   translation the re-fill write already had. Consistency, not a second line of defence.
+3. `tests/unit/test_bounded_integers.py` — the guard.
+**Rejected, not clamped**, and the asymmetry with `clamp()` is the point. `clamp` is for a
+*quantity*: a `limit` of `2**64` means the same thing as the largest representable one. A `seed` is
+neither a quantity nor an identifier of an existing row — it is an authored value that every derived
+id depends on, so substituting a nearby one would author a dataset the caller did not ask for.
+The guard's shape is the part that matters, and it has three pieces:
+- `INTEGER_PARAMETERS` is read off the **running server's registered tools**, so it follows the
+  surface. R-50 is explicit that "a guard that reads a literal list of today's four integers is the
+  defect it exists to prevent".
+- `COVERED` supplies the arguments each case needs to *reach* a store column, which no schema can
+  give you — a valid `dataset_id`, a published blueprint. The enumeration is compared against the
+  surface, so a new integer parameter with no entry **fails** rather than being skipped. M6's
+  `iteration` on `fetch_step` and `limit`/`offset` on `run_find` will find out here.
+- `test_the_in_range_control_reaches_the_store` is the non-vacuity half, and it is not decoration:
+  with `agent_id=""`, `dataset_skeleton` reports `AP-004` before it ever looks at `seed`, so a guard
+  built without it **would have passed against the code M5 shipped broken**. Every case's in-range
+  call must succeed, which proves the out-of-range call is exercising the bound.
+Both halves were verified to fail, not assumed to work. Removing the range check fails four
+assertions including both ends of the range; removing one `COVERED` row fails the enumeration with
+the message that names the missing pair.
+
+## [M5, fix round 1] Ruling R-47: `mark_skeleton_submitted` becomes a compare-and-set
+Succeeds only if `submitted_as` is currently null, and returns whether *this* call claimed the
+skeleton. `dataset_submit` reorders to validate → parse → stamp → CAS → SK-005 on loss →
+`put_dataset` on win; the dataset id is available before the write because R-10 derives it from
+`(seed, salt)`.
+Reason, and it corrects the trigger the original entry named: I wrote that the remedy should wait for
+"a second writer — the web app at M9". **M7 is the real deadline**, because M7 implements this
+Protocol against Postgres and Mongo, so a CAS added afterwards costs three signed-off adapters
+instead of one conformance test. R-33 made exactly this argument for `set_step_actual` and I did not
+apply it to my own residue.
+The other half of the correction is about *why* it outranks the fill race, which R-48 accepts: a lost
+fill is **observable and self-correcting** — every `dataset_fill_part` response carries `remaining`,
+and R-06 permits re-filling — while a lost submit was **silent**: the loser received a success
+envelope for a dataset version it did not mean to create, and no rule fired. My original entry
+weighed residue against residue and missed that asymmetry.
+Implementation detail worth keeping: the conditional `UPDATE ... WHERE submitted_as IS NULL` is
+evaluated by the database, so exactly one of two concurrent statements reports a matched row, and
+`rowcount` is the answer rather than a follow-up `SELECT` that would reintroduce the race one
+statement later. A read-then-write inside a transaction would **not** be equivalent — pysqlite defers
+`BEGIN` until the first DML and Postgres under READ COMMITTED behaves the same way, so the read takes
+no lock. That is the defect ruling R-37 found in `seq` allocation, and the same remedy: let the
+database decide, once.
+Losing the CAS becomes **SK-005**, the same rule id a sequential second submit gets, rather than a
+boundary code — one condition, one vocabulary. `_lost_the_claim` re-reads the skeleton and goes
+through `validate_submit`, so the rule stays the single author of its own message and the finding
+names the dataset id the *winner* claimed.
+Two consequences, both handled: the conformance case that pinned the replay tolerance **inverted**
+(`test_claiming_a_skeleton_succeeds_once_and_only_once` now asserts `True` then `False` then `False`,
+for the same id and for a different one, because a CAS lets the *state* decide rather than the
+argument), and the crash residue flips — see the correction below.
+
+## [M5, fix round 1] Correction: the write order is reversed, and the crash residue flips with it
+The retracted entry above chose `put_dataset` then `mark_skeleton_submitted`, reasoning that a crash
+between them leaves "a stored, validated dataset and an unmarked skeleton — visible, and
+recoverable", where the reverse leaves "a skeleton SK-005 has closed and no dataset".
+Both halves of that are still true. What the entry got wrong is that it was not the trade being
+made: putting the write first is what left the concurrent submit open, and *that* residue was
+silent. So the order is now claim-then-write, and the residue is a **dead skeleton** after a crash
+between the two — a skeleton claimed for a dataset that does not exist.
+Why that is the better residue: a dead skeleton is visible to the author (the submit did not return
+a dataset), it costs one re-fill of five sections, and nothing downstream reads it. A duplicate
+dataset version is invisible to everyone, is served to runs by `dataset_get`, and `dataset_find`
+shows one row per lineage so it does not even appear as an anomaly.
+Recorded rather than quietly reversed, because leaving two contradictory rationales in an
+append-only record is worse than either of them.
+
+## [M5, fix round 1] Ruling R-49(b): `AP-006`, for an exhausted id space
+Id-space exhaustion reported `AP-001` at `/seed`, which tells the caller to fix an argument that is
+perfectly well formed.
+Chose: a sixth boundary code in contracts section 3.5, `AP_ID_SPACE_EXHAUSTED` beside the other
+five, and the one call site plus its assertion updated.
+Reason: this and `AP-001` are the two ways a request can be unservable, and the distinction is what
+makes either useful — `AP-001` means *this value is wrong*, `AP-006` means *this value is right and
+its id space is full*. R-43(a)'s disjointness guard picked the new code up with no change, and
+`test_the_boundary_codes_are_all_distinct_and_all_used` needed only its count updated, which is the
+guard working.
+Paired with the `seed` bound above deliberately: both were `AP-001` standing in for something more
+specific, and fixing one without the other would have left the family's meaning still muddled.
+
+## [M5, fix round 1] SK-004 suppresses only the sections that are actually unfilled
+The first implementation returned from `submit` before the `DS-*` catalogue ran at all, so a submit
+with four of five sections filled and a blank `provenance.title` reported SK-004 alone — and the
+author paid a whole extra round trip to discover DS-025, in the repair loop the section-scoped error
+envelope exists to make cheap.
+Chose: run the catalogue, and drop only the findings whose `section` is one of the **unfilled**
+sections. Ruling R-45 grants exactly that — SK-004 reports per unfilled section and "no `DS-*` rule
+scoped to **those** sections fires at all" — *those*, not every section.
+Sound because of SK-002: the filled sections are always a *prefix* of the manifest, so a finding
+scoped to a filled section can never be an artefact of a later one being absent. There is no
+reachable state where `nodes.core` is filled and `entities` is not, which is what would otherwise
+make DS-006 report a missing entity that the author simply had not got to yet.
+A section-less finding (DS-024 on partial labels, DS-020 on the seed) is kept, because it is not
+scoped to an unfilled section and there is no later round in which it becomes visible.
+The structural cost: `_load` now returns the skeleton *and* the findings rather than one or the
+other, because SK-005 means "stop" while SK-004 means "report and keep reporting". It reads
+`findings[0].rule` to tell them apart, which is sound rather than a shortcut — `_first_reporting`
+stops at the first rule that reports, so every finding in one envelope comes from one rule, and
+`SK_SKELETON_STATE` names that id once instead of spelling a literal in `service/`.
+
+## [M5, fix round 1] `content` must carry at least one of the section's fields
+`dataset_fill_part(section, {})` marked a section filled while contributing nothing, and the submit
+then said nothing about it either: with `entities` and `nodes.core` both filled as `{}`, the submit
+reported eight DS-002 findings scoped to `nodes.core` and not one word about the empty `entities` —
+because SK-004 only asks whether a section is *in* `parts`.
+Chose: `AP-001` at `/content`, naming the fields the section owns.
+This does **not** touch ruling R-45's reachability requirement, and the distinction is worth stating
+because they look adjacent: R-45 is about an individually absent *field* —
+`{"provenance": {...}}` with no `narrative` is still accepted here, and DS-021 still reports it at
+submit, which is the test directly below this one in `test_service_skeletons.py`. An empty *object*
+is a different thing: it is a caller claiming to have filled a section it has not.
+
+## [M5, fix round 1] `_ordered`'s tail is unreachable, and says so now
+The docstring claimed "the tail is not dead code" and pointed at `assemble` running over
+caller-supplied parts. That is weaker than it sounds: an unowned field is `AP-001` at fill time, so
+no assembled document can carry one, and the branch is unreachable through the pipeline.
+Chose: say so, and keep the branch. The reason to keep it is that the alternative fails *silently* —
+a comprehension over a fixed field list would **drop** an unexpected value, and a value dropped by a
+key-ordering helper is a value no rule could ever report. Defence in depth, labelled as such rather
+than as a case.
+
+## [M5, fix round 1] PRD flow B's repair loop gets one end-to-end test
+Re-fill was proven at the rule layer (SK-002 permits it) and at the service layer (a re-fill
+replaces the section) separately. Nothing drove the loop a caller actually experiences:
+reject → re-fill the named section → submit succeeds.
+Chose: `test_a_rejected_submit_is_repaired_by_refilling_one_section`, through the MCP client,
+breaking `expected.comparison` — one word in one section, which is the shape of mistake an LLM makes
+and a repair should cost one call to fix.
+Reason: that loop is the product's headline authoring flow and the thing PRD 6 flow B is written
+about, and it was three separately-proven pieces rather than a working flow. The assertions follow
+what a caller depends on: rejected with the rule id, every finding naming `expected` so the caller
+knows which part to regenerate, `remaining` empty after the one re-fill so it can tell it is ready,
+and the resubmitted dataset **byte-identical to the golden fixture at version 1** — which is what
+makes a re-fill a repair rather than a second draft.
