@@ -94,7 +94,13 @@ def test_schema_carries_shape_not_policy() -> None:
         "minLength",
         "maxLength",
         "minimum",
+        "maximum",
         "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
         "enum",
         "const",
     }
