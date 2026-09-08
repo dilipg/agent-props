@@ -1399,3 +1399,386 @@ Keeping the monkeypatch technique rather than promoting it to threads is deliber
 of a race this narrow is either flaky or has to be forced into determinism by the same kind of hook,
 and the forced-stale-read version fails loudly and repeatably against a regression, as the
 `set_step_actual` check above demonstrates.
+
+## [M4] Ruling R-16's import path re-verified, and everything else the handoff claims with it
+`from mcp.server import MCPServer` is correct against the installed `mcp` 2.2.0. `from mcp import
+MCPServer` raises `ImportError` — `MCPServer` is not a top-level export.
+Reason: R-16 is the one thing in the stack the register verified by hand, and it said to report a
+drift rather than work around one. Nothing had drifted. Also re-verified while building, so the
+report is evidence rather than recollection: the `@mcp.tool()` decorator, `run_stdio_async()`,
+`run_streamable_http_async(host, port, streamable_http_path)`, and `mcp.Client` accepting an
+`MCPServer` instance directly — which is what makes the whole tool-contract suite subprocess-free.
+Two SDK details the handoff does not mention and that cost time: the v2 model fields are
+**snake_case** (`tool.input_schema`, `result.is_error`, `result.structured_content`, not the v1
+camelCase spellings), and `Client` takes a *transport*, so feeding it `stdio_client`'s `(read,
+write)` tuple raises `TypeError: 'builtins.tuple' object does not support the asynchronous context
+manager protocol` — pass `StdioServerParameters` to `Client` instead.
+Alternative rejected: none; the ruling was right.
+
+## [M4] Ruling R-20's premise is false for this SDK, so the raw-text boundary is an explicit argument
+R-20 says to detect DS-013 "at the tool boundary, where the raw text still exists". **With the
+documented `dataset: object` signature it does not exist there**, and that is a finding about the
+ruling rather than a reason to skip it. Three layers of the installed SDK destroy a duplicate key
+before any agentprops code runs, all verified:
+
+1. `mcp/server/stdio.py:189` parses each line with `jsonrpc_message_adapter.validate_json`, and
+   `mcp/server/_streamable_http_modern.py:402` calls `json.loads(body)` — both plain parses, no
+   hook, no interception point exposed;
+2. the in-memory `Client` never has raw text at all;
+3. `MCPServer` **pre-parses a JSON-string argument itself**, with a bare `json.loads`
+   (`mcp/server/mcpserver/utilities/func_metadata.py:256`, `pre_parse_json`), for every parameter
+   whose annotation is not literally `str`. A parameter annotated `object` handed
+   `'{"labels": {"persona": "a", "persona": "b"}}'` receives `{'labels': {'persona': 'b'}}`.
+
+Chose: `dataset_validate` takes an additional optional `dataset_json: str`, annotated exactly `str`
+so `pre_parse_json` skips it, and that argument is R-20's boundary. `service/documents.py` owns the
+parse (`server/` may not import `validation/`), so M5's `dataset_submit` and M7's `dataset_import`
+inherit the same seam. `docs/contracts.md` section 4's `dataset_validate` row is amended.
+Reason: additive and optional, in the same class of refinement as R-05's six missing types and
+R-32's missing column. The rule protects something real — a submitted dataset silently losing a
+label value — and the raw-text path is the one M7 and M9 will both use.
+Alternative rejected: R-20's own fallback, "retire DS-013". One optional argument is cheaper than
+removing a rule, its registry entry and its corpus exemption.
+Pinned by a test rather than by this entry:
+`test_service_documents.py::test_the_sdk_collapses_a_duplicate_key_in_a_json_string_argument` calls
+`pre_parse_json` directly and asserts both halves, so if a future SDK release passes the string
+through, or parses it with a hook, the workaround's justification fails loudly.
+
+## [M4] Every tool parameter is annotated `object`, with its real type in `json_schema_extra`
+Chose: `TextArg = Annotated[object, Field(json_schema_extra={"type": "string"})]` and friends in
+`server/args.py`; `ArgReader` coerces and reports `AP-001`.
+Reason: `MCPServer` validates arguments against a Pydantic model built from the signature *before*
+calling the function. With `agent_id: str`, a caller sending `agent_id: 123` gets
+`isError: true` and a Pydantic message — not the section 1 envelope, which CLAUDE.md requires for
+"a malformed argument". Verified: with `object`, the SDK accepts the value and the tool reports
+`AP-001` with a pointer at the argument. `json_schema_extra` keeps the published schema honest for
+LLM callers — the advertised contract is *stricter* than the implementation, which is the safe
+direction.
+Alternative rejected: natural annotations, accepting that malformed arguments answer outside the
+envelope. Also rejected: bare `object` with no `json_schema_extra`, which loses the type an LLM
+caller reads. `test_tool_surface.py::test_every_tool_argument_advertises_a_json_type` is what stops
+that regressing silently.
+
+## [M4] The success envelope's `data` always carries one named key
+Chose: `{"ok": true, "data": {"blueprint": {...}}, "warnings": []}`, never `data` as the payload
+itself. Keys: `blueprint`, `blueprints`, `dataset`, `datasets`, `summary`, `diff`, `status`,
+`vocabulary`, `agents`.
+Reason: `SuccessEnvelope.data` is `dict[str, Any]`, so `blueprint_list` and `dataset_find` cannot put
+their rows there directly. Using the same shape for the object-valued tools costs one level of
+nesting and buys a caller that never has to ask which tools wrap; a field added to `data` later can
+never collide with a payload key. contracts section 4's "Returns" column describes the payload, not
+where in the envelope it sits, so nothing is contradicted. Section 1 now records the convention.
+Alternative rejected: `data` = payload for object-valued tools, wrapped for array-valued ones. Two
+shapes for one field, and callers would have to memorise which is which.
+
+## [M4] Five `AP-*` boundary codes, documented in a new contracts section 3.5 and disjoint from the registry
+Chose: `AP-001` malformed argument, `AP-002` malformed JSON text, `AP-003` document shape no rule
+owns, `AP-004` not found, `AP-005` store refused.
+Reason: three failures a user can cause have no catalogue rule because they happen before or after a
+document exists, and `RuleError.rule` is the only field an envelope has for a code. `AP-003` is the
+residue of R-04 and R-23 and is not hypothetical — R-07's second amendment records that exact gap
+producing a raw `ValidationError` where a rule id belonged. `AP-004` and `AP-005` are resolution
+rather than validation, which section 1 covers explicitly ("on a validation **or resolution**
+failure").
+`contracts.md` gains section 3.5, marked as **not** part of the rule registry, and
+`test_service_envelope.py` asserts the documented set equals `BOUNDARY_CODES` *and* that both are
+disjoint from `RULE_REGISTRY` and from sections 3.1-3.4. Without the second assertion an `AP-*` id
+could be registered as a rule and the drift test would start failing two files away from the cause.
+Alternative rejected: reusing a `BP-*`/`DS-*` id for a boundary failure (a code with two meanings),
+and omitting the code entirely (the model requires one).
+
+## [M4] `blueprint_upsert` normalises `status` from `publish` *before* validating
+Chose: `document["status"] = "published" if publish else "draft"`, then `validate_blueprint`, then
+parse, then `put_blueprint`.
+Reason: not tidiness — it closes a reachable crash. BP-016 compares the *submitted* document against
+the stored one canonically (R-29); `put_blueprint` compares the *normalised* document. Submit a
+document identical to a published version but carrying `status: "published"`, with `publish=False`:
+BP-016 sees two identical documents and reports nothing, then `put_blueprint` normalises `status` to
+`draft`, finds a difference against a published row, and raises
+`PublishedVersionImmutableError` — a user-caused exception, which CLAUDE.md forbids. Normalising
+first makes the two comparisons identical by construction. It costs nothing: no rule reads `status`,
+so no finding's pointer moves, and `status` becomes a derived field a caller may omit.
+Tested, not asserted: `test_demoting_a_published_version_reports_bp_016_rather_than_raising`.
+Alternative rejected: catching the exception only. The service still does that as defence in depth,
+with `test_a_store_that_refuses_a_write_becomes_a_bp_016_envelope` monkeypatching the store into
+raising — because a guard whose only proof is "the code above cannot reach it" is the shape of claim
+the M3 fix rounds were spent on.
+
+## [M4] The `blueprint_diff` payload shape
+contracts section 4 names four categories and no payload, so the shape is defined in
+`service/diff.py` and recorded here:
+
+```jsonc
+{
+  "agent_id": "location-onboarding",
+  "from": {"version": "1.0.0", "present": true,  "status": "published"},
+  "to":   {"version": "1.1.0", "present": false, "status": null},
+  "nodes": { "added": ["id"], "removed": ["id"],
+             "changed": [{"node_id": "x", "changes": [{"field": "kind", "from": "a", "to": "b"}]}] },
+  "edges": { "added": [{"from": "a", "to": "b", "condition": null}], "removed": [] },
+  "schemas": [{"node_id": "x", "field": "output_schema", "from": {}, "to": {}}],
+  "labels": { "dimensions_added": [], "dimensions_removed": [],
+              "values_added": [{"dimension": "tier", "values": ["national"]}], "values_removed": [] }
+}
+```
+
+Five decisions inside it, each of which could have gone the other way:
+
+- **`nodes.changed` and `schemas` partition a node's fields and never overlap.** `changed` reports
+  the five scalar fields (`tool_name`, `kind`, `pool`, `max_iterations`, `notes`); `schemas` reports
+  `input_schema` and `output_schema`. A node whose only difference is a schema appears in `schemas`
+  and *not* in `nodes.changed`, so "which nodes differ at all?" is the union of three lists. The
+  alternative — repeating the before/after schema blobs inside `nodes.changed` too — makes each
+  category independently consumable at the cost of duplicating the largest values in the document,
+  in a payload an LLM may be reading. `test_the_scalar_and_schema_field_sets_are_disjoint` pins the
+  partition.
+- **Edge identity is `(from, to, condition)`,** so a changed condition is one removal plus one
+  addition. The contract gives edges only *added* and *removed*; under identity `(from, to)` alone a
+  condition change would be neither, and therefore invisible.
+- **A missing version is `present: false`, never an error,** plus a `blueprint_version_missing`
+  warning from the service. "Never a failure signal" in the contract row is unconditional.
+- **Everything is sorted** — node ids, edges (by canonical identity), schema entries, dimensions,
+  values — because the acceptance criterion is byte-identical output across repeated identical calls
+  and a set iteration order is not that.
+- **No timestamp.** `generated_at` was the obvious field and is absent for the same reason.
+
+Deliberately **not** in the diff, because none of the four categories covers it: `entry_node`,
+`outcome_schema`, `description` and the **entity schemas**. See "Questions for the owner" below.
+
+## [M4] Ruling R-22's warning vocabulary grows by one: `blueprint_version_missing`
+Chose: `blueprint_diff` attaches it, once per absent side, with `{agent_id, version, side}`.
+Reason: R-22 keeps `Warning.code` an open string precisely so the vocabulary can grow without a
+model change, and `blueprint_diff` needs a way to say "this version does not exist" without failing.
+Alternative rejected: `AP-004`. That would make the tool report a resolution failure, which the
+contract forbids in that row.
+
+## [M4] Warning-severity findings become `Warning` entries on the success envelope
+Chose: `warnings_from(findings)` maps each warning-severity `RuleError` to
+`Warning(code=rule_id, detail={pointer, message, section, context})`.
+Reason: ruling R-13 makes BP-019, DS-007, DS-027 and DS-032 warnings, so a document that trips only
+those must store — and ground rule 3 says the mismatch comes back as a warning "attached to the
+response". `SuccessEnvelope` has no `errors`, so the finding has to ride somewhere, and nothing the
+validator reported should be dropped on the way. The rule id becomes the code, which is what
+`Warning.code`'s open string is for.
+Alternative rejected: returning the validator's `ErrorEnvelope` from a write path. That would make a
+successful write look like a validation result and lose the stored document.
+
+## [M4] `ServiceContext` is two injected ports and nothing else
+Chose: `ServiceContext(store: Store, clock: Clock = SystemClock())`, with `resolver` as a derived
+property rather than a third field.
+Reason (the property): a `StoreResolver` is stateless and there is exactly one correct resolver for a
+given store. Letting a caller pass a different one would let a write path validate against a store
+it does not then write to — which is precisely the BP-016 hazard R-29 exists around.
+Reason (two, not three): a third port is the moment to ask whether the thing being added belongs in
+the service at all. There is no LLM client, no HTTP client, no API key and no config object (ground
+rule 4).
+How tests freeze the clock: `tests/conftest.py`'s `context` fixture builds
+`sqlite_context(tmp_path / "agentprops.db", clock=FrozenClock(FROZEN_NOW))`, and `FROZEN_NOW` moved
+to the root conftest so `tests/integration/conftest.py` imports it rather than redefining it.
+**M4 stamps nothing with the clock,** and that is not an oversight: `validated_at` is a dataset
+field and the dataset write path is `dataset_submit`, which is M5's. M4 also deliberately puts no
+clock reading into any *response* — `blueprint_diff`'s `generated_at` was the obvious candidate — so
+that repeated identical calls stay byte-identical.
+`test_layering.py::test_only_the_clock_module_reads_a_clock` asserts no module in `service/` or
+`server/` other than `clock.py` calls a clock, because "a single injected clock" without that
+assertion is a sentence in a docstring. Verified to fail on a violation.
+
+## [M4] `FrozenClock` ships in `src/`, not in the test tree
+Chose: `service/clock.py` exports `Clock`, `SystemClock` and `FrozenClock`.
+Reason: four milestones need to freeze the clock (M4's determinism gate, M5's `validated_at`, M6's
+and M8's run timestamps), and a helper each suite reinvents is a helper each suite gets subtly
+differently. It is nine lines and frozen/hashable so a suite can hold one as a module constant.
+Alternative rejected: a fixture in `tests/conftest.py`. Same code, four milestones later, in a place
+the Python client cannot reach.
+
+## [M4] The `MCPServer` instance lives in `server/app.py`, re-exported from `server/__init__.py`
+`docs/build-handoff.md` puts "the `MCPServer` instance and both transports" in
+`server/__init__.py`, and that is where they are *exported* from.
+Reason for defining them one module down: a tool module has to import the instance to decorate
+against it, and a tool module importing its own package's `__init__` while that `__init__` is
+importing the tool module is a partially-initialised-module cycle.
+Alternative rejected: registering the tool modules at the bottom of `__init__.py` behind
+`# noqa: E402`. It works, and swaps a clean two-module split for a lint suppression and an import
+whose position is load-bearing.
+
+## [M4] One module-level binding, not a `ContextVar` and not a server per store
+Chose: `server/app.py` holds the bound `ServiceContext` in a module attribute; `bind()` sets it,
+`bound()` reads it at call time, and `binding()` is a context manager tests use.
+Reason: tools are registered at *import* time by a decorator on a module-level function, so a tool
+cannot close over a store that does not exist yet.
+Alternative rejected — a fresh `MCPServer` per store with the tools as closures inside
+`register(mcp, context)`: removes the global at the cost of nesting thirteen tool functions inside
+three registration functions, where a reader looking for `blueprint_upsert` finds it indented inside
+something else.
+Alternative rejected — a `ContextVar`: looks safer and is not. The SDK runs a sync tool through
+`anyio.to_thread.run_sync` and the in-memory `Client` runs the server in a task it creates itself,
+so whether a value set by a fixture is visible inside a tool depends on when the fixture ran
+relative to the client's task group. A module attribute has no such question.
+`bound()` raises `RuntimeError` when nothing is bound, deliberately **not** an envelope: an envelope
+would tell a caller their request was wrong when the server is misconfigured, and would make every
+tool answer plausibly while doing nothing.
+
+## [M4] The MCP client is a helper, not a pytest fixture
+Chose: `tests/toolclient.py` with `connected(context)` and `invoke(target, name, **arguments)`; a
+session per call by default, and `connected` for the tests that want several calls on one session.
+Reason: the obvious shape — an async generator fixture yielding an entered `Client` — **does not
+work**. `Client.__aenter__` opens an `anyio` task group, an `anyio` cancel scope must be exited by
+the task that entered it, and pytest-asyncio 1.4 runs an async fixture's setup and its finalizer
+through two separate `runner.run(...)` calls. Every test taking such a fixture failed teardown with
+`RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`.
+A session per call is not a compromise: every M4 tool is a read or a single write against the store,
+all state lives in the store rather than the session, so it is indistinguishable from a shared
+session *and* it exercises the initialise handshake on every assertion.
+`test_one_session_serves_many_calls` covers the shared-session path so it is not left untested.
+
+## [M4] `sqlite_context` requires a path; there is no in-memory default
+Chose: `sqlite_context(path)` with no default, and `--store` defaulting to `./agentprops.db`.
+Reason: found by running it, not by reasoning about it. `sqlite_url(None)` produces
+`sqlite+pysqlite://`, whose engine uses SQLAlchemy's per-thread pool — and an in-memory SQLite
+database belongs to its *connection*. The SDK runs a synchronous tool through
+`anyio.to_thread.run_sync`, so the schema created on the calling thread was invisible to the thread
+the tool ran on and every tool answered `no such table: blueprints`. A default that silently cannot
+work is worse than no default.
+Alternative rejected: teaching `create_engine_for` to use a `StaticPool` for in-memory URLs. That is
+a change to M3's signed-off adapter to enable a mode nothing needs — every test uses a `tmp_path`
+file, which is the established pattern and the mode CI uses.
+
+## [M4] `dataset_find` takes a `DatasetQuery`, and `paginate` owns the defaults
+Chose: `datasets.find(context, query: DatasetQuery)`, with `paginate(query)` supplying `limit`
+(default 50) and clamping both `limit` and `offset` to `>= 0`.
+Reason: `DatasetQuery` is *defined* as `dataset_find`'s parameters (ruling R-05), so the tool
+function has somewhere to put its seven parsed arguments without a second parallel shape — which is
+also what keeps `dataset_find` under the 20-line budget. `DatasetQuery` carries no `ge` constraint
+(R-04) and its own docstring says the service decides the defaults, so this is where they are.
+Clamping rather than refusing, because the service never gates and a negative `LIMIT` is a
+per-backend accident (SQLite reads `LIMIT -1` as "no limit", Postgres rejects it) rather than a
+portable answer. `paginate` is public so the clamping has a test that needs no store, and so M7's
+`dataset_export` inherits the same defaults instead of inventing its own.
+Alternative rejected: seven keyword parameters on `find`. Correct, and 22 formatted lines in the tool
+function against a 20-line rule — which would have been resolved by weakening the rule.
+
+## [M4] `dataset_get` returns an archived dataset with a `dataset_archived` warning
+Chose: `ok: true`, the full document, and contracts 3.4's existing warning code.
+Reason: ground rule 3, in the one place it is most tempting to gate. The asymmetry with
+`dataset_find` — which excludes archives — lives in the store and exists so a run holding a pin
+keeps reading a dataset archived after it started. Reusing 3.4's code rather than inventing one: the
+condition is identical, and R-22 lists it as part of the vocabulary already.
+
+## [M4] `label_vocabulary` and `agent_list` count *discovery*; `store_status` counts *health*
+Chose: the two label/agent tools count through `find_datasets` (archives excluded, one row per
+lineage); `store_status` reports `Store.health()` (archives included).
+Reason: ruling R-05 says the health count "includes archived datasets — it is a store-health number,
+not a discovery number", and the other two are review surfaces built on the method that hides
+archives. The two numbers can therefore disagree, which reads like a bug unless it is pinned:
+`test_the_two_counting_numbers_disagree_about_an_archived_dataset` pins it.
+`label_vocabulary` deliberately does not page — a count over the first 50 rows is not a count — so
+it calls `find_datasets` with no limit. That is a full scan bounded by the datasets for one blueprint
+version, which is authoring volume. The named remedy if it ever matters is a counting method on the
+Protocol, not a page size here.
+
+## [M4] Label and agent orderings follow declaration order, not a sort
+Chose: `label_vocabulary`'s dimensions and values keep the blueprint's declaration order;
+`agent_list`'s agents and versions keep `list_blueprints`'s `(agent_id, semver)` order.
+Reason: both are deterministic — a JSON object preserves order through `json.loads` and through the
+`LabelSchema` model — and declaration order is also the order a human wrote, which is what a
+reviewer wants to read. Re-sorting versions in Python would put `1.10.0` before `1.9.0` and undo
+ruling R-35 one layer up. Nothing in `service/` re-sorts or re-filters what the store returned; R-35,
+R-36 and R-38 are all one `sorted()` away from being undone.
+
+## [M4] Tool-surface drift guards, in the shape `test_validation_drift.py` established
+Four guards in `tests/unit/test_tool_surface.py`, and the reasoning is the drift test's transferred:
+a tool table kept in prose and a surface kept in code will diverge unless a test compares them.
+
+- `test_every_registered_tool_is_documented` — the running server's names are a subset of what
+  `docs/contracts.md` section 4 tabulates. `tests/catalogue.py` gained `parse_tool_names` for it.
+- `test_every_documented_tool_is_registered_or_deferred` — the other direction, scoped by a
+  `DEFERRED` map that names the milestone owning each of the fifteen unbuilt tools. M5 through M10
+  land by *deleting* entries, and `test_no_deferral_is_stale` fails if a deferred tool appears on the
+  surface anyway.
+- `test_every_registered_tool_answers_an_envelope` — runtime and fully mechanical: arguments are
+  synthesised from each tool's own published input schema, so a tool added at M5 is covered the
+  moment it is registered, with no test change.
+- `test_every_registered_tool_has_a_dedicated_test` — the M4 acceptance criterion, mechanically
+  enforced. Reads the AST of `tests/` and collects every string literal passed to a
+  `call_tool`/`invoke`/`attempt` call. Add a tool without a test and it fails; delete a tool's only
+  test and it fails. Verified by simulation: adding `run_start` to the registered set reports exactly
+  `['run_start']` as uncovered.
+
+Two guards on the guards, both copied from the drift test's own defences:
+`test_the_source_scanner_finds_something` blames the scanner rather than the suite on an empty parse,
+and `test_the_scanner_does_not_credit_a_name_nobody_calls` asserts `dataset_skeleton` — named in
+`DEFERRED` and in prose, called by nothing — is *not* credited, so a scanner matching more than tool
+calls fails rather than passing forever.
+Alternative rejected: a hand-kept list of exercised tools. That is the thing the brief and the drift
+test both exist to avoid.
+
+## [M4] The layering rule gains five AST guards, all verified to fail on a violation
+`server/` may import `service/` and `models/` and nothing else sideways; a tool function stays under
+20 lines *and* 12 statements; a tool function contains no control flow but the argument guard; a tool
+function never raises; only `service/clock.py` reads a clock.
+Reason: CLAUDE.md says review enforces the layering rule. Forbidding `storage/` and `validation/` in
+`server/` forbids the *thing* rather than the symptom — a tool cannot validate a document or query a
+store without importing the layer that does it — which is what makes "no business logic in
+`server/`" enforceable rather than a matter of taste. It is also why
+`service.context_from_url`/`sqlite_context` exist: `server/__main__.py` has to open a store, and
+doing it through `service/` keeps the rule literally true instead of true with an exemption.
+The size budget is measured in **both** physical lines and statements, because either number fails
+alone: a formatter can split one statement across ten lines, and an author can pack ten statements
+into ten lines.
+**Verified rather than assumed.** A throwaway probe fed the guards a synthetic tool module with an
+over-budget function, an `if`, a `for`, a `raise`, a `datetime.now()` and a `from agentprops.storage
+import`; all five reported. A guard that has never failed proves nothing, which is the M3 lesson
+applied to a test rather than to a docstring.
+
+## [M4] `tests/envelopes.py`, so a narrowing assertion says which envelope it wanted
+Chose: `data()`, `warnings_of()`, `findings()`, `rules()`, `codes()` — each asserting the envelope
+kind on the way to the field.
+Reason: `Reply` is `SuccessEnvelope | ErrorEnvelope` and only one member has `data`, which is correct
+and which `mypy --strict` enforces on `tests/` too. Sprinkling `assert isinstance` at every call site
+would satisfy the checker and say nothing; these turn the requirement into a better failure message —
+`data(reply)` reports "expected a success envelope, got ok=False errors=[...]" where `reply.data[...]`
+would have raised `AttributeError` with no explanation.
+Alternative rejected: loosening `Reply`. The union is the honest type.
+
+## [M4] `python -m agentprops.server` exists, and is not the CLI phase 1 rules out
+Chose: a five-argument entry point — `--transport {stdio,http}`, `--store PATH`, `--host`, `--port`,
+`--path`.
+Reason: M4's deliverable is "`MCPServer` with stdio and streamable HTTP transports", and a transport
+with no way to start it cannot be shown to work — the stdio evidence in
+`tests/integration/test_transports.py` spawns exactly this. The non-goal is an *authoring* CLI, which
+this is not.
+`--store` is a SQLite **file path**, not a URL, deliberately: the Postgres and Mongo adapters land at
+M7, and a URL argument that silently ran `create_schema` against a migrated Postgres database would
+be worse than not having one. `service.context_from_url` is the seam M7 wires in.
+
+## [M4] Both transports get their own evidence, in `tests/integration/`
+Chose: `test_transports.py`, marked `integration`. stdio through a real subprocess driven by
+`Client(StdioServerParameters(...))`; streamable HTTP by running `run_streamable_http_async` in a
+background task on an ephemeral port and connecting a `Client` to the URL.
+Reason: the in-memory `Client` proves the *tools* and proves nothing about either transport, because
+it never touches one. Those are separate claims. It lives in `tests/integration/` because it is the
+only place in the suite that spawns a process, and CLAUDE.md says no subprocesses in unit tests.
+The port is claimed by binding a socket and releasing it — a narrow race, rather than a fixed number
+that collides with whatever else is running. Asking the server which port it bound is not available:
+`run_streamable_http_async` takes a port and returns nothing until it stops.
+The readiness loop has **one** exit — it returns on the first successful session and otherwise runs
+out of attempts and reports the last exception — per the M3 rule that a retry loop with more than one
+exit is a smell.
+The HTTP suite also calls a tool that returns a *failure* envelope (`AP-004`) and one that must never
+fail (`blueprint_diff`), so the transport is not proved by one read.
+
+## Questions for the owner — M4
+
+1. **`blueprint_diff` cannot report an entity-schema change.** contracts section 4 names four
+   categories — nodes, edges, per-node schemas, label vocabulary — and none of them covers
+   `entities[*].schema`, `entry_node`, `outcome_schema` or `description`. Ruling R-27 extended BP-011
+   to validate entity schemas precisely because a malformed one publishes and surfaces a milestone
+   later; a *changed* one is the same class of surprise, and this diff will not show it. Adding a
+   fifth `entities` category is a small change; it was not taken because it exceeds the four
+   categories the contract names.
+2. **Is a boundary code the right home for "not found"?** `AP-004` puts `ok: false` on `dataset_get`
+   for an unknown id. contracts section 1 blesses it ("a validation **or resolution** failure") and
+   ground rule 3 is untouched — this is "there is no such row", not a policy verdict — but a caller
+   that wanted `ok: true, data: {dataset: null}` for a miss would have to change the envelope.
+3. **`dataset_find`'s default `limit` is 50.** Nothing specifies one and `DatasetQuery` carries no
+   constraint. If the web app at M9 wants a different page size, this is the constant to move.

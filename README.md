@@ -19,10 +19,17 @@ See [`CLAUDE.md`](CLAUDE.md) for the invariants and layering rules that govern t
 Phase 1 is being built one milestone at a time, M0 through M11 (see
 [`docs/build-handoff.md`](docs/build-handoff.md) section 4). This repository currently has the M0
 scaffold (package layout, tooling, CI, golden fixtures), the M1 domain models in
-`src/agentprops/models/`, and the M2 validator in `src/agentprops/validation/` — every `BP-*` and
+`src/agentprops/models/`, the M2 validator in `src/agentprops/validation/` — every `BP-*` and
 `DS-*` rule in [`docs/contracts.md`](docs/contracts.md) section 3, with a rule-id-to-callable
-registry and a declarative rejection corpus. There is no working service yet: `storage/`,
-`service/`, `server/`, `expansion/` and `export/` are empty modules waiting on their milestone.
+registry and a declarative rejection corpus — the M3 `Store` Protocol and SQLite adapter in
+`src/agentprops/storage/`, and the M4 MCP surface: `src/agentprops/service/` and
+`src/agentprops/server/`, thirteen tools over stdio and streamable HTTP. `expansion/` and `export/`
+are empty modules waiting on M7.
+
+Not yet built: the skeleton pipeline (`dataset_skeleton`, `dataset_fill_part`, `dataset_submit`, M5),
+the runtime (`run_start`, `fetch_step`, M6), expansion and export/import (M7), and the web app (M9).
+`tests/unit/test_tool_surface.py` lists exactly which documented tools are still deferred, and to
+which milestone.
 
 ## Validate a document
 
@@ -58,6 +65,35 @@ Everything above `storage/` goes through the `Store` Protocol in
 directly. It has no `delete_*` method and never will: archive is a flag, a dataset edit is
 copy-on-write, and two tests hold the line — one on the Protocol's shape, one on the AST of every
 module in the package.
+
+## Serve the tools
+
+```bash
+uv run python -m agentprops.server --store agentprops.db                     # stdio
+uv run python -m agentprops.server --store agentprops.db --transport http    # streamable HTTP
+```
+
+Thirteen tools: `blueprint_upsert`, `blueprint_get`, `blueprint_list`, `blueprint_validate`,
+`blueprint_diff`, `dataset_find`, `dataset_get`, `dataset_archive`, `dataset_restore`,
+`dataset_validate`, `store_status`, `label_vocabulary`, `agent_list`.
+
+Every tool answers one of the two envelopes in [`docs/contracts.md`](docs/contracts.md) section 1 and
+never raises for anything a caller can cause — a malformed argument, an unknown id, a rule violation
+and a store refusal are all `{"ok": false, "errors": [...]}` with a rule id and an RFC 6901 pointer.
+A policy problem is a **warning** on a successful response: `blueprint_diff` never fails, and
+`dataset_get` returns an archived dataset with a `dataset_archived` warning.
+
+In-process, for a test or a script:
+
+```python
+from mcp import Client
+from agentprops.server import binding, mcp
+from agentprops.service import sqlite_context
+
+with binding(sqlite_context("agentprops.db")):
+    async with Client(mcp) as client:          # no subprocess, no transport
+        result = await client.call_tool("store_status", {})
+```
 
 ## Migrate a database
 
