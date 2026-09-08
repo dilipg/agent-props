@@ -724,6 +724,111 @@ deleting that test fails the gate.
 **Cost if wrong.** None; this only adds coverage. The prose exemption in `manifest.json`
 and `DECISIONS.md` currently protects nothing, which is the defect being fixed.
 
+## Rulings that bind M3 (storage) and the adapters after it
+
+### R-32 — `runs.declared_bp_version` is a real column; the DDL omitted it
+
+M3 found that `contracts.md` section 7's `runs` table has no column for
+`declared_blueprint_version`, which section 2.3 gives to `Run`. Dropping it on write loses
+the input to the `blueprint_version_mismatch` warning.
+
+**Ruling.** Keep the column, nullable. Ground rule 3 requires mismatches to produce
+"warnings attached to the response **and to the stored run**" — and a stored warning whose
+cause cannot be reconstructed is not evidence. Deriving it later is impossible: the declared
+version is caller input that exists nowhere else. This is the same class of omission as the
+six missing Protocol types in R-05 — the DDL is a refinement that lost a field the model
+already carried, not a deliberate exclusion. Amend section 7's `runs` table.
+
+**Cost if wrong.** One migration drops a nullable column.
+
+### R-33 — `set_step_actual` joins the Protocol now, not at M8
+
+M3 found that `upsert_step`'s documented strict idempotency — "calling it twice with the
+same key is a no-op that returns the existing record" — means it can never write `actual`.
+M8's `record_step` needs to attach `actual` to a step that `fetch_step` already recorded.
+
+**Ruling.** Add `set_step_actual(run_id: str, node_id: str, iteration: int, actual: Mapping)
+-> StepRecord` to the `Store` Protocol. The two operations are genuinely different and both
+contracts are worth keeping intact:
+
+- `upsert_step` records **what was served**. Its idempotency is what makes M6's gate
+  possible — "fetching the same step key twice returns byte-identical fixtures and advances
+  nothing" — so it must stay a literal no-op on a repeat.
+- `set_step_actual` records **what the agent did**. Write-once per key, and it fails if no
+  step record exists, because you cannot report an actual for a step that was never served.
+
+Rejected alternatives: making `upsert_step` merge non-null fields (breaks the no-op contract
+M6 depends on), and a step-rewriting `put_run` (a whole-aggregate write to change one field,
+and it would let a caller rewrite served fixtures, which ground rule 1 forbids in spirit).
+
+**Do it at M3, not M8.** The method belongs to the Protocol, and M7 implements the Protocol
+against Postgres and Mongo. Adding it now costs one method and one conformance test; adding
+it at M8 costs touching three adapters that were already signed off. Ground rule 1 is
+untouched — this writes to a run, never to a dataset.
+
+**Cost if wrong.** One unused Protocol method until M8.
+
+### R-34 — `archived` is a property of the dataset lineage, not of a version
+
+M3 left open whether a dataset version written *after* an archive inherits the flag.
+
+**Ruling.** Archive is a **lineage-level** flag. The Protocol says so already:
+`set_archived(dataset_id, archived)` takes an id and no version. So `set_archived` applies to
+every row for that id, and `put_dataset` inherits the current state of the lineage rather
+than taking the caller's word for it.
+
+This follows from what archive is *for* (PRD 5.6): an archived dataset "disappears from
+`dataset_find` but stays servable to any run holding a pin to it". Per-version archiving
+would mean a lineage half-hidden from discovery, and `find_datasets` — which returns one row
+per lineage — would have no coherent answer.
+
+**Cost if wrong.** If per-version archiving is ever wanted, the column already exists per
+row; only the write path changes.
+
+### R-35 — the two unspecified orderings, ratified
+
+Nothing in the spec set gives an ordering for `list_blueprints` or `find_runs`, though
+`dataset_find`'s `(created_at, id)` is specified and M4's gate requires "label queries
+return deterministic ordering for identical inputs".
+
+**Ruling.** Ratified as M3 chose them: `list_blueprints` orders by `(agent_id, semver)` —
+semver-aware, not lexicographic, so `1.10.0` sorts after `1.9.0`; `find_runs` orders by
+`(started_at DESC, id)`, newest first, with the id as the tiebreak that makes it total.
+
+Every list-returning Protocol method must have a **total** order, so that identical inputs
+give byte-identical output on every backend. A partial order that happens to be stable on
+SQLite will diverge on Postgres or Mongo and M7's conformance suite will fail on it. Document
+all three orderings in `contracts.md` section 4.
+
+**Cost if wrong.** An ordering change is one `ORDER BY`, but it is a visible API change once
+the web app pages through results.
+
+### R-36 — `q` is substring matching, and Postgres must not "improve" it
+
+M3 flagged that swapping the `q` filter to Postgres `to_tsvector` at M7 would change
+semantics — stemming is not substring matching — and the conformance suite's `q` assertions
+would fail.
+
+**Ruling.** The contract is explicit: "`q` is a substring match over `title` and `intent`"
+(`contracts.md` section 4). **Substring semantics are the contract**, so M7's Postgres
+adapter uses `ILIKE`, not full-text search, and the conformance suite's assertions stand as
+written. M3's `LIKE` implementation is the correct one.
+
+Consequence for the DDL: the `datasets_search` index in section 7 cannot be a plain
+`to_tsvector` GIN index and still serve this contract. At M7 it becomes a **`pg_trgm`** GIN
+index, which accelerates substring matching, or it is dropped where the extension is
+unavailable — the conformance suite asserts identical *results*, never identical query plans,
+so dropping it costs speed and nothing else.
+
+**Why not switch to full-text.** M9's gate is that a reviewer can find the Priya dataset by
+searching "repeat operator". Stemming would also match "repeated operators", which sounds
+like an improvement until two backends disagree about what a query returns — and PRD design
+principle 2 ("hold the environment byte-identical") is the whole basis of the product's
+drift claim.
+
+**Cost if wrong.** If full-text is genuinely wanted, it is a new named parameter alongside
+`q`, not a redefinition of it.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
