@@ -203,6 +203,33 @@ When `fault` is set, DS-004 **skips `output_schema` validation entirely** and re
 `output` to be absent or an object — reading "the fault shape" as "not the node's success
 shape". M2 adds one valid fault fixture to the corpus base and one DS-022 case.
 
+**Second amendment, after M2's review — `output` becomes optional on `NodeFixture`.**
+
+This ruling blessed the absent form ("`output` to be absent or an object") but M1's
+`NodeFixture` requires `output`. M2 implemented the ruling faithfully, so the two layers now
+disagree, and the composite was verified: a faulted fixture with no `output` returns **zero
+findings and `ok: True`** from the validator, and then `Dataset.model_validate` raises
+`('nodes', 'verify_compliance', 'output') missing`. That is precisely the failure mode
+CLAUDE.md forbids — a user-causable condition producing an exception instead of a rule id —
+and under R-23's validate-then-parse ordering it lands in `service/` at M4/M5, where an LLM
+filling `nodes.core` is the likeliest author of a faulted fixture with no output.
+
+**Ruling.** `output` becomes `dict | None` on `NodeFixture`, and **DS-004 takes over the
+presence check**:
+
+- `fault` set → skip `output_schema` validation; `output` may be absent, and must be an
+  object if present (as this ruling already said).
+- `fault` unset → `output` must be **present** and must validate against `output_schema`.
+
+This is R-04's own principle applied to a case R-04's "required fields stay required"
+exception was silently covering: policy belongs in the catalogue, and here a ruling
+explicitly blesses an absent value, so the model can no longer be the thing that enforces
+presence. Both directions need a corpus case — a clean faulted fixture with no `output`, and
+a non-faulted fixture missing `output` reporting DS-004 alone.
+
+**Cost if wrong.** Consumers of `NodeFixture.output` must handle `None`, which is correct
+anyway: a faulted step genuinely has no output.
+
 **Amendment, after M1's review.** "No additional properties" describes the *shape DS-022
 enforces*, not the model's config. `FaultSpec` uses `extra="allow"` so that an unknown key
 reaches the validator intact and DS-022 can report it with a rule id — under
@@ -659,12 +686,33 @@ fires alongside BP-006 — breaking the exact-set assertion. The corpus case the
 exercises BP-006's existence half, and the inbound half is covered by a unit test.
 
 **Ruling.** Accept, with a **named** exemption in the coverage gate, exactly as R-20 handles
-DS-013. A second base blueprint would reach it and costs more than the coverage is worth.
-The principle: a rule half that no mutation of the single base fixture can isolate gets a
-unit test plus a named exemption — never a silent gap.
+DS-013. The principle: a rule half that no mutation of the single base fixture can isolate
+gets a unit test plus a named exemption — never a silent gap.
 
-**Cost if wrong.** If a second base blueprint arrives for other reasons, fold the case in
-and drop the exemption.
+**Corrected after M2's review** (this ruling was wrong in two ways).
+
+First, it claimed "the inbound half is covered by a unit test". **No such test exists.**
+`bp_006`'s inbound branch is the only predicate branch in M2's diff with no test of it
+*firing*, so a version that never reported the inbound case would pass all 423 tests. A
+ruling must not assert coverage without it being verified — the test is now required work,
+not a recorded fact.
+
+Second, it said "a second base blueprint would reach it". **No blueprint can.** The reviewer
+proved it structurally: any blueprint with an edge into `entry_node` must also have either a
+cycle (BP-018) or a predecessor unreachable from the entry (BP-005), so an inbound-edge
+mutation always fires a second id and breaks the exact-set assertion. A verified probe
+returns `['BP-006', 'BP-007', 'BP-018']`.
+
+So the only available coverage is a **membership-style unit test**
+(`assert "BP-006" in rules_for(doc)`) rather than an exact-set corpus case. And the
+exemption needs a shape the gate understands: the existing `MUTATION_UNREACHABLE` map is
+keyed by whole rule id, so registering `BP-006` there would trip
+`test_no_exemption_is_stale` (the rule *does* have a corpus case, for its other half). The
+gate needs a **rule-half** exemption entry that names the unit test covering the half, so
+deleting that test fails the gate.
+
+**Cost if wrong.** None; this only adds coverage. The prose exemption in `manifest.json`
+and `DECISIONS.md` currently protects nothing, which is the defect being fixed.
 
 ## Rulings that bind later milestones
 
