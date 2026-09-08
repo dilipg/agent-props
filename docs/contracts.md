@@ -325,13 +325,15 @@ Warnings, attached to both the response and the stored run, never blocking:
 
 All tools return the envelope from section 1. Inputs listed as `name: type` with `?` marking optional.
 
+Every list-returning tool has a **total** order, stated in its row: a partial order that happens to be stable on one backend diverges on another, and identical inputs must give byte-identical output on all three (ruling R-35, extended to `run_get`'s steps by ruling R-37).
+
 ### Blueprint
 
 | Tool | Input | Returns |
 |---|---|---|
 | `blueprint_upsert` | `blueprint: object`, `publish?: bool` | The stored blueprint, or errors. Rejects on BP-016 |
 | `blueprint_get` | `agent_id: str`, `version?: str` | Blueprint. Latest published when version omitted |
-| `blueprint_list` | `status?: str` | Array of `{agent_id, version, status, description}` |
+| `blueprint_list` | `status?: str` | Array of `{agent_id, version, status, description}`. **Deterministic ordering** by `(agent_id, version)`, version compared as semver so `1.10.0` sorts after `1.9.0` (ruling R-35) |
 | `blueprint_validate` | `blueprint: object` | `{ok, errors}`. Does not store |
 | `blueprint_diff` | `agent_id: str`, `from_version: str`, `to_version: str` | Structured diff: nodes added, removed, changed; edges added, removed; schema changes per node; label vocabulary changes. **Informational. Never a failure signal** |
 | `blueprint_infer` | *(phase 1.5)* | Not in phase 1 |
@@ -344,7 +346,7 @@ All tools return the envelope from section 1. Inputs listed as `name: type` with
 | `dataset_fill_part` | `skeleton_id: str`, `section: str`, `content: object` | `{ok, filled: str[], remaining: str[]}` or section-scoped errors |
 | `dataset_submit` | `skeleton_id: str` | The stored dataset, or full validation errors |
 | `dataset_validate` | `dataset: object` | `{ok, errors}`. Does not store |
-| `dataset_find` | `agent_id?: str`, `labels?: object`, `author?: str`, `q?: str`, `blueprint_version?: str`, `limit?: int`, `offset?: int` | Array of dataset summaries. Excludes archived. **Deterministic ordering** by `(created_at, id)`. `author` filters on `provenance.author.handle`; `q` is a substring match over `title` and `intent` |
+| `dataset_find` | `agent_id?: str`, `labels?: object`, `author?: str`, `q?: str`, `blueprint_version?: str`, `limit?: int`, `offset?: int` | Array of dataset summaries, **one row per dataset lineage at its latest version** (ruling R-38). Excludes archived. **Deterministic ordering** by `(created_at, id)`. `author` filters on `provenance.author.handle`; `q` is a case-folded substring match over `title` and `intent`, and substring semantics are the contract on every backend (ruling R-36) |
 | `dataset_get` | `dataset_id: str`, `version?: int` | Full dataset. Latest version when omitted. Returns archived datasets by explicit id |
 | `dataset_archive` | `dataset_id: str` | Updated summary |
 | `dataset_restore` | `dataset_id: str` | Updated summary |
@@ -360,9 +362,9 @@ All tools return the envelope from section 1. Inputs listed as `name: type` with
 | `fetch_step` | `run_id: str`, `node_id?: str`, `tool_name?: str`, `iteration?: int` | `{fixture, resolved_node_id, warnings}`. Idempotent on `(run_id, resolved_node_id, iteration)` |
 | `record_step` | `run_id: str`, `node_id?: str`, `tool_name?: str`, `iteration?: int`, `actual: object` | `{ok}` *(phase 2)* |
 | `run_finish` | `run_id: str`, `outcome: object`, `status: str` | The stored run *(phase 2)* |
-| `run_get` | `run_id: str` | Full run |
+| `run_get` | `run_id: str` | Full run. `steps` and the reconstructed `path` are **deterministically ordered** by `(seq, node_id, iteration)` (ruling R-37) |
 | `run_evidence` | `run_id: str` | Evidence bundle *(phase 2, M10)* |
-| `run_find` | `agent_id?`, `dataset_id?`, `run_class?`, `model?`, `limit?`, `offset?` | Run summaries |
+| `run_find` | `agent_id?`, `dataset_id?`, `run_class?`, `model?`, `limit?`, `offset?` | Run summaries. **Deterministic ordering** by `(started_at DESC, id)`, newest first (ruling R-35) |
 | `run_export` | `run_id: str`, `target: str` | `{ok, external_ref}` *(M10)* |
 
 Phase 1 ships `run_start` and `fetch_step` as reads. `record_step`, `run_finish`, `run_evidence` and `run_export` are phase 2, modelled now so the storage shape does not change later.
@@ -427,6 +429,8 @@ class Store(Protocol):
     def get_run(self, run_id: str) -> Run | None: ...
     def find_runs(self, q: RunQuery) -> list[RunSummary]: ...
     def upsert_step(self, run_id: str, step: StepRecord) -> StepRecord: ...  # idempotent
+    def set_step_actual(self, run_id: str, node_id: str,
+                        iteration: int, actual: Mapping) -> StepRecord: ...  # write-once
 
     def health(self) -> StoreHealth: ...
 ```
@@ -434,6 +438,8 @@ class Store(Protocol):
 **There is no `delete_*` method on the Protocol.** That is deliberate and enforced by a test that asserts the Protocol has no method whose name starts with `delete`.
 
 `upsert_step` is idempotent on `(run_id, node_id, iteration)`. Calling it twice with the same key is a no-op that returns the existing record.
+
+`set_step_actual` is the other half, added by ruling R-33: `upsert_step` records **what was served** and its repeat must stay a literal no-op, so it can never also merge in an `actual`. `set_step_actual` records **what the agent did**, write-once per key, and fails if no step record exists — an actual cannot be reported for a step that was never served. Re-recording an identical actual is a no-op success; a differing one is refused. It writes to a run, never to a dataset, so ground rule 1 is untouched.
 
 ## 7. SQL DDL
 
@@ -465,13 +471,20 @@ CREATE TABLE datasets (
   author_agent  TEXT        NOT NULL,
   supersedes    UUID        NULL,
   document      JSONB       NOT NULL,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- no DEFAULT now(): populated from provenance.created_at on insert, so
+  -- dataset_find's ordering by (created_at, id) survives an export/import
+  -- cycle. A defaulted column would be re-stamped on re-import (ruling R-09)
+  created_at    TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (id, version),
   FOREIGN KEY (agent_id, bp_version) REFERENCES blueprints (agent_id, version)
 );
 CREATE INDEX datasets_labels_gin ON datasets USING gin (labels);
 CREATE INDEX datasets_lookup ON datasets (agent_id, bp_version, archived);
 CREATE INDEX datasets_author ON datasets (author_handle);
+-- superseded by ruling R-36: `q` is substring matching by contract, which a
+-- to_tsvector index cannot serve. At M7 this becomes a pg_trgm GIN index, or is
+-- dropped where the extension is unavailable - the conformance suite asserts
+-- identical results, never identical query plans
 CREATE INDEX datasets_search ON datasets USING gin (to_tsvector('english', title || ' ' || intent));
 
 CREATE TABLE skeletons (
@@ -490,6 +503,10 @@ CREATE TABLE runs (
   dataset_id    UUID        NOT NULL,
   dataset_ver   INTEGER     NOT NULL,
   bp_version    TEXT        NOT NULL,
+  -- what the agent said it was running, as against bp_version, which is what
+  -- it is being served: the input to the blueprint_version_mismatch warning,
+  -- which ground rule 3 requires be stored on the run (ruling R-32)
+  declared_bp_version TEXT  NULL,
   run_class     TEXT        NOT NULL DEFAULT 'dev',
   model         JSONB       NULL,
   status        TEXT        NOT NULL,
@@ -511,7 +528,8 @@ CREATE TABLE run_steps (
   actual        JSONB       NULL,
   fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   recorded_at   TIMESTAMPTZ NULL,
-  PRIMARY KEY (run_id, node_id, iteration)     -- the idempotency key
+  PRIMARY KEY (run_id, node_id, iteration),    -- the idempotency key
+  UNIQUE (run_id, seq)                         -- what makes seq allocation sound (R-37)
 );
 ```
 
@@ -519,7 +537,7 @@ Note what the run tables do **not** contain: any copy of the fixtures. `served` 
 
 ## 8. Mongo collections
 
-Same logical model. `blueprints` keyed by `{agent_id, version}`, `datasets` keyed by `{id, version}` with a compound index on `{agent_id, bp_version, archived}` and a multikey index on `labels`, `skeletons` keyed by `id`, `runs` keyed by `id`, and `run_steps` with a unique compound index on `{run_id, node_id, iteration}`.
+Same logical model. `blueprints` keyed by `{agent_id, version}`, `datasets` keyed by `{id, version}` with a compound index on `{agent_id, bp_version, archived}` and a multikey index on `labels`, `skeletons` keyed by `id`, `runs` keyed by `id`, and `run_steps` with unique compound indexes on `{run_id, node_id, iteration}` (the idempotency key) and on `{run_id, seq}` (ruling R-37, what makes `seq` allocation sound).
 
 Mongo has no foreign keys. The conformance suite tests referential behaviour through the service layer, not the storage layer, so this asymmetry does not change the tests.
 
