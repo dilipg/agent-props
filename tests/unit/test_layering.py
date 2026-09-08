@@ -1,7 +1,7 @@
-"""`models/` and `validation/` are pure: no sibling layers, no I/O, no clock.
+"""`models/` and `validation/` are pure; `storage/` reaches only `models/`.
 
 CLAUDE.md's layering rule says review enforces this. A test is cheaper than a
-review round, and three of the properties here are rulings that later milestones
+review round, and four of the properties here are rulings that later milestones
 depend on staying true:
 
 - **R-04** - models are shapes, the catalogue is policy. A ``pattern`` or a
@@ -14,10 +14,18 @@ depend on staying true:
   and never imports `storage/`. That is what lets DS-001, DS-031 and BP-016
   exist in a package specified as pure functions with no I/O. `validation/` may
   import `models/` and nothing else sideways.
+- **R-09 / R-23 in `storage/`** - an adapter may import `models/` and nothing
+  else sideways, and it reads no clock. Both are load-bearing: `validation/`
+  is where a document is checked (R-23), so an adapter importing it would put
+  the catalogue on the write path twice and on the read path at all; and every
+  timestamp a row holds comes from a column default, the client, the document
+  or ``Seeded`` (R-09), so a ``datetime.now()`` in an adapter is the one thing
+  that would make ``dataset_find``'s ordering irreproducible after an
+  export/import cycle.
 
 Everything is checked against the parsed AST rather than by grepping text, so
-docstrings that discuss ``min_length`` or ``uuid4()`` - and this file does -
-cannot trip it.
+docstrings that discuss ``min_length``, ``uuid4()`` or ``datetime.now()`` - and
+this file does - cannot trip it.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from pathlib import Path
 import pytest
 
 import agentprops.models
+import agentprops.storage
 import agentprops.validation
 
 MODELS_DIR = Path(agentprops.models.__file__).resolve().parent
@@ -35,6 +44,11 @@ MODEL_FILES = sorted(MODELS_DIR.glob("*.py"))
 
 VALIDATION_DIR = Path(agentprops.validation.__file__).resolve().parent
 VALIDATION_FILES = sorted(VALIDATION_DIR.glob("*.py"))
+
+#: Recursive, so the Alembic package is covered too - `migrations/env.py` is
+#: the module most likely to reach for something convenient.
+STORAGE_DIR = Path(agentprops.storage.__file__).resolve().parent
+STORAGE_FILES = sorted(STORAGE_DIR.rglob("*.py"))
 
 #: `models/` may import none of these. `export/` is in the list even though
 #: CLAUDE.md's arrow diagram omits it: it is a sibling layer either way.
@@ -44,6 +58,14 @@ FORBIDDEN_LAYERS = frozenset({"validation", "storage", "service", "server", "exp
 #: the one that matters: ruling R-11 exists precisely so that the three
 #: existence checks do not reach for it.
 FORBIDDEN_LAYERS_FOR_VALIDATION = frozenset({"storage", "service", "server", "expansion", "export"})
+
+#: `storage/` may import `models/`, and nothing else sideways. `validation/` is
+#: the one that matters here, and it is the mirror of the rule above: under
+#: ruling R-23 a document is validated in `service/` *before* storage sees it,
+#: so an adapter has no business importing the catalogue - and BP-016's
+#: canonical comparison in `sql.py` duplicates three lines rather than crossing
+#: this line.
+FORBIDDEN_LAYERS_FOR_STORAGE = frozenset({"validation", "service", "server", "expansion", "export"})
 
 #: Calls that read a clock or a random source, by dotted suffix.
 FORBIDDEN_CALLS = frozenset(
@@ -283,6 +305,42 @@ def test_validation_reads_no_clock_and_no_random_source(path: Path) -> None:
     assert not offences, f"{path.name} calls a clock or a random source: {offences}"
 
 
+def test_the_storage_file_table_is_not_empty() -> None:
+    assert len(STORAGE_FILES) > 3, f"no storage modules found under {STORAGE_DIR}"
+
+
+@pytest.mark.parametrize("path", STORAGE_FILES, ids=lambda p: p.name)
+def test_storage_imports_no_sibling_layer_but_models(path: Path) -> None:
+    """An adapter maps a model to a row. That is the whole of its dependencies."""
+    offences = sibling_import_offences(path, FORBIDDEN_LAYERS_FOR_STORAGE)
+    assert not offences, f"{path.name} imports a sibling layer: {offences}"
+
+
+@pytest.mark.parametrize("path", STORAGE_FILES, ids=lambda p: p.name)
+def test_storage_reads_no_clock_and_no_random_source(path: Path) -> None:
+    """Ruling R-09, on the layer where breaking it would be easiest.
+
+    Every timestamp a row holds arrives from a column default, from the client,
+    from authored content in the document, or from ``Seeded``. Two rows make
+    that concrete: ``datasets.created_at`` is populated from
+    ``provenance.created_at``, and ``run_steps.fetched_at`` falls back to
+    ``DEFAULT now()`` - which is a *SQL* function, evaluated by the database,
+    and therefore not a call this guard looks at.
+
+    An adapter is also where ``uuid4()`` would be most tempting, and ruling
+    R-10 is explicit: importing ``uuid`` for the type and the parser is allowed,
+    calling ``uuid4()`` is not. Ids come from ``Seeded.uuid()`` at M5/M7.
+    """
+    offences: list[str] = []
+    for node in ast.walk(parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        name = dotted(node.func)
+        if name and (name in FORBIDDEN_CALLS or name.rsplit(".", 1)[-1] in FORBIDDEN_CALLS):
+            offences.append(f"line {node.lineno}: {name}()")
+    assert not offences, f"{path.name} calls a clock or a random source: {offences}"
+
+
 def test_no_rule_raises_for_a_validation_failure() -> None:
     """CLAUDE.md's style rule, checked at the source.
 
@@ -368,16 +426,13 @@ def test_models_declare_no_catalogue_constraints(path: Path) -> None:
                 if dotted(target).rsplit(".", 1)[-1] in VALIDATOR_DECORATORS:
                     offences.append(f"line {node.lineno}: @{dotted(target)} on {node.name}")
         # Route 4: match the bare identifier wherever it appears - in an
-        # annotation, in a call, or in the import that brought it in.
-        identifier = (
-            node.id
-            if isinstance(node, ast.Name)
-            else node.attr
-            if isinstance(node, ast.Attribute)
-            else None
-        )
-        if identifier in CONSTRAINED_TYPE_NAMES:
-            offences.append(f"line {node.lineno}: constrained type {identifier}")
+        # annotation, in a call, or in the import that brought it in. Narrowed
+        # to the two node types that carry an identifier before reading
+        # ``lineno``, which the generic ``ast.AST`` does not declare.
+        if isinstance(node, ast.Name | ast.Attribute):
+            identifier = node.id if isinstance(node, ast.Name) else node.attr
+            if identifier in CONSTRAINED_TYPE_NAMES:
+                offences.append(f"line {node.lineno}: constrained type {identifier}")
         if isinstance(node, ast.ImportFrom | ast.Import):
             for alias in node.names:
                 if alias.name in CONSTRAINED_TYPE_NAMES:
