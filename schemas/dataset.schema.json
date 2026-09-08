@@ -1,0 +1,425 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-props.dev/schemas/dataset.schema.json",
+  "$comment": "Generated from agentprops.models.Dataset by `python -m agentprops.schema_export`. Do not edit by hand. Carries shape only, not the validation catalogue.",
+  "$defs": {
+    "Author": {
+      "additionalProperties": false,
+      "description": "Who authored a dataset. Attribution, never authentication.\n\nSelf-declared and recorded verbatim; the service has no auth to verify it\nagainst. Build no ownership, permissions or audit on this field.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "handle": {
+          "title": "Handle",
+          "type": "string"
+        },
+        "agent": {
+          "title": "Agent",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "handle",
+        "agent"
+      ],
+      "title": "Author",
+      "type": "object"
+    },
+    "BlueprintRef": {
+      "additionalProperties": false,
+      "description": "A dataset's pointer at the blueprint version it was authored against.\n\nDS-001 requires it to name an existing *published* blueprint at that exact\nversion.",
+      "properties": {
+        "agent_id": {
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "version"
+      ],
+      "title": "BlueprintRef",
+      "type": "object"
+    },
+    "Entity": {
+      "additionalProperties": false,
+      "description": "A member of the dataset's cast.\n\nAn entity with no ``revisions`` block is treated as constant for the whole\nrun, and DS-008 then requires it to be byte-identical everywhere it\nappears. An author who needs mutation has to say so, once.",
+      "properties": {
+        "base": {
+          "additionalProperties": true,
+          "title": "Base",
+          "type": "object"
+        },
+        "revisions": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/EntityRevision"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revisions"
+        }
+      },
+      "required": [
+        "base"
+      ],
+      "title": "Entity",
+      "type": "object"
+    },
+    "EntityRevision": {
+      "additionalProperties": false,
+      "description": "One declared state an entity passes through, and what introduced it.\n\nThe dataset encodes a timeline baked at authoring time: the runtime does\nnot compute the post-transition state, it serves it. DS-011 checks that\n``after_node`` exists; DS-010, as read by ruling R-02, checks that a node\nreferencing this revision is genuinely downstream of ``after_node`` on at\nleast one path.",
+      "properties": {
+        "after_node": {
+          "title": "After Node",
+          "type": "string"
+        },
+        "state": {
+          "additionalProperties": true,
+          "title": "State",
+          "type": "object"
+        }
+      },
+      "required": [
+        "after_node",
+        "state"
+      ],
+      "title": "EntityRevision",
+      "type": "object"
+    },
+    "ExpectedOutcome": {
+      "additionalProperties": false,
+      "description": "What the agent should produce, and why that is the right answer.\n\n``comparison`` declares intent; it does not trigger anything. The service\nnever executes a comparison - it stores the expectation and, on request,\nemits an evidence bundle. The three phase-1 modes ship as pure functions in\nthe Python client.",
+      "properties": {
+        "final": {
+          "additionalProperties": true,
+          "title": "Final",
+          "type": "object"
+        },
+        "expected_path": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Path"
+        },
+        "node_expectations": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/NodeExpectation"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Node Expectations"
+        },
+        "comparison": {
+          "title": "Comparison",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "final",
+        "comparison",
+        "rationale"
+      ],
+      "title": "ExpectedOutcome",
+      "type": "object"
+    },
+    "FaultSpec": {
+      "additionalProperties": true,
+      "description": "A fixture that represents a failure rather than a success.\n\nShape supplied by ruling R-07, since no document defined it and neither\ngolden fixture sets ``fault``. When ``fault`` is set, DS-004 skips\n``output_schema`` validation entirely and requires ``output`` to be absent\nor an object.\n\n``extra=\"allow\"`` overrides the package default: DS-022 owns conformance to\nthis shape, so an unexpected key must reach the validator as a rule id\nrather than raise at parse time, and ``allow`` (not the Pydantic default\n``ignore``) is what keeps such a key intact for DS-022 to find - and keeps\nthe round trip lossless.",
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        },
+        "after_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After Ms"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "FaultSpec",
+      "type": "object"
+    },
+    "Labels": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "NodeExpectation": {
+      "additionalProperties": false,
+      "description": "A per-node assertion on agent behaviour, not on the world.\n\nDeclared inline in contracts 2.2 and PRD 5.2 rather than named as a model;\ngiven a name here because :attr:`ExpectedOutcome.node_expectations` needs a\nvalue type. DS-016 checks that every key names an existing node.",
+      "properties": {
+        "called": {
+          "title": "Called",
+          "type": "boolean"
+        },
+        "args_match": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Args Match"
+        }
+      },
+      "required": [
+        "called"
+      ],
+      "title": "NodeExpectation",
+      "type": "object"
+    },
+    "NodeFixture": {
+      "additionalProperties": false,
+      "description": "What one node hands back when the agent reaches it.\n\nEvery node in the graph is filled, including nodes on branches not taken -\nthat is what makes a full-graph blueprint playable. ``pool: true`` nodes\nare the exception: their fixtures live in :attr:`Dataset.pools` instead\n(ruling R-01).",
+      "properties": {
+        "input": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input"
+        },
+        "output": {
+          "additionalProperties": true,
+          "title": "Output",
+          "type": "object"
+        },
+        "entity_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Entity Refs",
+          "type": "array"
+        },
+        "latency_hint_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latency Hint Ms"
+        },
+        "fault": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FaultSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "output",
+        "entity_refs"
+      ],
+      "title": "NodeFixture",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "description": "Why a dataset exists in the suite, and who to ask about it.\n\n``intent`` and :attr:`ExpectedOutcome.rationale` are different fields.\n``intent`` says why the dataset exists in the suite; ``rationale`` says why\nthat particular expected outcome is correct given this world. DS-032 warns\nwhen they are byte-identical, DS-027 when ``intent`` matches ``narrative``.",
+      "properties": {
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "intent": {
+          "title": "Intent",
+          "type": "string"
+        },
+        "author": {
+          "$ref": "#/$defs/Author"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "supersedes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supersedes"
+        }
+      },
+      "required": [
+        "title",
+        "intent",
+        "author",
+        "created_at"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One coherent fill of one blueprint version.\n\nImmutable and versioned: edits are copy-on-write, bumping ``version``, so a\nrun that pinned version 1 keeps reading version 1 for its whole life.\nArchive is soft - hidden from ``dataset_find``, still servable to a run\nholding a pin.",
+  "properties": {
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "version": {
+      "title": "Version",
+      "type": "integer"
+    },
+    "archived": {
+      "title": "Archived",
+      "type": "boolean"
+    },
+    "blueprint": {
+      "$ref": "#/$defs/BlueprintRef"
+    },
+    "seed": {
+      "title": "Seed",
+      "type": "integer"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "narrative": {
+      "title": "Narrative",
+      "type": "string"
+    },
+    "labels": {
+      "$ref": "#/$defs/Labels"
+    },
+    "entities": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Entity"
+      },
+      "title": "Entities",
+      "type": "object"
+    },
+    "nodes": {
+      "additionalProperties": {
+        "$ref": "#/$defs/NodeFixture"
+      },
+      "title": "Nodes",
+      "type": "object"
+    },
+    "pools": {
+      "additionalProperties": {
+        "items": {
+          "$ref": "#/$defs/NodeFixture"
+        },
+        "type": "array"
+      },
+      "title": "Pools",
+      "type": "object"
+    },
+    "expected": {
+      "$ref": "#/$defs/ExpectedOutcome"
+    },
+    "validated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Validated At"
+    }
+  },
+  "required": [
+    "id",
+    "version",
+    "archived",
+    "blueprint",
+    "seed",
+    "provenance",
+    "narrative",
+    "labels",
+    "entities",
+    "nodes",
+    "pools",
+    "expected"
+  ],
+  "title": "Dataset",
+  "type": "object"
+}

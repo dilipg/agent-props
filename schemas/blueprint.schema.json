@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-props.dev/schemas/blueprint.schema.json",
+  "$comment": "Generated from agentprops.models.Blueprint by `python -m agentprops.schema_export`. Do not edit by hand. Carries shape only, not the validation catalogue.",
+  "$defs": {
+    "Edge": {
+      "additionalProperties": false,
+      "description": "A directed transition, optionally conditional.\n\nThe condition language is JSONLogic evaluated against the source node's\n``output_schema``. The service never evaluates a condition - runtime path\nselection is observed from call order. BP-010 only checks that every\n``var`` path exists as a property of that schema.",
+      "properties": {
+        "from": {
+          "title": "From",
+          "type": "string"
+        },
+        "to": {
+          "title": "To",
+          "type": "string"
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Condition"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "title": "Edge",
+      "type": "object"
+    },
+    "EntitySchema": {
+      "additionalProperties": false,
+      "description": "A shared noun, declared once and referenced by node schemas.\n\nEntities are the coherence mechanism: node schemas reference an entity as\n``{\"$ref\": \"entity:store\"}`` rather than re-describing the noun, which is\nwhat stops step 3 talking about a different store than step 1. BP-009\nresolves those refs, BP-015 checks id uniqueness.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "schema": {
+          "additionalProperties": true,
+          "title": "Schema",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "schema"
+      ],
+      "title": "EntitySchema",
+      "type": "object"
+    },
+    "LabelSchema": {
+      "additionalProperties": false,
+      "description": "A blueprint's label vocabulary: dimension name to permitted values.\n\nBP-013 checks that every dimension has at least one value and that values\nwithin a dimension are unique.",
+      "properties": {
+        "dimensions": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Dimensions",
+          "type": "object"
+        }
+      },
+      "required": [
+        "dimensions"
+      ],
+      "title": "LabelSchema",
+      "type": "object"
+    },
+    "Node": {
+      "additionalProperties": false,
+      "description": "One step in the graph.\n\n``tool_name``, ``max_iterations`` and ``notes`` are optional. ``notes``\nbeing optional is load-bearing: BP-019 is a *warning* fired when a node is\nmissing ``notes`` (ruling R-13 reads its catalogue wording as the satisfied\ncondition), so the model must accept a node without them.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Name"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "input_schema": {
+          "additionalProperties": true,
+          "title": "Input Schema",
+          "type": "object"
+        },
+        "output_schema": {
+          "additionalProperties": true,
+          "title": "Output Schema",
+          "type": "object"
+        },
+        "pool": {
+          "title": "Pool",
+          "type": "boolean"
+        },
+        "max_iterations": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Iterations"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input_schema",
+        "output_schema",
+        "pool"
+      ],
+      "title": "Node",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A versioned declaration of an agent's step graph.\n\n``published`` versions are immutable (BP-016). There is no ``created_at``\nhere: the ``blueprints`` table stamps one as a column default, and the\ndocument itself carries no clock reading (ruling R-09).",
+  "properties": {
+    "agent_id": {
+      "title": "Agent Id",
+      "type": "string"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "entry_node": {
+      "title": "Entry Node",
+      "type": "string"
+    },
+    "entities": {
+      "items": {
+        "$ref": "#/$defs/EntitySchema"
+      },
+      "title": "Entities",
+      "type": "array"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/Node"
+      },
+      "title": "Nodes",
+      "type": "array"
+    },
+    "edges": {
+      "items": {
+        "$ref": "#/$defs/Edge"
+      },
+      "title": "Edges",
+      "type": "array"
+    },
+    "label_schema": {
+      "$ref": "#/$defs/LabelSchema"
+    },
+    "outcome_schema": {
+      "additionalProperties": true,
+      "title": "Outcome Schema",
+      "type": "object"
+    }
+  },
+  "required": [
+    "agent_id",
+    "version",
+    "description",
+    "status",
+    "entry_node",
+    "entities",
+    "nodes",
+    "edges",
+    "label_schema",
+    "outcome_schema"
+  ],
+  "title": "Blueprint",
+  "type": "object"
+}
