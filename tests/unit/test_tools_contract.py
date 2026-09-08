@@ -51,9 +51,13 @@ def seeded(
 ) -> ServiceContext:
     """The published blueprint and both golden datasets, in the client's store.
 
-    Datasets are written through ``Store.put_dataset`` because M4 has no dataset
-    write tool - ``dataset_submit`` is M5's, and building it early to test a read
-    would be building M5 early.
+    Datasets are written through ``Store.put_dataset`` rather than through
+    ``dataset_submit``, which now exists. Two reasons to leave it that way: the
+    golden fixtures carry their own ``id`` and ``validated_at`` and the
+    authoring flow mints both (rulings R-10 and R-09), so a submitted dataset is
+    *not* byte-identical to the fixture these read tests assert against; and a
+    read test that depends on the write pipeline fails twice for one cause.
+    `test_worked_example_fill.py` is where the write path is exercised.
     """
     blueprints.upsert(context, blueprint_document, publish=True)
     context.store.put_dataset(Dataset.model_validate(dataset_document))
@@ -564,10 +568,175 @@ async def test_every_success_envelope_puts_its_payload_under_one_named_key(
         ("dataset_get", {"dataset_id": dataset_document["id"]}, "dataset"),
         ("store_status", {}, "status"),
         ("agent_list", {}, "agents"),
+        (
+            "dataset_skeleton",
+            {
+                "agent_id": "location-onboarding",
+                "version": "1.0.0",
+                "labels": dataset_document["labels"],
+                "seed": dataset_document["seed"],
+            },
+            "skeleton",
+        ),
     ]
     for name, arguments, key in expected:
         envelope = await invoke(seeded, name, **arguments)
         assert list(envelope["data"]) == [key], name
+
+
+# --------------------------------------------------------------------------- #
+# The three skeleton tools (M5). The pipeline itself is
+# `test_worked_example_fill.py` and `test_service_skeletons.py`; here it is the
+# envelope over a real MCP round trip, and the argument handling `server/args.py`
+# gained for them.
+# --------------------------------------------------------------------------- #
+
+
+async def test_dataset_skeleton_returns_the_four_documented_keys(
+    seeded: ServiceContext, dataset_document: dict[str, Any]
+) -> None:
+    """contracts section 4: ``{skeleton_id, manifest, skeleton, instructions}``."""
+    envelope = await invoke(
+        seeded,
+        "dataset_skeleton",
+        agent_id="location-onboarding",
+        version="1.0.0",
+        labels=dataset_document["labels"],
+        seed=dataset_document["seed"],
+    )
+    assert list(envelope["data"]) == ["skeleton"], "one named key (ruling R-43b)"
+    payload = envelope["data"]["skeleton"]
+    assert set(payload) == {"skeleton_id", "manifest", "skeleton", "instructions"}
+    assert [section["id"] for section in payload["manifest"]] == [
+        "provenance",
+        "entities",
+        "nodes.core",
+        "nodes.branches",
+        "expected",
+    ]
+    assert set(payload["manifest"][0]) == {"id", "required", "pointers", "description"}
+
+
+async def test_dataset_skeleton_output_is_byte_identical_across_repeated_calls(
+    seeded: ServiceContext, dataset_document: dict[str, Any]
+) -> None:
+    """The determinism criterion M4 established, on M5's read-shaped tool.
+
+    Nothing in the response is a clock reading or a counter, and the id is
+    derived from the request, so two identical calls serialise identically -
+    which is also what makes the resume behaviour observable rather than
+    surprising.
+    """
+    arguments = {
+        "agent_id": "location-onboarding",
+        "version": "1.0.0",
+        "labels": dataset_document["labels"],
+        "seed": dataset_document["seed"],
+    }
+    first = await invoke(seeded, "dataset_skeleton", **arguments)
+    second = await invoke(seeded, "dataset_skeleton", **arguments)
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+async def test_dataset_skeleton_reports_ap_001_for_a_malformed_argument(
+    seeded: ServiceContext,
+) -> None:
+    """The permissive-annotation trade, on the two argument types M5 added.
+
+    ``seed`` is a required integer and ``labels`` a required object of strings,
+    so both have readers of their own in `server/args.py`. A wrong type on
+    either is an envelope rather than an MCP protocol error, and the pointer
+    names the label dimension rather than the whole argument.
+    """
+    envelope = await invoke(
+        seeded,
+        "dataset_skeleton",
+        agent_id="location-onboarding",
+        version="1.0.0",
+        labels={"tier": 7},
+        seed="20260908",
+    )
+    assert rules(envelope) == ["AP-001", "AP-001"]
+    assert [finding["pointer"] for finding in envelope["errors"]] == ["/labels/tier", "/seed"]
+
+
+async def test_dataset_skeleton_does_not_take_true_for_an_integer_seed(
+    seeded: ServiceContext, dataset_document: dict[str, Any]
+) -> None:
+    """``isinstance(True, int)`` is true in Python, and a seed of ``1`` is not a bug report.
+
+    The same trap already cost a rule - ``validation.context.as_int`` excludes
+    ``bool`` so DS-020 does not accept ``"seed": true`` - and the new required
+    integer reader has to agree with it or the two layers disagree about what a
+    seed is.
+    """
+    envelope = await invoke(
+        seeded,
+        "dataset_skeleton",
+        agent_id="location-onboarding",
+        version="1.0.0",
+        labels=dataset_document["labels"],
+        seed=True,
+    )
+    assert rules(envelope) == ["AP-001"]
+    assert envelope["errors"][0]["pointer"] == "/seed"
+
+
+async def test_dataset_fill_part_returns_filled_and_remaining(
+    seeded: ServiceContext, dataset_document: dict[str, Any]
+) -> None:
+    """contracts section 4: ``{ok, filled: str[], remaining: str[]}``."""
+    async with connected(seeded) as client:
+        started = await invoke(
+            client,
+            "dataset_skeleton",
+            agent_id="location-onboarding",
+            version="1.0.0",
+            labels=dataset_document["labels"],
+            seed=dataset_document["seed"],
+        )
+        skeleton_id = started["data"]["skeleton"]["skeleton_id"]
+        envelope = await invoke(
+            client,
+            "dataset_fill_part",
+            skeleton_id=skeleton_id,
+            section="provenance",
+            content={
+                "provenance": dataset_document["provenance"],
+                "narrative": dataset_document["narrative"],
+            },
+        )
+    assert list(envelope["data"]) == ["fill"]
+    assert envelope["data"]["fill"] == {
+        "filled": ["provenance"],
+        "remaining": ["entities", "nodes.core", "nodes.branches", "expected"],
+    }
+
+
+async def test_dataset_fill_part_reports_ap_001_for_a_non_object_content(
+    seeded: ServiceContext,
+) -> None:
+    envelope = await invoke(
+        seeded, "dataset_fill_part", skeleton_id="x", section="provenance", content=[]
+    )
+    assert rules(envelope) == ["AP-001"]
+    assert envelope["errors"][0]["pointer"] == "/content"
+
+
+async def test_dataset_submit_reports_sk_005_for_an_unknown_skeleton(
+    seeded: ServiceContext,
+) -> None:
+    """The rule id, over a real round trip, with its section null.
+
+    A ``skeleton_id`` is a request argument rather than a place in a document,
+    so there is no section to repair - which is contracts section 1's "null for
+    non-skeleton contexts" applied to the one error that is *about* the
+    skeleton.
+    """
+    envelope = await invoke(seeded, "dataset_submit", skeleton_id="no-such-skeleton")
+    assert rules(envelope) == ["SK-005"]
+    assert envelope["errors"][0]["section"] is None
+    assert envelope["errors"][0]["pointer"] == "/skeleton_id"
 
 
 async def test_an_unknown_tool_is_an_error_from_the_sdk_not_from_a_tool(

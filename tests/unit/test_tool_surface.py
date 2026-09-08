@@ -57,8 +57,10 @@ from toolclient import attempt
 CATALOGUE_PATH: Final[Path] = Path(__file__).parents[2] / "docs" / "contracts.md"
 TESTS_DIR: Final[Path] = Path(__file__).parents[1]
 
-#: Tools `docs/contracts.md` documents that M4 deliberately does not register,
-#: each with the milestone that owns it. **Delete an entry when you land it** -
+#: Tools `docs/contracts.md` documents that this milestone deliberately does
+#: not register, each with the milestone that owns it. M5 landed the three
+#: skeleton tools by deleting their entries, which is the mechanism working.
+#: **Delete an entry when you land it** -
 #: :func:`test_no_deferral_is_stale` fails if a deferred tool is registered
 #: anyway, and :func:`test_every_documented_tool_is_registered_or_deferred`
 #: fails if a documented tool is neither registered nor listed here.
@@ -67,9 +69,6 @@ TESTS_DIR: Final[Path] = Path(__file__).parents[1]
 #: tags it *(phase 1.5)* and says "Not in phase 1".
 DEFERRED: Final[dict[str, str]] = {
     "blueprint_infer": "phase 1.5; contracts section 4 says 'Not in phase 1'",
-    "dataset_skeleton": "M5, the skeleton pipeline",
-    "dataset_fill_part": "M5, the skeleton pipeline",
-    "dataset_submit": "M5, the skeleton pipeline",
     "run_start": "M6, the runtime",
     "fetch_step": "M6, the runtime",
     "run_get": "M6, with the run storage it reads (ruling R-15)",
@@ -119,7 +118,7 @@ def test_the_server_registered_its_tools() -> None:
     Every test below would pass vacuously against an empty surface, and would
     blame the wrong thing while doing it.
     """
-    assert len(TOOL_NAMES) == 13, f"expected M4's thirteen tools, got {TOOL_NAMES}"
+    assert len(TOOL_NAMES) == 16, f"expected M4's thirteen tools plus M5's three, got {TOOL_NAMES}"
 
 
 def test_every_registered_tool_is_documented() -> None:
@@ -300,9 +299,19 @@ def test_the_scanner_does_not_credit_a_name_nobody_calls() -> None:
     Without this, a scanner that collected every string in the test tree would
     pass the coverage test forever - including for a tool named in a comment, a
     docstring or a ``DEFERRED`` entry.
+
+    The control was ``dataset_skeleton`` at M4 and had to move when M5 landed
+    it, which is the flaw in choosing a deferred tool that will one day exist.
+    ``blueprint_infer`` is *(phase 1.5)* and "Not in phase 1", so it stays a
+    valid control for the whole of this build - and the first assertion is what
+    keeps the control honest, since a name that no longer appears as a literal
+    anywhere would make this test pass vacuously.
     """
-    exercised = tool_names_in_test_sources()
-    assert "dataset_skeleton" not in exercised, (
-        "dataset_skeleton is named in DEFERRED and in prose but called by nothing; "
+    control = "blueprint_infer"
+    assert control in DEFERRED
+    sources = "".join(path.read_text(encoding="utf-8") for path in TESTS_DIR.rglob("test_*.py"))
+    assert f'"{control}"' in sources, "the control name is not a string literal under tests/"
+    assert control not in tool_names_in_test_sources(), (
+        f"{control} is named in DEFERRED and in prose but called by nothing; "
         "the scanner is matching more than tool calls"
     )

@@ -147,7 +147,7 @@ async def test_the_streamable_http_transport_serves_the_whole_tool_surface(
         await connect_when_ready(url)
         async with Client(url) as client:
             listed = await client.list_tools()
-            assert len(listed.tools) == 13
+            assert len(listed.tools) == 16
 
             missing = await client.call_tool("blueprint_get", {"agent_id": "nobody"})
             assert missing.structured_content is not None
