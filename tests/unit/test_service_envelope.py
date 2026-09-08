@@ -77,12 +77,25 @@ def test_field_pointer_escapes_a_token_that_contains_a_slash() -> None:
 
 
 def test_not_found_points_at_the_argument_that_named_the_missing_thing() -> None:
-    envelope = not_found("dataset", dataset_id="abc", version=3)
+    envelope = not_found("dataset", field="dataset_id", dataset_id="abc", version=3)
     assert envelope.ok is False
     finding = envelope.errors[0]
     assert finding.rule == AP_NOT_FOUND
     assert finding.pointer == "/dataset_id"
     assert finding.context == {"dataset_id": "abc", "version": 3}
+
+
+def test_not_found_takes_the_pointer_field_by_name_not_by_kwarg_order() -> None:
+    """The pointer must not depend on which context kwarg happens to be first.
+
+    It did once - ``next(iter(context), "id")`` - which was right for both
+    callers and would have pointed at ``/version`` the first time anyone wrote
+    the kwargs the other way round. This asserts the property directly, so the
+    old implementation fails it.
+    """
+    reordered = not_found("dataset", field="dataset_id", version=3, dataset_id="abc")
+    assert reordered.errors[0].pointer == "/dataset_id"
+    assert reordered.errors[0].context == {"version": 3, "dataset_id": "abc"}
 
 
 def test_warnings_from_keeps_only_the_warning_severity_findings() -> None:

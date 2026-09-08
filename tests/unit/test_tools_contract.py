@@ -87,6 +87,11 @@ def revised(document: dict[str, Any]) -> dict[str, Any]:
     newer["nodes"][1]["output_schema"] = {"type": "object"}
     newer["label_schema"]["dimensions"]["region"] = ["south", "north"]
     newer["edges"].append({"from": "fetch_store_profile", "to": "recheck_store", "condition": None})
+    newer["description"] = "reworded for 1.1.0"
+    newer["entities"][0]["schema"] = {
+        **newer["entities"][0]["schema"],
+        "description": "an added annotation",
+    }
     return newer
 
 
@@ -242,7 +247,16 @@ async def test_blueprint_diff_returns_a_structured_diff(
         to_version="1.1.0",
     )
     diff = envelope["data"]["diff"]
-    assert set(diff) == {"agent_id", "from", "to", "nodes", "edges", "schemas", "labels"}
+    assert set(diff) == {
+        "agent_id",
+        "from",
+        "to",
+        "nodes",
+        "edges",
+        "schemas",
+        "labels",
+        "blueprint",
+    }
     assert diff["from"]["present"] is True and diff["to"]["present"] is True
     assert diff["nodes"]["changed"] == [
         {
@@ -257,6 +271,8 @@ async def test_blueprint_diff_returns_a_structured_diff(
         {"from": "fetch_store_profile", "to": "recheck_store", "condition": None}
     ]
     assert diff["edges"]["removed"] == []
+    assert [entry["field"] for entry in diff["blueprint"]["changes"]] == ["description"]
+    assert [entry["entity_id"] for entry in diff["blueprint"]["entities"]["changed"]] == ["store"]
 
 
 async def test_blueprint_diff_is_never_a_failure_signal(seeded: ServiceContext) -> None:
@@ -345,6 +361,39 @@ async def test_dataset_find_reports_a_boundary_code_for_a_bad_label_value(
     envelope = await invoke(seeded, "dataset_find", labels={"tier": 7})
     assert rules(envelope) == ["AP-001"]
     assert envelope["errors"][0]["pointer"] == "/labels/tier"
+
+
+async def test_an_out_of_range_integer_is_an_envelope_and_not_an_exception(
+    seeded: ServiceContext, dataset_document: dict[str, Any]
+) -> None:
+    """The fix-round-1 blocker, over the wire, on both sides of the boundary.
+
+    An integer above ``2**63 - 1`` used to reach pysqlite, raise
+    ``OverflowError``, and come back as ``UnexpectedToolError`` with
+    ``structured_content: None`` - the exact shape CLAUDE.md's "structured
+    errors, never exceptions" exists to prevent, inside a tool function's own
+    call graph.
+
+    ``invoke`` asserts ``is_error is False`` on every call, so each line here is
+    the regression guard: with the clamp removed, all four fail.
+    """
+    boundary = 2**63
+    assert (await invoke(seeded, "dataset_find", limit=boundary - 1))["ok"] is True
+    assert (await invoke(seeded, "dataset_find", limit=boundary))["ok"] is True
+    assert (await invoke(seeded, "dataset_find", offset=10**30))["ok"] is True
+
+    over = await invoke(seeded, "dataset_get", dataset_id=dataset_document["id"], version=boundary)
+    assert rules(over) == ["AP-004"]
+    at = await invoke(
+        seeded, "dataset_get", dataset_id=dataset_document["id"], version=boundary - 1
+    )
+    assert rules(at) == ["AP-004"], "a representable version that no row has is the same miss"
+
+
+async def test_an_out_of_range_limit_still_returns_every_row(seeded: ServiceContext) -> None:
+    """The clamp is representability, not a cap: nothing is refused or hidden."""
+    envelope = await invoke(seeded, "dataset_find", limit=10**40)
+    assert len(envelope["data"]["datasets"]) == 2
 
 
 async def test_dataset_find_rejects_a_boolean_limit_rather_than_reading_it_as_one(

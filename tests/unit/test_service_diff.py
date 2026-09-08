@@ -18,7 +18,14 @@ import copy
 import json
 from typing import Any
 
-from agentprops.service.diff import NODE_SCALAR_FIELDS, SCHEMA_FIELDS, diff_blueprints
+from agentprops.models import Blueprint
+from agentprops.service.diff import (
+    BLUEPRINT_FIELDS,
+    ENTITY_FIELDS,
+    NODE_SCALAR_FIELDS,
+    SCHEMA_FIELDS,
+    diff_blueprints,
+)
 from conftest import BLUEPRINT_FIXTURE, load_document
 
 
@@ -40,6 +47,10 @@ def test_a_blueprint_against_itself_reports_nothing_changed() -> None:
         "dimensions_removed": [],
         "values_added": [],
         "values_removed": [],
+    }
+    assert computed["blueprint"] == {
+        "changes": [],
+        "entities": {"added": [], "removed": [], "changed": []},
     }
 
 
@@ -191,3 +202,130 @@ def test_key_reordering_is_not_a_change() -> None:
     computed = diff(golden(), after)
     assert computed["schemas"] == []
     assert computed["nodes"]["changed"] == []
+
+
+# --------------------------------------------------- ruling R-41, the fifth category
+
+
+def test_a_changed_blueprint_level_field_is_reported() -> None:
+    """`entry_node`, `description` and `outcome_schema` - the three the four
+    contract-named categories left unreportable."""
+    after = golden()
+    after["entry_node"] = "fetch_store_profile"
+    after["description"] = "reworded"
+    after["outcome_schema"] = {"type": "object", "properties": {"done": {"type": "boolean"}}}
+    changes = diff(golden(), after)["blueprint"]["changes"]
+    assert [entry["field"] for entry in changes] == list(BLUEPRINT_FIELDS)
+    assert changes[0]["from"] == "receive_request"
+    assert changes[0]["to"] == "fetch_store_profile"
+    assert changes[2]["to"]["properties"] == {"done": {"type": "boolean"}}
+
+
+def test_an_added_and_a_removed_entity_are_reported_by_id_and_sorted() -> None:
+    after = golden()
+    after["entities"] = [entity for entity in after["entities"] if entity["id"] != "store"]
+    after["entities"].append({"id": "zzz_new", "schema": {"type": "object"}})
+    after["entities"].append({"id": "aaa_new", "schema": {"type": "object"}})
+    entities = diff(golden(), after)["blueprint"]["entities"]
+    assert entities["added"] == ["aaa_new", "zzz_new"]
+    assert entities["removed"] == ["store"]
+
+
+def test_a_changed_entity_schema_is_reported() -> None:
+    """The blind spot ruling R-41 exists to close, and the one R-27 made worse."""
+    after = golden()
+    after["entities"][0]["schema"] = {"type": "object", "properties": {"renamed": {}}}
+    changed = diff(golden(), after)["blueprint"]["entities"]["changed"]
+    assert len(changed) == 1
+    assert changed[0]["entity_id"] == golden()["entities"][0]["id"]
+    assert changed[0]["field"] == "schema"
+    assert changed[0]["to"]["properties"] == {"renamed": {}}
+    assert changed[0]["from"] == golden()["entities"][0]["schema"]
+
+
+def test_an_entity_schema_change_does_not_leak_into_the_per_node_schemas_category() -> None:
+    """`schemas` is documented as *per-node*; an entity schema is not a node."""
+    after = golden()
+    after["entities"][0]["schema"] = {"type": "object"}
+    computed = diff(golden(), after)
+    assert computed["schemas"] == []
+    assert computed["nodes"]["changed"] == []
+    assert computed["blueprint"]["entities"]["changed"]
+
+
+def test_a_reordered_entity_schema_key_is_not_a_change() -> None:
+    after = golden()
+    schema = after["entities"][0]["schema"]
+    after["entities"][0]["schema"] = dict(reversed(list(schema.items())))
+    assert diff(golden(), after)["blueprint"]["entities"]["changed"] == []
+
+
+def test_the_fifth_category_survives_a_malformed_entities_list() -> None:
+    computed = diff({"entities": "not a list"}, {"entities": [{"no_id": 1}, "string", 5]})
+    assert computed["blueprint"]["entities"] == {"added": [], "removed": [], "changed": []}
+
+
+def test_a_missing_side_reports_every_entity_as_removed() -> None:
+    computed = diff(golden(), None)
+    entities = computed["blueprint"]["entities"]
+    assert entities["removed"] == sorted(entity["id"] for entity in golden()["entities"])
+    assert entities["added"] == []
+    assert [entry["field"] for entry in computed["blueprint"]["changes"]] == list(BLUEPRINT_FIELDS)
+
+
+def test_every_blueprint_field_is_covered_by_some_category() -> None:
+    """The guard that catches a *new* `Blueprint` field slipping through.
+
+    Ruling R-41 exists because four categories left four fields unreportable and
+    nothing failed. This is what fails next time: every top-level field of the
+    model is either the diff's own subject, a category of its own, or named in
+    `BLUEPRINT_FIELDS`.
+    """
+    #: the diff is *about* these two, so they are its header rather than a change
+    subject = {"agent_id", "version"}
+    #: these have a category each
+    own_category = {"nodes", "edges", "label_schema", "entities"}
+    #: reported per side in `from`/`to`, since a draft-vs-published diff would
+    #: otherwise report it as a change on every comparison
+    per_side = {"status"}
+    covered = subject | own_category | per_side | set(BLUEPRINT_FIELDS)
+    uncovered = set(Blueprint.model_fields) - covered
+    assert not uncovered, (
+        f"these Blueprint fields are reported by no diff category: {sorted(uncovered)}. "
+        "Add them to BLUEPRINT_FIELDS or give them a category (ruling R-41)."
+    )
+
+
+def test_the_entity_field_set_is_the_rest_of_an_entity() -> None:
+    """`id` is the identity, so `ENTITY_FIELDS` must be everything else."""
+    from agentprops.models import EntitySchema
+
+    wire_names = {info.alias or name for name, info in EntitySchema.model_fields.items()}
+    assert wire_names - {"id"} == set(ENTITY_FIELDS)
+
+
+# ------------------------------------------------- the disjoint-node-sets case
+
+
+def test_two_present_versions_with_wholly_disjoint_node_sets() -> None:
+    """Every node added and every node removed, with nothing in common.
+
+    Safe by construction - it is set algebra - but it is the one hard case of the
+    four with no assertion, and `changed`/`schemas` being empty is exactly what
+    an intersection bug would get wrong.
+    """
+    before = golden()
+    after = golden()
+    after["nodes"] = [{**node, "id": f"other_{node['id']}"} for node in after["nodes"]]
+    after["edges"] = [
+        {"from": f"other_{edge['from']}", "to": f"other_{edge['to']}", "condition": None}
+        for edge in after["edges"]
+    ]
+    computed = diff(before, after)
+    assert computed["nodes"]["added"] == sorted(f"other_{n['id']}" for n in before["nodes"])
+    assert computed["nodes"]["removed"] == sorted(n["id"] for n in before["nodes"])
+    assert computed["nodes"]["changed"] == [], "no node is present in both, so none can differ"
+    assert computed["schemas"] == [], "the same, for the per-node schema category"
+    assert len(computed["edges"]["added"]) == len(after["edges"])
+    assert len(computed["edges"]["removed"]) == len(before["edges"])
+    assert computed["labels"]["dimensions_added"] == []

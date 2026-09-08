@@ -26,6 +26,7 @@ from agentprops.models import Dataset, DatasetQuery
 from agentprops.service import ServiceContext, blueprints, datasets
 from agentprops.service.datasets import DEFAULT_FIND_LIMIT, paginate
 from agentprops.service.envelope import AP_ARGUMENT, AP_NOT_FOUND
+from agentprops.service.limits import MAX_STORED_INT
 from agentprops.storage import RecordNotFoundError
 from conftest import DATASET_FIXTURE, load_document, load_text
 from envelopes import codes, data, findings, rules, warnings_of
@@ -118,6 +119,23 @@ def test_paginate_clamps_a_negative_limit_and_offset_rather_than_refusing() -> N
     assert clamped.offset == 0
 
 
+def test_paginate_clamps_at_the_int64_boundary() -> None:
+    """The *other* end of the range, which the first version of this left open.
+
+    A value above ``2**63 - 1`` is outside every backend's integer column, so
+    pysqlite raises ``OverflowError`` and the SDK turns it into a protocol error
+    rather than an envelope. The boundary is exact and both sides of it are
+    asserted here: ``2**63 - 1`` passes through untouched, ``2**63`` clamps.
+    """
+    exact = paginate(DatasetQuery(limit=MAX_STORED_INT, offset=MAX_STORED_INT))
+    assert exact.limit == MAX_STORED_INT
+    assert exact.offset == MAX_STORED_INT
+
+    over = paginate(DatasetQuery(limit=MAX_STORED_INT + 1, offset=10**40))
+    assert over.limit == MAX_STORED_INT
+    assert over.offset == MAX_STORED_INT
+
+
 def test_a_zero_limit_returns_no_rows(seeded: ServiceContext) -> None:
     assert data(datasets.find(seeded, DatasetQuery(limit=0)))["datasets"] == []
 
@@ -173,6 +191,31 @@ def test_get_reports_ap_004_for_an_unknown_id(seeded: ServiceContext) -> None:
 def test_get_reports_ap_004_for_a_malformed_id(seeded: ServiceContext) -> None:
     """A malformed id is a miss, never an exception - the store's read contract."""
     assert rules(datasets.get(seeded, "not-a-uuid", None)) == [AP_NOT_FOUND]
+
+
+def test_get_reports_ap_004_for_a_version_outside_the_storable_range(
+    seeded: ServiceContext, dataset_document: dict[str, Any]
+) -> None:
+    """An out-of-range version is no version, not a large one.
+
+    Both sides of the boundary, because the point of the fix is that the value
+    never reaches the driver: ``2**63 - 1`` is a real query that misses, and
+    ``2**63`` is refused before the store is touched. Both are ``AP-004``.
+    """
+    at_boundary = datasets.get(seeded, dataset_document["id"], MAX_STORED_INT)
+    beyond = datasets.get(seeded, dataset_document["id"], MAX_STORED_INT + 1)
+    huge = datasets.get(seeded, dataset_document["id"], 10**40)
+    for envelope in (at_boundary, beyond, huge):
+        assert rules(envelope) == [AP_NOT_FOUND]
+        assert findings(envelope)[0].pointer == "/dataset_id"
+
+
+def test_find_survives_an_out_of_range_limit_and_returns_rows(
+    seeded: ServiceContext,
+) -> None:
+    """The clamp is not a refusal: an absurd limit still returns every row."""
+    envelope = datasets.find(seeded, DatasetQuery(limit=10**40, offset=0))
+    assert len(data(envelope)["datasets"]) == 2
 
 
 def test_get_reports_ap_004_for_a_version_that_does_not_exist(

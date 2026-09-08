@@ -24,11 +24,19 @@ Four guards:
     at all. It asserts the two properties every tool shares - the SDK does not
     report an error, and the payload is one of the two section 1 envelopes.
 
+    The envelope assertion is deliberately the *real* invariant and not the
+    stricter one that happens to hold here. An earlier version asserted
+    ``{ok, data, warnings}`` whenever ``ok`` was true, which passed only because
+    :func:`sample` synthesises arguments that make both ``*_validate`` tools
+    fail - and those two legitimately return ``{ok, errors}`` with ``ok: true``
+    on a clean document (ruling R-13, and ``ErrorEnvelope``'s own docstring). A
+    reader at M5 would have taken the assertion for the contract and been wrong.
+
 ``test_every_registered_tool_has_a_dedicated_test``
     Reads the AST of `tests/` and collects every tool name passed to a
-    ``call_tool``/``invoke`` call. This is the "at least one exercising test per
-    tool" gate the M4 acceptance criteria ask for, mechanically rather than as a
-    list maintained by hand.
+    ``call_tool``/``invoke``/``attempt`` call. This is the "at least one
+    exercising test per tool" gate the M4 acceptance criteria ask for,
+    mechanically rather than as a list maintained by hand.
 """
 
 from __future__ import annotations
@@ -74,6 +82,14 @@ DEFERRED: Final[dict[str, str]] = {
     "run_evidence": "M10, the evidence bundle (ruling R-15)",
     "run_export": "M10, the evidence bundle (ruling R-15)",
 }
+
+#: The two tools whose documented return is ``{ok, errors}`` rather than
+#: ``{ok, data, warnings}`` - contracts section 4, "`{ok, errors}`. Does not
+#: store". They are the only tools that may report ``ok: true`` on an
+#: ``ErrorEnvelope``, which ruling R-13 requires for a warning-only document.
+#: :func:`test_the_validate_tools_are_registered` keeps the set from going
+#: stale, and `test_tools_contract.py` pins the exact shape for both.
+VALIDATE_TOOLS: Final[frozenset[str]] = frozenset({"blueprint_validate", "dataset_validate"})
 
 #: The function names a test uses to call a tool. The AST guard collects string
 #: literals from the positional arguments of a call to any of these, so a test
@@ -134,6 +150,12 @@ def test_every_deferral_names_a_documented_tool() -> None:
     assert not unknown, f"DEFERRED names tools section 4 does not document: {sorted(unknown)}"
 
 
+def test_the_validate_tools_are_registered() -> None:
+    """:data:`VALIDATE_TOOLS` names real tools, so the exemption cannot go stale."""
+    unknown = VALIDATE_TOOLS - set(TOOL_NAMES)
+    assert not unknown, f"VALIDATE_TOOLS names unregistered tools: {sorted(unknown)}"
+
+
 def sample(schema: dict[str, Any]) -> Any:
     """A value of the type a property advertises.
 
@@ -176,11 +198,28 @@ async def test_every_registered_tool_answers_an_envelope(
     payload = result.structured_content
     assert payload is not None, f"{tool.name} returned no structured content"
     assert isinstance(payload.get("ok"), bool), f"{tool.name} did not return an envelope"
-    if payload["ok"]:
-        assert set(payload) == {"ok", "data", "warnings"}
+
+    shape = set(payload)
+    assert shape in ({"ok", "data", "warnings"}, {"ok", "errors"}), (
+        f"{tool.name} returned neither section 1 envelope: {sorted(shape)}"
+    )
+    if shape == {"ok", "data", "warnings"}:
+        assert payload["ok"] is True, "a success envelope is only produced for a success"
+        assert isinstance(payload["data"], dict)
+        assert len(payload["data"]) == 1, "data carries the payload under one named key"
+    elif payload["ok"]:
+        assert tool.name in VALIDATE_TOOLS, (
+            f"{tool.name} reported ok: true on an {{ok, errors}} envelope; only the validate "
+            f"tools do that, and only for a warning-only document (ruling R-13)"
+        )
+        assert all(item["severity"] == "warning" for item in payload["errors"]), (
+            "ok: true with an error-severity finding contradicts ruling R-13"
+        )
     else:
-        assert set(payload) == {"ok", "errors"}
         assert payload["errors"], "a failure envelope with no errors says nothing"
+        assert any(item["severity"] == "error" for item in payload["errors"]), (
+            "ok: false with only warnings contradicts ruling R-13"
+        )
 
 
 def test_every_registered_tool_declares_a_description() -> None:
