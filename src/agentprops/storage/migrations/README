@@ -1,0 +1,20 @@
+Alembic migrations for agent-props.
+
+The schema itself is declared once, in ../sql.py, and env.py hands that
+MetaData to Alembic as the autogenerate target. Nothing here restates a column.
+
+    uv run alembic upgrade head    # apply
+    uv run alembic check           # compare a live database against sql.py
+    uv run alembic downgrade base  # drop it all again
+
+The URL comes from AGENTPROPS_DB_URL, or from sqlalchemy.url in
+../../../../alembic.ini, or from `-x url=...`.
+
+Two indexes are Postgres-only, per docs/contracts.md section 7:
+datasets_labels_gin and datasets_search. They are created by the initial
+revision inside a dialect branch and excluded from autogenerate comparison by
+env.py's include_object, so neither dialect reports drift.
+
+tests/integration/test_migrations.py applies these to a fresh database and
+asserts the result matches sql.py's MetaData table for table, column for
+column, index for index. A migration nobody runs is not a migration.
