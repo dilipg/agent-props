@@ -1031,6 +1031,44 @@ special-case per tool.
 **Cost if wrong.** Both are documentation of what the code already does, each with a guard
 test. Reversing either is a record edit plus one guard.
 
+### R-44 — the golden fixtures need a drift guard against `worked-example.md`
+
+M4's fix round found that `uv run ruff format tests/ docs` reformatted the fenced Python in
+**both** `contracts.md` and `worked-example.md`, because an explicitly named path overrides
+`extend-exclude`. It was caught in `git diff` before committing and reverted.
+
+That near-miss exposed a real hole. I verified it: **nothing in the suite pins the committed
+fixtures to the document that declares itself their source.** `tests/unit/test_fixtures.py`
+asserts only that the four files exist and parse as JSON. The byte-diff against
+`worked-example.md` was performed once, by M0's reviewer, as a manual review check — it was
+never committed. So the fenced blocks and the fixtures can silently diverge, and the whole
+reason those fixtures are trusted is that they are byte-exact copies of the spec's own
+worked example.
+
+**Ruling.** Add a drift guard that extracts the fenced blocks and byte-compares them with the
+committed fixtures. It covers exactly two files, and the precision matters:
+
+| Fixture | Guarded? |
+|---|---|
+| `blueprints/location-onboarding-1.0.0.json` | **Yes** — byte-exact against section 3 |
+| `datasets/priya-missing-docs.json` | **Yes** — byte-exact against section 4 |
+| `broken/manifest.json` | **No** — deliberately extended past section 6's 28 cases by R-14 |
+| `datasets/arun-escalated.json` | **No** — authored from section 5's prose; there is no JSON to compare |
+
+The guard must state, at the assertion, why the other two are excluded — otherwise the next
+author will either extend it wrongly or delete it as broken.
+
+This is the same reasoning as the catalogue-drift test M2 built: a document that declares
+itself the source of truth for committed artifacts needs a test making that true, or it
+becomes a document that merely used to be the source of truth. Landed at M5, whose gate
+depends on the worked-example dataset being what the spec says it is.
+
+**Also record the tooling rule:** run `ruff format` with **no path argument**, because naming
+a path overrides `extend-exclude` and reaches `docs/`.
+
+**Cost if wrong.** A guard that fails when someone deliberately edits the worked example —
+which is the intended behaviour, and the fix is to update both sides together.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
