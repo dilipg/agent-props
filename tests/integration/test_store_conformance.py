@@ -20,7 +20,9 @@ Postgres has a GIN index. Every assertion here is about returned rows.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -43,6 +45,25 @@ from agentprops.storage import (
 from integration.conftest import FROZEN_NOW, make_run
 
 pytestmark = pytest.mark.integration
+
+
+def _relabelled(source: Dataset, dataset_id: str, **provenance: Any) -> Dataset:
+    """``source`` under a new id, optionally with provenance fields replaced.
+
+    A third dataset without a third golden fixture. The id is a literal and
+    ``created_at`` is authored content (ruling R-09), so a derived dataset stays
+    as deterministic as the fixture it came from.
+
+    ``model_copy`` does not validate, so a caller passes real types - a
+    ``datetime``, not an ISO string - which is why this helper exists rather
+    than the tests each reaching for ``model_copy`` twice.
+    """
+    return source.model_copy(
+        update={
+            "id": UUID(dataset_id),
+            "provenance": source.provenance.model_copy(update=provenance),
+        }
+    )
 
 
 # --------------------------------------------------------------------------
@@ -445,6 +466,39 @@ def test_find_q_is_a_case_insensitive_substring_of_title_or_intent(
     assert store.find_datasets(DatasetQuery(q="no such words")) == []
 
 
+def test_find_q_folds_case_the_same_way_on_every_backend(
+    store: Store, published: Blueprint, dataset: Dataset
+) -> None:
+    """A non-ASCII term, which is where SQL case folding stops agreeing.
+
+    Verified rather than assumed: SQLite's ``lower()`` is ASCII-only - it
+    returns ``'bengalŪru'`` for ``'BENGALŪRU'`` - while Postgres's is
+    locale-aware and Python's is full Unicode. So any implementation that folds
+    the column in SQL returns different rows per backend, which is what
+    "identical results across backends" forbids. The fold lives in Python for
+    exactly this case.
+
+    Every other ``q`` fixture is ASCII, so this was a trap rather than a bug:
+    whoever wrote the first non-ASCII dataset would have found it, at M7, with
+    three backends in play.
+    """
+    accented = _relabelled(dataset, "3f8c1a20-0000-4000-8000-0000000000c1")
+    accented = accented.model_copy(
+        update={
+            "provenance": accented.provenance.model_copy(
+                update={"title": "Bengalūru FSSAI ESCALATION for a Café operator"}
+            )
+        }
+    )
+    store.put_dataset(accented)
+
+    assert [row.id for row in store.find_datasets(DatasetQuery(q="bengalūru"))] == [accented.id]
+    assert [row.id for row in store.find_datasets(DatasetQuery(q="BENGALŪRU"))] == [accented.id]
+    assert [row.id for row in store.find_datasets(DatasetQuery(q="café"))] == [accented.id]
+    assert [row.id for row in store.find_datasets(DatasetQuery(q="CAFÉ"))] == [accented.id]
+    assert store.find_datasets(DatasetQuery(q="bengaluru")) == []
+
+
 def test_find_q_treats_wildcards_literally(
     store: Store, two_datasets: tuple[Dataset, Dataset]
 ) -> None:
@@ -473,8 +527,23 @@ def test_find_combines_filters(store: Store, two_datasets: tuple[Dataset, Datase
 
 
 def test_find_paginates(store: Store, two_datasets: tuple[Dataset, Dataset]) -> None:
-    """``limit`` and ``offset`` are unconstrained here; `service/` owns defaults."""
+    """``limit`` and ``offset`` are unconstrained here; `service/` owns defaults.
+
+    An archived row sorts **first**, before either of the two the page should
+    contain, so this also pins the one thing pagination and archiving can get
+    wrong together: excluding archives in the ``WHERE`` clause returns a full
+    page, and filtering them out after ``LIMIT`` returns a short one. With two
+    unarchived rows and nothing else, both implementations pass.
+    """
     earlier, later = two_datasets
+    hidden = _relabelled(
+        earlier,
+        "3f8c1a20-0000-4000-8000-0000000000e1",
+        created_at=datetime(2026, 9, 8, 9, 0, 0, tzinfo=UTC),
+    )
+    store.put_dataset(hidden)
+    store.set_archived(str(hidden.id), True)
+
     assert [row.id for row in store.find_datasets(DatasetQuery(limit=1))] == [earlier.id]
     assert [row.id for row in store.find_datasets(DatasetQuery(offset=1))] == [later.id]
     assert [row.id for row in store.find_datasets(DatasetQuery(limit=1, offset=1))] == [later.id]
@@ -529,6 +598,51 @@ def test_unarchiving_restores_it_to_find(
     summary = store.set_archived(str(dataset.id), False)
     assert summary.archived is False
     assert [row.id for row in store.find_datasets(DatasetQuery())] == [dataset.id]
+
+
+def test_a_new_version_inherits_the_lineage_archive_state(
+    store: Store, published: Blueprint, dataset: Dataset
+) -> None:
+    """Ruling R-34: ``archived`` belongs to the lineage, not to a version.
+
+    ``set_archived`` takes an id and no version, so an edit written afterwards
+    must not silently un-hide the dataset - and since ``find_datasets`` returns
+    one row per lineage, a half-archived lineage would have no coherent answer.
+    The caller's ``ds.archived`` is honoured only for the first version, where
+    there is no lineage to inherit from.
+
+    Both copies are checked, column and document, because ``set_archived``
+    writes both and a version that agreed with only one of them would be a
+    quieter version of the same bug.
+    """
+    store.put_dataset(dataset)
+    store.set_archived(str(dataset.id), True)
+
+    edited = store.put_dataset(dataset.model_copy(update={"narrative": "Edited while archived."}))
+    assert edited.version == 2
+    assert edited.archived is True
+    assert edited.model_dump(mode="json", exclude_unset=True)["archived"] is True
+    assert store.find_datasets(DatasetQuery()) == []
+
+    store.set_archived(str(dataset.id), False)
+    restored = store.put_dataset(dataset.model_copy(update={"narrative": "Edited while live."}))
+    assert restored.archived is False
+    assert [row.version for row in store.find_datasets(DatasetQuery())] == [3]
+
+
+def test_the_callers_archive_flag_is_honoured_on_a_first_version(
+    store: Store, published: Blueprint, dataset: Dataset
+) -> None:
+    """There is no lineage to inherit from, so ``ds.archived`` stands.
+
+    Which is what makes an archived dataset importable as archived: M7's
+    ``dataset_import`` re-creates a bundle's datasets, and one of them being
+    archived is a fact about the bundle, not a state to be reset.
+    """
+    written = store.put_dataset(dataset.model_copy(update={"archived": True}))
+    assert written.version == 1
+    assert written.archived is True
+    assert store.find_datasets(DatasetQuery()) == []
 
 
 def test_archiving_an_unknown_dataset_raises(store: Store) -> None:
@@ -604,6 +718,31 @@ def test_a_section_may_be_refilled(store: Store, skeleton: Skeleton) -> None:
     )
     assert repaired.parts == {"provenance": {"title": "repaired"}}
     assert store.get_skeleton(str(skeleton.id)) == repaired
+
+
+def test_a_dotted_section_id_is_a_legal_parts_key(store: Store, skeleton: Skeleton) -> None:
+    """Two of ruling R-06's five section ids contain a dot.
+
+    ``nodes.core`` and ``nodes.branches`` are section ids, and ``parts`` is
+    keyed by section id - so a filled skeleton has object keys with dots in
+    them. Legal JSON, legal in a SQL JSON document, and **not** dot-path
+    addressable in Mongo, where ``parts.nodes.core`` reads as two levels of
+    nesting.
+
+    Asserted here so M7's Mongo adapter has to solve it in the adapter - by
+    storing ``parts`` opaquely rather than reaching into it - instead of M5 or
+    M8 discovering it through a section that silently fails to save.
+    """
+    store.put_skeleton(skeleton)
+    parts = {
+        "provenance": {"title": "A multi-unit operator"},
+        "nodes.core": {"receive_request": {"output": {"ok": True}}},
+        "nodes.branches": {"pools": {"request_docs": []}},
+    }
+    filled = store.put_skeleton(skeleton.model_copy(update={"parts": parts}))
+    assert filled.parts == parts
+    assert store.get_skeleton(str(skeleton.id)) == filled
+    assert sorted(filled.parts) == ["nodes.branches", "nodes.core", "provenance"]
 
 
 def test_marking_the_same_dataset_twice_is_a_no_op(
@@ -728,6 +867,94 @@ def test_seq_is_allocated_per_run_and_monotonic(store: Store, pinned: Dataset) -
         second.id, StepRecord(node_id="receive_request", iteration=0, served={})
     )
     assert other.seq == 1
+
+
+def test_the_step_read_order_is_total(store: Store, pinned: Dataset) -> None:
+    """Ruling R-37's second half: ``(seq, node_id, iteration)``, not ``seq`` alone.
+
+    ``UNIQUE (run_id, seq)`` means the two extra keys never decide anything
+    today, which is the point - the order is total whether or not the
+    constraint holds, and ``Run.path`` is what step resolution disambiguates
+    against (contracts section 5 takes ``run.path[-1]`` as the head). A partial
+    order that happens to be stable on SQLite is how M7 would discover a
+    divergence at the worst possible layer.
+    """
+    run = store.put_run(make_run("run-order", pinned))
+    served = [
+        ("recheck_store", 0),
+        ("request_docs", 1),
+        ("request_docs", 0),
+        ("check_docs", 0),
+    ]
+    for node_id, iteration in served:
+        store.upsert_step(run.id, StepRecord(node_id=node_id, iteration=iteration, served={}))
+
+    stored = store.get_run(run.id)
+    assert stored is not None
+    assert [(step.node_id, step.iteration) for step in stored.steps] == served
+    assert [step.seq for step in stored.steps] == [1, 2, 3, 4]
+    assert [(step.node_id, step.iteration) for step in stored.path] == served
+    assert store.get_run(run.id) == stored
+
+
+def test_set_step_actual_records_what_the_agent_did(store: Store, pinned: Dataset) -> None:
+    """Ruling R-33, built at M3 so M7's two adapters implement it once.
+
+    ``upsert_step`` records what was *served* and its repeat must stay a literal
+    no-op - M6's gate depends on that - so it can never be the method that
+    writes ``actual``. This is the other half.
+    """
+    run = store.put_run(make_run("run-actual", pinned))
+    served = store.upsert_step(
+        run.id, StepRecord(node_id="check_docs", iteration=0, served={"docs": ["fssai"]})
+    )
+    assert served.actual is None
+    assert served.recorded_at is None
+
+    recorded = store.set_step_actual(run.id, "check_docs", 0, {"called": True})
+    assert recorded.actual == {"called": True}
+    assert recorded.recorded_at is not None
+    assert recorded.served == served.served, "recording an actual must not disturb the fixture"
+    assert recorded.seq == served.seq
+
+    stored = store.get_run(run.id)
+    assert stored is not None and stored.steps == [recorded]
+
+
+def test_set_step_actual_is_write_once(store: Store, pinned: Dataset) -> None:
+    """An identical replay is a no-op; a differing one is refused.
+
+    The same replay tolerance ``mark_skeleton_submitted`` and BP-016 have, for
+    the same reason: a retried call should converge, and a *different* value
+    over a recorded one destroys evidence that nothing else holds.
+    """
+    run = store.put_run(make_run("run-actual-twice", pinned))
+    store.upsert_step(run.id, StepRecord(node_id="check_docs", iteration=0, served={}))
+    first = store.set_step_actual(run.id, "check_docs", 0, {"called": True})
+
+    assert store.set_step_actual(run.id, "check_docs", 0, {"called": True}) == first
+    with pytest.raises(StoreError):
+        store.set_step_actual(run.id, "check_docs", 0, {"called": False})
+
+    stored = store.get_run(run.id)
+    assert stored is not None and stored.steps[0].actual == {"called": True}
+
+
+def test_set_step_actual_refuses_a_step_that_was_never_served(
+    store: Store, pinned: Dataset
+) -> None:
+    """You cannot report an actual for a step that was never served (R-33).
+
+    Not a "create if missing": the ``served`` fixture is the other half of the
+    evidence, and a row invented here would have none.
+    """
+    run = store.put_run(make_run("run-actual-missing", pinned))
+    with pytest.raises(RecordNotFoundError):
+        store.set_step_actual(run.id, "check_docs", 0, {"called": True})
+    with pytest.raises(RecordNotFoundError):
+        store.set_step_actual("no-such-run", "check_docs", 0, {"called": True})
+    stored = store.get_run(run.id)
+    assert stored is not None and stored.steps == []
 
 
 def test_fetched_at_falls_back_to_the_column_default(store: Store, pinned: Dataset) -> None:

@@ -92,13 +92,24 @@ def test_the_migrated_schema_matches_sql_py(migrated: str) -> None:
     so a test passing against one is evidence about the other. If they ever
     diverge - a column added to `sql.py` without a revision - this fails and
     names the difference.
+
+    ``compare_server_default=True`` goes beyond what ``alembic check`` compares
+    by default, and it is here for one column: under ruling R-09
+    ``datasets.created_at`` must have **no** default, because a ``DEFAULT now()``
+    would be re-stamped on re-import and ``dataset_find``'s ordering would stop
+    being reproducible. Without this flag that is the one load-bearing default
+    in the schema sitting outside the drift gate.
     """
     engine = create_engine_for(migrated)
     try:
         with engine.connect() as connection:
             context = MigrationContext.configure(
                 connection,
-                opts={"include_object": include_object, "compare_type": True},
+                opts={
+                    "include_object": include_object,
+                    "compare_type": True,
+                    "compare_server_default": True,
+                },
             )
             differences = compare_metadata(context, METADATA)
     finally:
