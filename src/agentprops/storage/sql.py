@@ -997,34 +997,40 @@ class SqlStore:
             row = conn.execute(select(skeletons).where(skeletons.c.id == identifier)).one_or_none()
         return None if row is None else _skeleton(row)
 
-    def mark_skeleton_submitted(self, skeleton_id: str, dataset_id: str) -> None:
+    def mark_skeleton_submitted(self, skeleton_id: str, dataset_id: str) -> bool:
         """See :meth:`agentprops.storage.base.Store.mark_skeleton_submitted`.
 
-        SK-005 ("a skeleton is submitted once") is M5's rule and belongs in
-        `service/` per ruling R-23, so this does not enforce it. What it does
-        refuse is a *different* dataset id over an existing one, on the same
-        reasoning as BP-016's guard: re-marking the same dataset is a harmless
-        replay, and re-marking a different one destroys lineage that nothing
-        else records.
+        Ruling R-47's compare-and-set, and the **conditional UPDATE is what
+        makes it one**: the ``WHERE submitted_as IS NULL`` clause is evaluated
+        by the database, so exactly one of two concurrent statements reports a
+        matched row. A read-then-write in a transaction would not be equivalent
+        - pysqlite defers ``BEGIN`` until the first DML and Postgres under READ
+        COMMITTED behaves the same way, so the read would take no lock. That is
+        the same defect ruling R-37 found in ``seq`` allocation, and the same
+        remedy: let the database decide, once.
+
+        ``rowcount`` is the answer rather than a follow-up ``SELECT``, which
+        would reintroduce the race one statement later.
+
+        The existence check stays separate and still raises: "no such skeleton"
+        is not a false answer to "did this call claim it".
         """
         identifier = _parse_uuid(skeleton_id)
         if identifier is None:
             raise RecordNotFoundError(f"no skeleton {skeleton_id!r}")
         dataset = _require_uuid(dataset_id, "dataset_id")
         with self._engine.begin() as conn:
-            row = conn.execute(
-                select(skeletons.c.submitted_as).where(skeletons.c.id == identifier)
+            exists = conn.execute(
+                select(skeletons.c.id).where(skeletons.c.id == identifier)
             ).one_or_none()
-            if row is None:
+            if exists is None:
                 raise RecordNotFoundError(f"no skeleton {skeleton_id!r}")
-            current: uuid.UUID | None = row.submitted_as
-            if current is not None and current != dataset:
-                raise StoreError(
-                    f"skeleton {skeleton_id} was already submitted as {current} (SK-005)"
-                )
-            conn.execute(
-                update(skeletons).where(skeletons.c.id == identifier).values(submitted_as=dataset)
+            claimed = conn.execute(
+                update(skeletons)
+                .where(skeletons.c.id == identifier, skeletons.c.submitted_as.is_(None))
+                .values(submitted_as=dataset)
             )
+            return bool(claimed.rowcount)
 
     # ---------------------------------------------------------------------- runs
 

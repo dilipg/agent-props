@@ -112,10 +112,11 @@ class RecordNotFoundError(StoreError):
 
     Raised by the two methods whose return type leaves no room for "not found"
     - :meth:`Store.set_archived`, which must return a ``DatasetSummary``, and
-    :meth:`Store.mark_skeleton_submitted`, which returns ``None``. The read
-    methods never raise this: they return ``None``, including for an id that is
-    not a well-formed UUID, because a malformed filter should produce no rows
-    rather than an exception.
+    :meth:`Store.mark_skeleton_submitted`, whose ``bool`` answers "did this call
+    claim the skeleton", a question an absent skeleton does not have a false
+    answer to. The read methods never raise this: they return ``None``,
+    including for an id that is not a well-formed UUID, because a malformed
+    filter should produce no rows rather than an exception.
     """
 
 
@@ -224,13 +225,28 @@ class Store(Protocol):
         """One skeleton, or ``None`` - including for a malformed id."""
         ...
 
-    def mark_skeleton_submitted(self, skeleton_id: str, dataset_id: str) -> None:
-        """Record which dataset a skeleton became.
+    def mark_skeleton_submitted(self, skeleton_id: str, dataset_id: str) -> bool:
+        """Claim a skeleton for ``dataset_id``. A **compare-and-set** (ruling R-47).
 
-        Raises :class:`RecordNotFoundError` for an unknown skeleton. Marking the
-        same dataset twice is a no-op; marking a *different* one raises, since
-        SK-005 (M5) owns the rule id and the alternative here is overwriting
-        lineage.
+        Succeeds, and returns ``True``, only if ``submitted_as`` is currently
+        null. Returns ``False`` when the skeleton has already been claimed - by
+        this dataset id or by any other - which is the signal the losing caller
+        of two concurrent submits needs. Raises
+        :class:`RecordNotFoundError` for an unknown skeleton.
+
+        **This replaced a no-op replay tolerance**, and the change is what makes
+        SK-005 an invariant the store can hold rather than one the catalogue
+        merely asserts. Before it, two concurrent ``dataset_submit`` calls both
+        read ``submitted_as`` as null, both passed SK-005, and both wrote - the
+        loser receiving a success envelope for a dataset version it did not mean
+        to create, with nothing in the response saying so. A duplicate row is
+        not corruption; a silent one is worse than an error.
+
+        A second *sequential* submit is still refused by SK-005 before reaching
+        here, so this is the concurrent path's guard rather than its only one.
+        Ruling R-48 deliberately does **not** extend the same treatment to
+        ``put_skeleton``: a lost fill is visible in the next response's
+        ``remaining`` and self-correcting, while a lost submit is silent.
         """
         ...
 
