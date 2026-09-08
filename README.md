@@ -18,9 +18,28 @@ See [`CLAUDE.md`](CLAUDE.md) for the invariants and layering rules that govern t
 
 Phase 1 is being built one milestone at a time, M0 through M11 (see
 [`docs/build-handoff.md`](docs/build-handoff.md) section 4). This repository currently has the M0
-scaffold (package layout, tooling, CI, golden fixtures) and the M1 domain models in
-`src/agentprops/models/`. There is no working service yet — `validation/`, `storage/`, `service/`,
-`server/`, `expansion/` and `export/` are empty modules waiting on their milestone.
+scaffold (package layout, tooling, CI, golden fixtures), the M1 domain models in
+`src/agentprops/models/`, and the M2 validator in `src/agentprops/validation/` — every `BP-*` and
+`DS-*` rule in [`docs/contracts.md`](docs/contracts.md) section 3, with a rule-id-to-callable
+registry and a declarative rejection corpus. There is no working service yet: `storage/`,
+`service/`, `server/`, `expansion/` and `export/` are empty modules waiting on their milestone.
+
+## Validate a document
+
+```python
+import json
+from agentprops.validation import validate_blueprint, validate_dataset
+
+envelope = validate_blueprint(json.loads(blueprint_text))
+envelope.ok  # False if any error-severity rule fired
+envelope.errors  # RuleError(rule, severity, pointer, message, section, context)
+```
+
+Both entry points take the raw `dict` off `json.loads`, never a parsed model, because every finding
+carries an RFC 6901 pointer into the *submitted* document. Neither ever raises for something a
+document did; warnings (`BP-019`, `DS-007`, `DS-027`, `DS-032`) report `ok: true` and ride along in
+`errors` with `severity: "warning"`. `validate_dataset` takes a `Resolver` — two read-only lookups
+for the three rules that are existence checks — so `validation/` stays pure and imports no storage.
 
 ## Install
 

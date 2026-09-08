@@ -374,6 +374,205 @@ next fixture, and the failure would look like their fixture being wrong.
 
 ---
 
+## [M2] `validation/` is eleven modules, not the five the brief names
+Built `blueprint.py`, `dataset.py`, `timeline.py`, `registry.py` and `__init__.py` as specified, plus
+six helper modules the rules would otherwise duplicate: `resolver.py` (ruling R-11's `Resolver`
+Protocol and a `NullResolver`), `context.py` (the read-only document views and the finding factory),
+`graph.py` (reachability and cycles, needed by BP-005, BP-018, DS-010 and DS-015), `jsonschemas.py`
+(the `entity:` ref convention and every `jsonschema` call), `pointers.py` (RFC 6901 construction and
+the pointer-to-section mapping) and `rawjson.py` (ruling R-20's duplicate-key detector).
+Reason: four rules need reachability and six need schema resolution. Inlining either into
+`blueprint.py` would make `dataset.py` import from `blueprint.py`, which is a dependency between
+rule families that has no reason to exist.
+Alternative rejected: one large `helpers.py`. The four concerns have nothing to do with each other,
+and `graph.py` is the one a future rule is most likely to want.
+
+## [M2] DS-008 locates embedded entity state through the blueprint's `entity:` refs
+Ruling R-14 requires DS-008's mechanism to be defined and recorded, since no document says where an
+entity's state *is* inside a fixture. Defined as: for every fixture that lists entity `E` in
+`entity_refs`, walk the node's `input_schema` and `output_schema` to each
+`{"$ref": "entity:E"}` and read the value at the matching location in `input`/`output`; compare each
+against `entities.E.base`. `properties`, `additionalProperties`, `items` and `prefixItems` are
+followed, because those are the constructs with a deterministic instance counterpart.
+Reason: the blueprint is the thing that knows the shape of a fixture, so it is the thing that can
+say where a noun lives in one. R-14's phrasing - "the value at each `entity_refs` site plus
+`entities.<id>.base`" - needs a definition of "site", and the schema is the only non-guessing one.
+Consequence, verified against `arun-escalated.json`: a fixture that references an entity without
+embedding a copy of it contributes no site and cannot drift. `verify_compliance` takes only a
+`store_id` and returns `{compliant, findings}`, so it names `store` in `entity_refs` and has nowhere
+to disagree with it. Both golden datasets depend on that: five of `arun`'s fixtures reference
+`store`, and only three embed it.
+Alternative rejected: recursively searching each fixture for any object that looks like the entity.
+It would fire on coincidence - a `{"id": ...}` that is not a store - and DS-008 is an error, not a
+warning.
+
+## [M2] DS-008's "byte-identical" means canonically identical
+Compared as `json.dumps(value, sort_keys=True)`, so a re-ordered object is not drift, but `1` versus
+`1.0`, and `true` versus `1`, are.
+Reason: literal byte identity would make key order part of the rule, which no author could hold to
+across a round trip through a `dict`. Python's `==` goes too far the other way: `1 == 1.0 == True`,
+so a fixture could switch JSON type and pass a rule whose whole subject is identity.
+Alternative rejected: `==` on the parsed values. Cheaper, and silently accepts a type change.
+
+## [M2] DS-010 implements ruling R-02's "equivalently" clause, not its first sentence
+R-02 gives two formulations and calls them equivalent: (a) error when `after_node` is a *descendant*
+of the referencing node, **or** the referencing node is unreachable from `after_node`; (b)
+`after_node` must be an ancestor of the referencing node via at least one path. In a **cyclic** graph
+they are not equivalent, and the golden blueprint is cyclic: `request_docs -> recheck_store ->
+check_docs -> request_docs`. `recheck_store` observes `store@after_docs`, whose `after_node` is
+`request_docs` - which is *also* a descendant of `recheck_store` through the loop. Formulation (a)
+therefore rejects the golden fixture; formulation (b) accepts it.
+Implemented (b): DS-010 fires when the referencing node is not reachable from `after_node`.
+Reason: R-02's ruling text is explicit that the golden fixture must pass, and (b) is the formulation
+it states as the rule ("`after_node` must be an ancestor via at least one path"). (a)'s first clause
+exists to catch a reference that is *only* downstream, which (b) also catches.
+Pinned by `test_ds_010_accepts_a_reference_from_inside_the_loop`, which states the reasoning at the
+assertion so nobody reinstates the literal wording.
+
+## [M2] DS-010's reachability excludes the referencing node itself
+`Graph.reachable_from(after_node, include_start=False)`: one or more edges, so a node in an acyclic
+region does not reach itself, and a node in a cycle does.
+Reason: a revision is the state produced *by* `after_node`, so the node whose execution produced it
+shows the pre-state in its own fixture. A node referencing its own `after_node` is either an author
+error or a re-entry through a loop, and reachability distinguishes those two exactly.
+Not covered by the ruling register. No golden fixture or corpus case exercises it; a unit test does.
+
+## [M2] Five precedence decisions the ruling register does not cover
+The gate asserts exact rule-id sets, so every overlap must resolve to one owner. R-18 rules three,
+R-02 and R-07 one each. Five more surfaced while building the corpus, and each is implemented as a
+skip inside the lower-priority rule, so rules stay independent and order-free:
+
+1. **BP-005 is skipped when `entry_node` names no node.** Reachability from a nonexistent node is
+   empty, so a literal BP-005 reports *every* node as unreachable on top of BP-006's one finding.
+   BP-006 owns the existence half.
+2. **DS-004 and DS-005 skip a `nodes` key that is not a blueprint node.** There is no schema to
+   validate against; DS-003 owns the unknown key.
+3. **DS-010 is skipped when the revision's `after_node` names no node.** DS-011 owns that, exactly as
+   R-02 has DS-009 own an unknown revision.
+4. **DS-019 skips a `pools` key that is not a `pool: true` node** (DS-018 owns it) **and skips the
+   schema check on a faulted pool entry**, extending R-07's DS-004 reasoning. Without the second
+   half, a faulted pool fixture would be unauthorable, since R-18 gives pools to DS-019 and DS-019's
+   text does not mention `fault`.
+5. **Every dataset rule that needs the blueprint is skipped when DS-001 cannot resolve one.** The
+   registry marks them `needs_blueprint`; the document-local rules still run. The DS-001 corpus case
+   reports one id rather than twenty consequential ones.
+
+Alternative rejected: threading earlier findings into later rules. It makes rule order part of the
+contract and turns 52 independent functions into a pipeline.
+
+## [M2] BP-016 answers from the resolver, and `validate_blueprint`'s resolver defaults to `NullResolver`
+BP-016 ("a published version cannot be modified") is a property of the store, not of the document, so
+it fires when the injected resolver reports an existing published `{agent_id, version}` - byte
+identical or not, since contracts 3.1 says "any upsert". `validate_blueprint(doc)` with no resolver
+uses `NullResolver`, which knows nothing published, so a first publish and `blueprint_validate` never
+fire it. The corpus's BP-016 case is the only one that swaps the resolver.
+Reason: with a resolver that knows the golden blueprint, *every* blueprint case would fire BP-016 as
+well as its own rule and the exact-set gate would fail 19 times. The golden blueprint itself would
+fail "valid fixtures pass clean".
+Alternative rejected: BP-016 fires only when the submitted document *differs* from the stored one.
+That makes the golden fixture pass with a knowing resolver, but every mutated case still fires it,
+and it needs a document comparison nobody specified.
+
+## [M2] The corpus manifest grew four optional per-case keys
+`resolver` (which stub to use, for BP-016), `parse_raises` (the mutation is designed not to parse -
+DS-020's case, per ruling R-23), `expect: []` (the mutation must validate *clean* - ruling R-07's
+fault fixture), and a top-level `raw_text_cases` list (text substitutions rather than JSON Patch, for
+DS-013 under ruling R-20).
+Reason: three rules cannot be expressed as "patch the golden fixture and expect an error" - one is
+about the store, one about the raw bytes, and one is a deliberate skip - and the manifest is the
+right place for that to be visible, rather than a special case buried in a test.
+Alternative rejected: separate manifests, or hand-written fixture files. Both split the case list,
+which is the thing the coverage gate reads.
+
+## [M2] The two corpus cases ruling R-14 named as broken, and what replaced them
+- **`BP-003-duplicate-node`** renamed `/nodes/2/id`, which orphaned every edge referencing
+  `check_docs` and fired BP-004 and BP-005 too. Replaced with an `add` of a second node claiming the
+  id `complete`: the id is duplicated and no edge changes. Verified to report `{BP-003}` alone.
+- **`DS-008-constant-entity-drift`** had two operations, the first of which replaced
+  `assigned_modules[0]` with the value it already held. Dropped that operation; the case is now the
+  single `existing_locations: 1 -> 4` mutation, which is real drift for `franchisee` (an entity with
+  no `revisions` block) under the mechanism defined above. Verified to report `{DS-008}` alone.
+Also added, per R-14: warning cases for BP-019, DS-007 and DS-032, plus cases for the 22 other rules
+the shipped corpus did not reach. 56 cases, 52 rules, one clean case.
+
+## [M2] BP-006's inbound-edge half is unreachable from a mutation of the golden blueprint
+Every node in the golden blueprint is reachable from `receive_request`, so *any* added edge into the
+entry node also creates a cycle that passes through no loop node, and BP-018 fires alongside BP-006.
+The corpus case therefore uses the existence half (`entry_node: "kickoff"`), and the inbound-edge
+half is covered by the rule's own code path plus the golden fixture's silence.
+Reason: recorded rather than papered over. A second base blueprint would reach it, but a corpus with
+two base blueprints costs more than the coverage is worth, and the exact-set gate is what would have
+to be weakened otherwise.
+
+## [M2] DS-013 keeps both a named exemption and a real case
+The coverage gate carries `MUTATION_UNREACHABLE = {"DS-013": <reason>}`, as ruling R-20 requires, and
+a second test asserts that every exempted rule is exercised by a `raw_text_cases` entry - so the
+exemption is from the *mutation manifest*, never from testing. A third test fails if an exempted rule
+turns out to be reachable by mutation after all.
+Reason: R-20 asks for a named exemption rather than a silent gap; a named exemption that also has a
+real case is strictly better, and the third test keeps the exemption from outliving its reason.
+The detector, `validation/rawjson.py`, is a pure function over a string: the caller reads the text,
+so `validation/` still does no I/O. M4 wires it at the tool boundary.
+
+## [M2] `RuleSpec.check` is typed `Callable[[Any], list[RuleError]]`
+The blueprint rules take a `BlueprintContext` and the dataset rules a `DatasetContext`; one registry
+holds both, with `target` recording the pairing, and the runner builds the right context.
+Reason: `mypy --strict` permits explicit `Any`, and the alternatives are worse - a generic registry
+parameterised by context type, or two registries that the drift test would have to merge, in which
+case `RULE_REGISTRY.keys()` stops being one set and the drift test gets a seam.
+Alternative rejected: a `Protocol` with an overloaded `__call__`. Same runtime behaviour, more
+machinery, and the rules would still need casting at the call site.
+
+## [M2] `labels`, `seed` and `blueprint` findings carry `section: null`
+Ruling R-06 settles that `labels` and `seed` are `dataset_skeleton` *inputs*, not fillable sections,
+so an error against one cannot be repaired by re-filling a section. `contracts.md` section 1 allows a
+null `section` ("Null for non-skeleton contexts"), and this is that context. Blueprint findings carry
+`section: null` always - a blueprint is authored as one document, with no skeleton.
+Everything else maps from the pointer: `/provenance` and `/narrative` to `provenance` (R-06 puts
+`narrative` in the provenance section), `/entities` to `entities`, `/pools` and a pool node's fixture
+to `nodes.branches` (R-06), any other `/nodes` fixture to `nodes.core`, `/expected` to `expected`.
+
+## [M2] `types-jsonschema` added to the dev group rather than a mypy override
+`mypy --strict` rejects `import jsonschema` as untyped.
+Reason: the M0 decision "No `[[tool.mypy.overrides]]` added yet" says to add one only when a
+dependency forces it. Real stubs are better than `ignore_missing_imports` for the one third-party
+library the heart of the product calls, and they type-check the `Draft202012Validator` and
+`SchemaError` uses rather than erasing them to `Any`.
+Alternative rejected: `[[tool.mypy.overrides]] module = "jsonschema.*"`. One line, and it would have
+hidden a wrong argument to `iter_errors` for the rest of the build.
+
+## [M2] Two M1 tests changed, one of them deleted by its own instruction
+- `test_the_corpus_alone_does_not_cover_ruling_r04` asserted that the corpus missed exactly
+  `{BP-002, BP-008, DS-017, DS-020}`. Its docstring said: "If a future corpus extension (R-14) does
+  reach all eleven ids, this test fails and should be deleted." R-14's extension does reach them, so
+  it is replaced by `test_the_corpus_now_covers_every_ruling_r04_id`, which asserts the inverse. The
+  hand-written tables stay: they carry second spellings (a title over 120 characters, `-1` as well as
+  `0`) and the must-raise cases the corpus has no reason to duplicate.
+- `test_broken_case_still_parses` and `..._round_trips` now skip the `parse_raises` cases, and a new
+  `test_parse_raises_case_really_does_raise` asserts the marker is true - so the marker cannot become
+  a way to excuse a case from the parsing tests.
+- Both M1 tests and the M2 corpus now share one patch applier, in `tests/corpus.py`. M1 duplicated it
+  deliberately because no corpus loader existed yet; now that the manifest has per-case keys, two
+  appliers would be two readings of one file.
+
+## [M2] `docs/contracts.md` amended, per ruling R-25
+Four edits, each with a parenthetical naming its ruling: a DS-033 row in section 3.2 (R-21); the
+RT-E05 row deleted from 3.4 (R-03), with a sentence in its place saying why there is no RT-E05; a
+line under the section 3 preamble stating that 3.4 is a response-code table and not part of the rule
+registry (R-12); and `"section": "nodes.compliance"` corrected to `nodes.core` in section 1's example
+(R-06), with the five section names added to the bullet that explains the field.
+Reason: R-25 requires the catalogue to stay the single source the drift test reads. The parenthetical
+on the deletion is prose rather than a table row, because a deleted row has nothing to annotate.
+`docs/worked-example.md` was not touched: it is the byte-exact source for the committed fixtures.
+
+## [M2] Findings are emitted in catalogue order
+`RULE_REGISTRY` is a dict in rule-id order, the runner iterates it, and every rule sorts its own
+iteration (node ids, entity ids, pool indexes).
+Reason: an error list a caller can diff, and a test that can assert on the whole list rather than a
+set. A test asserts the registry is sorted, so an appended rule cannot make the order arbitrary.
+
+---
+
 ## Questions for the owner
 
 - **`priya-missing-docs.json`'s `provenance.author.agent` is `"human"` in the committed fixture
@@ -428,3 +627,46 @@ next fixture, and the failure would look like their fixture being wrong.
   model. Two further constraints on M2's corpus follow from the R-23 hardening and are asserted in
   `tests/unit/test_models_accept_broken_documents.py`: BP-008's case must use `0`/`-1`, and BP-017's
   must `replace` `/nodes/*/pool` with `false` rather than `remove` it or set it to `0`.
+- **M2: both golden datasets validate clean, `arun-escalated.json` included.** The M0 and M1 entries
+  above record that it had never been machine-checked against any rule. It now passes all 33 `DS-*`
+  rules against the golden blueprint with zero findings, and so does `priya-missing-docs.json`. The
+  M0 recommendation is discharged: nothing in `arun` needed changing, and no rule was weakened to
+  make it pass. Two things worth knowing about *why* it passes: `entities.store` has no `revisions`
+  block and is genuinely constant in all three fixtures that embed it, so DS-008 is satisfied rather
+  than skipped; and `recheck_store` carries a fixture even though `expected_path` skips it, which is
+  correct - DS-002 requires a fixture for every non-pool node, and playing a branch not taken is the
+  point.
+- **M2: no rule validates an *entity* schema.** BP-011 covers `input_schema` and `output_schema`,
+  BP-012 covers `outcome_schema`, and ruling R-18 has BP-011 check syntax with `entity:` refs
+  *stripped* - so `entities[*].schema` is never checked for being valid Draft 2020-12. A blueprint
+  with a malformed entity schema publishes, and the first thing to notice is DS-004 at dataset time.
+  Handled defensively (`instance_findings` catches an unusable schema and reports it as the owning
+  rule's finding rather than raising), but the gap is real. The fix is one word in BP-011's row -
+  "every `input_schema`, `output_schema` and entity `schema`" - or a new BP rule; both need a
+  catalogue edit, so neither was done.
+- **M2: pool-entry `input` is unvalidated.** Ruling R-18 gives every pool fixture to DS-019, and
+  DS-019's text checks only `output` against `output_schema`. DS-005 covers `nodes` only. So a pool
+  entry's `input`, if an author writes one, is checked by nothing. Neither golden pool entry has an
+  `input`, so nothing is broken today. Widening DS-019 to cover `input` is a one-line change to the
+  rule and a catalogue edit.
+- **M2: DS-008 cannot see a fixture that references an entity without embedding it.** With the
+  mechanism defined above, `verify_compliance` naming `store` in `entity_refs` while returning only
+  `{compliant, findings}` contributes nothing to the identity check - correctly, because there is no
+  state there to compare. But it means `entity_refs` is partly *declarative*: the author asserts "this
+  step is about the store" and no rule can contradict them. If `entity_refs` was meant to be
+  verifiable in both directions, the missing rule is "a fixture that declares an entity ref must
+  embed that entity's state", which nothing in the catalogue says.
+- **M2: BP-016 rejects a byte-identical re-publish.** contracts 3.1 says "any upsert against an
+  existing published `{agent_id, version}` is rejected", and that is what is implemented. An
+  idempotent re-publish of identical bytes is therefore an error, which matters for a CI pipeline
+  that publishes on every run. If idempotence is wanted, BP-016 needs to compare the submitted
+  document with the stored one, and the `Resolver` already returns it.
+- **M2: DS-013 remains open as ruling R-14's question 4 put it.** The rule is implemented and has a
+  raw-text case, and the detector is a pure function `M4` will call at the tool boundary. If the
+  answer is "retire it", the removal is one registry line, one manifest entry, one exemption entry
+  and `validation/rawjson.py`.
+- **M2: `node_expectations[*].args_match` is unvalidated, per ruling R-19.** Recorded rather than
+  fixed: DS-016 checks only the keys. Since `args_match` is JSONLogic against the *arguments the
+  agent passed*, and the service never evaluates it, there is no schema to check it against - the
+  blueprint has no argument schema separate from `input_schema`. If it should be checked against the
+  node's `input_schema`, that is a new rule.
