@@ -881,6 +881,51 @@ dataset five times, once per edit, is a worse review surface, not a more complet
 **Cost if wrong.** If version history ever needs to be browsable, it is a new parameter or a
 new method, not a redefinition of this one.
 
+### R-39 — five decisions from M3's fix round, ratified
+
+**(a) The `q` filter matches in Python, and that is the correct trade.** Making the case fold
+consistent turned out to be larger than it looked: no SQL expression folds case identically
+across all three backends — SQLite's `lower()` is ASCII-only, verified — so both the fold and
+the substring match moved into Python, and `limit`/`offset` moved with them for `q` queries.
+A `q` query therefore materialises every row matching the other filters before slicing.
+
+Ratified. R-36 already decided that identical results across backends beat speed, and this is
+that ruling's consequence rather than a new choice. The cost is bounded by the other filters
+and by authoring volumes; pagination stays correct because the slice happens after the full
+match set exists.
+
+**The named remedy, if it ever matters:** store a pre-folded `title || intent` search column,
+computed in Python at write time, and `LIKE` against that in SQL — identical results across
+backends *and* `limit`/`offset` back in the query. Datasets are copy-on-write, so it is
+computed once per version. **Do not build it now.** The trigger is a measured problem, and
+phase 1's non-goals warn specifically against this kind of creep.
+
+**(b) `none_as_null=True` on `JsonDocument`.** Ratified as a genuine bug fix. SQLAlchemy
+stores a Python `None` in a JSON column as JSON `null`, so `runs.model`, `runs.outcome` and
+`run_steps.actual` held a JSON value where the DDL says `NULL` — found because
+`set_step_actual`'s `WHERE actual IS NULL` guard matched nothing. Worth recording as a
+general hazard: a JSON column has two distinct empties, and only one of them is `NULL`.
+
+**(c) Amending revision `0001` rather than adding `0002`.** Ratified. This is the initial
+schema of an unreleased milestone on an unmerged branch, never applied outside temporary test
+databases, and a `0002` would make every future deployment replay a SQLite table rebuild for
+a table that never shipped. **Migrations become append-only the moment this branch merges** —
+from then on, a schema change is a new revision, never an edit.
+
+**(d) `set_step_actual`'s `recorded_at` from `func.now()`.** Allowed. R-09's first sanctioned
+source is a database clock, and the difference between `DEFAULT now()` and an explicit
+`func.now()` in a write is mechanical rather than semantic — so R-09 should be read as "a
+database clock, whether a column default or an explicit `func.now()`". This does not weaken
+R-09's actual target: `datasets.created_at` must come from `provenance.created_at` because it
+has to survive an export/import cycle unchanged. A step's `recorded_at` is a runtime
+observation, not authored content, so the database clock is the right source. R-33's signature
+carries no timestamp, so the column would otherwise be permanently unreachable.
+
+**(e) Two further `contracts.md` edits.** Both blessed. `set_step_actual` belongs in section 6
+because section 6 *is* the Protocol of record and R-33 said to add it to the Protocol. The
+`{run_id, seq}` unique index belongs in section 8's Mongo list because R-37 must hold on every
+backend, not just the SQL ones.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
