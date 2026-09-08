@@ -573,6 +573,124 @@ set. A test asserts the registry is sorted, so an appended rule cannot make the 
 
 ---
 
+## [M2, fix round 1] `NodeFixture.output` is optional, and DS-004 owns presence (ruling R-07)
+R-07 blessed an absent `output` on a faulted fixture while M1's model required the field, so the two
+layers disagreed and the composite was worse than either: a faulted fixture with no `output` returned
+zero findings and `ok: True`, and then `Dataset.model_validate` raised
+`('nodes','verify_compliance','output') missing`. Under R-23's validate-then-parse ordering that
+lands in `service/` as an exception where a rule id belongs, which CLAUDE.md forbids.
+Chose R-07's second amendment as ruled: `output: dict | None` on `NodeFixture`, and DS-004 checks
+presence — absent is legal with `fault` set, required without it.
+Reason: where a ruling explicitly blesses an absent value, the model cannot be the thing that
+requires it. This is the one place R-04's "a required field stays required" exception had to be
+withdrawn, and the reason is exactly R-04's own: policy belongs in the catalogue.
+Alternative rejected: keeping the field required and having R-07 forbid the absent form. It would
+also have closed the gap, but it contradicts a ruling the owner had already made, and a faulted step
+genuinely has no output.
+Consequence: `schemas/dataset.schema.json` regenerated — `output` leaves `required` and gains a null
+branch, which is what the web app will validate against at M9.
+
+## [M2, fix round 1] DS-019 owns pool-fixture presence too, which R-07's amendment did not name
+R-07's second amendment names DS-004. But `NodeFixture` is the model for pool entries as well, so
+making `output` optional made a pool entry with no `output` and no `fault` parse cleanly — and
+DS-019's presence skip still said "the model owns presence", which had just stopped being true.
+Left alone, such a pool entry would validate, store, and be served by `fetch_step` with nothing in
+it.
+Chose to extend the same rule to pools, through a shared `_output_findings` helper so the two rules
+cannot drift, and added a corpus case (`DS-019-pool-entry-without-output`).
+Reason: R-18 makes DS-019 the single owner of every pool fixture, and R-26's stated principle is that
+the rule which owns the thing owns the finding. Fixing DS-004 alone would have moved the defect
+rather than closed it.
+Alternative rejected: waiting for a ruling. The hole was created by this round's own model change, so
+leaving it would have been shipping a regression and reporting it.
+
+## [M2, fix round 1] BP-011 extended to `entities[*].schema` (ruling R-27)
+Verified before the fix: an entity schema of `{"type": "not-a-json-schema-type"}` produced **zero**
+blueprint findings, and a dataset validated against that blueprint produced zero as well. After:
+`['BP-011']` at `/entities/0/schema`, and the dataset reports `['DS-004', 'DS-005']` if such a
+blueprint ever reaches one.
+Reason: R-18 has BP-011 strip the very refs that reach an entity, so nobody looked at the entity's
+own schema. Extending the existing owner keeps the registry, the drift test and the corpus stable,
+which is what R-27 asks for.
+The defensive path in `instance_findings` — an unusable schema reported as the owning rule's finding
+rather than raised — stays, and now has a test. It is still needed for a blueprint stored before
+this round.
+
+## [M2, fix round 1] DS-019 extended to a pool entry's `input` (ruling R-28)
+Verified before the fix: `pools.request_docs[0].input = {"missing_docs": 12345}` produced **zero**
+findings. R-18 gives every pool fixture to DS-019, whose text named only `output_schema`, and DS-005
+covers `nodes` only, so the check fell between two rules.
+Chose to widen DS-019 rather than extend DS-005 into `pools`, as R-28 rules.
+Reason: one owner per pool fixture is R-18's principle, and splitting a pool entry between two rules
+is what would make the exact-set gate ambiguous again.
+
+## [M2, fix round 1] BP-016 is idempotent for a byte-identical re-publish (ruling R-29)
+Compares `canonical(stored) == canonical(submitted)` before reporting, using the same canonical form
+DS-008 uses, so a re-ordered key is not a modification.
+Reason: M7's `dataset_import` carries a blueprint version alongside its datasets, so under the
+literal "any upsert" reading re-importing into a store that already holds that version identically
+would fail — defeating the promotion path M7 exists to build. Immutability is untouched: nothing
+changes, because the documents are identical.
+The rule's docstring previously argued the opposite policy at length. It is rewritten, not amended:
+leaving the old argument in place next to the new behaviour is how a future reader concludes the code
+is wrong.
+
+## [M2, fix round 1] A rule-*half* exemption shape, and the BP-006 test that now exists (ruling R-31)
+Two defects, both mine to fix and one of them mine to have caused by reporting it as covered.
+`bp_006`'s inbound-edge branch had **no test of it firing** — the only such branch in M2 — so a
+version that never reported the inbound case would have passed all 423 tests. And the "exemption"
+for it was prose in `manifest.json` and `DECISIONS.md`, which protects nothing.
+Chose: a membership-style unit test (`test_bp_006_reports_an_inbound_edge_into_the_entry_node`), plus
+`RULE_HALF_EXEMPTIONS: dict[tuple[rule, half], test_name]` in the drift suite, with three gate tests —
+the named test must exist (AST-parsed from `tests/unit/`, so deleting it fails the gate), the rule
+must be registered, and the rule must still have a corpus case for its other half.
+Reason: the exemption has to be keyed by *half*, not by rule. Registering `BP-006` in
+`MUTATION_UNREACHABLE`'s whole-rule map would trip `test_no_exemption_is_stale`, because the rule does
+have a corpus case — for its existence half. Two maps with different shapes is the honest encoding of
+two different situations.
+Membership rather than an exact set is forced, not lazy: the reviewer proved structurally that **no**
+blueprint can isolate this half, since an edge into `entry_node` implies either a cycle (BP-018) or a
+predecessor unreachable from the entry (BP-005). This supersedes the earlier M2 entry, which said "a
+second base blueprint would reach it".
+
+## [M2, fix round 1] "Whatever the validator accepts must parse" is now a general gate
+`test_a_case_the_validator_accepts_also_parses` runs over every corpus case: if the envelope is
+`ok`, the document must construct its model.
+Reason: R-07's fault seam was one instance of a class — a clean envelope followed by a
+`ValidationError` — and the class is what R-23's validate-then-parse ordering creates. Fixing the
+instance without gating the class invites the next one, through some other field, discovered by
+whoever builds `service/`.
+Alternative rejected: asserting it only for the two `VALID-*` cases. Cheaper, and blind to the
+warning-only cases, which also store.
+
+## [M2, fix round 1] Four small hardenings from the review
+- `apply_operation` now asserts that a `replace` or `remove` target exists, as RFC 6902 requires.
+  Without it, a `replace` whose path had drifted became an `add`: the exact-set gate catches that in
+  almost every case, but not one whose violation *is* an extra key, which would pass for the wrong
+  reason.
+- `run_raw_text_case` asserts `target == "dataset"`, since it always calls `validate_dataset`; a
+  blueprint target would have been validated as a dataset in silence.
+- The hand-written R-04 tables gained a non-emptiness assertion. `test_ruling_r04_ids_are_all_covered`
+  stays green if both are emptied — the corpus now reaches all eleven ids — and their parametrised
+  tests would then collect zero cases and pass. What the tables uniquely carry is the second
+  spellings: a 400-character title, `max_iterations: -1`, `seed: true`, `pool: 0`.
+- `canonical()` falls back to `repr` instead of raising `TypeError`. Unreachable from `json.loads`
+  output, but R-23 notes `dataset_validate(dataset: object)` may be handed an already-parsed object,
+  and a rule must report rather than raise. `repr` is stable within a process, which is all an
+  identity comparison needs.
+Also removed as dead surface: `BLUEPRINT_RULE_IDS`, `DATASET_RULE_IDS`, `VALID_CASES` and
+`@runtime_checkable` on `Resolver`. All four were exported and consumed nowhere; an unused export is
+a claim about a contract nobody is keeping.
+
+## [M2, fix round 1] `entity_ref_sites` stops at the first matching ref, deliberately
+Documented rather than changed. The whole value at a matching location *is* the entity's state, so
+there is nothing finer to point at — but the consequence is that an entity embedded inside *another*
+entity's schema contributes no site of its own. Drift is still caught, because the outer state
+contains the inner one; it is reported one level up. Unreachable in the golden fixtures, and now
+stated at the code so the next author does not assume the walk descends.
+
+---
+
 ## Questions for the owner
 
 - **`priya-missing-docs.json`'s `provenance.author.agent` is `"human"` in the committed fixture
@@ -670,3 +788,20 @@ set. A test asserts the registry is sorted, so an appended rule cannot make the 
   agent passed*, and the service never evaluates it, there is no schema to check it against - the
   blueprint has no argument schema separate from `input_schema`. If it should be checked against the
   node's `input_schema`, that is a new rule.
+- **M2 fix round 1: five of the seven questions above are closed by rulings R-26 to R-31.** Recorded
+  here because the file is append-only and the entries above now read as more open than they are.
+  **R-27 closes** the entity-schema gap: BP-011 covers `entities[*].schema`. **R-28 closes** the
+  pool-`input` gap: DS-019 covers it. **R-29 closes** the BP-016 idempotence question: a
+  byte-identical re-publish is a no-op success. **R-30 closes** the `entity_refs` question by
+  ratifying the looser reading — `entity_refs` is partly an authorial assertion, and both golden
+  fixtures require that. **R-31 closes** BP-006's coverage question, and corrects itself: the unit
+  test it claimed existed did not, no blueprint can isolate the half, and the exemption now names a
+  test that a gate checks. **R-26 ratifies** all five precedence decisions plus the DS-019 fault
+  skip. What remains open is **DS-013** (keep for non-JSON callers, or retire) and
+  **`args_match`**, which R-19 leaves deliberately unvalidated.
+- **M2 fix round 1: one new question.** `FaultSpec.after_ms` and `latency_hint_ms` are carried and
+  validated but nothing consumes them yet. At M6 `fetch_step` has to decide whether a fault's
+  `after_ms` is *simulated* — an actual delay before the error — or purely declarative, like
+  `latency_hint_ms`. Ground rule 9's determinism and the ban on wall-clock reads in generation paths
+  both point at declarative, but a load-class run (`run_class: "load"`) is the case where a real
+  delay would be the point. Not a blocker for M2; the shape is validated either way.
