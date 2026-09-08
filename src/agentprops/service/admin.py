@@ -61,7 +61,7 @@ def label_vocabulary(context: ServiceContext, agent_id: str, version: str | None
     """
     blueprint = context.store.get_blueprint(agent_id, version)
     if blueprint is None:
-        return not_found("blueprint", agent_id=agent_id, version=version)
+        return not_found("blueprint", field="agent_id", agent_id=agent_id, version=version)
     dimensions = blueprint.label_schema.dimensions
     rows = context.store.find_datasets(
         DatasetQuery(agent_id=agent_id, blueprint_version=blueprint.version)

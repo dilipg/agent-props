@@ -152,7 +152,7 @@ def get(context: ServiceContext, agent_id: str, version: str | None) -> Reply:
     """One blueprint. The latest *published* version when ``version`` is omitted."""
     blueprint = context.store.get_blueprint(agent_id, version)
     if blueprint is None:
-        return not_found("blueprint", agent_id=agent_id, version=version)
+        return not_found("blueprint", field="agent_id", agent_id=agent_id, version=version)
     return success("blueprint", _document(blueprint))
 
 

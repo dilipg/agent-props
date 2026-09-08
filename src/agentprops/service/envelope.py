@@ -242,14 +242,21 @@ def field_pointer(*tokens: str | int) -> str:
     return pointer(*tokens)
 
 
-def not_found(what: str, **context: Any) -> ErrorEnvelope:
+def not_found(what: str, *, field: str, **context: Any) -> ErrorEnvelope:
     """The envelope for an id that names nothing. A *resolution* failure.
 
-    contracts section 1 covers it explicitly, and ground rule 3 is untouched:
-    this is not a policy verdict, it is "there is no such row". The pointer
-    addresses the argument that named the missing thing.
+    contracts section 1 covers it explicitly ("on a validation **or resolution**
+    failure"), and ruling R-42(a) ratifies ``ok: false`` for it: "the service
+    never gates" is about *policy* - it must not refuse to serve because
+    something looked wrong - not about pretending a nonexistent id resolved.
+
+    ``field`` is the argument the pointer addresses, and it is a **named
+    parameter** rather than the first key of ``context``. It was the first key
+    once, which happened to be right for both callers and would silently point
+    at ``/version`` the first time someone wrote
+    ``not_found("dataset", version=..., dataset_id=...)``. A pointer that
+    depends on kwarg insertion order is a pointer that is correct by luck.
     """
-    field = next(iter(context), "id")
     return failure(
         [
             boundary(

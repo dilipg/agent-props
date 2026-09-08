@@ -27,13 +27,20 @@ comprehension over the rows here would undo one of those and M4's
 byte-identical-output criterion is what would catch it - eventually, on a
 different backend.
 
-**``limit`` and ``offset`` are clamped, never refused.** ``DatasetQuery``
-carries no ``ge`` constraint (ruling R-04) and its docstring says "the service
-decides the defaults so the three storage adapters do not each invent their
-own". So this is where the defaults are, and a negative ``limit`` is clamped to
-zero rather than reported as an error: the service never gates, and a negative
-``LIMIT`` is a per-backend accident (SQLite reads ``LIMIT -1`` as "no limit",
-Postgres rejects it) rather than a portable answer.
+**``limit`` and ``offset`` are clamped at both ends, never refused.**
+``DatasetQuery`` carries no ``ge``/``le`` constraint (ruling R-04) and its
+docstring says "the service decides the defaults so the three storage adapters
+do not each invent their own". So this is where the defaults are.
+
+Both ends matter and only one of them was obvious. A *negative* ``limit`` is a
+per-backend accident (SQLite reads ``LIMIT -1`` as "no limit", Postgres rejects
+it), so it clamps to zero. A value *above* ``2**63 - 1`` is worse than an
+accident: it is outside every backend's integer column, pysqlite raises
+``OverflowError``, and the MCP SDK turns that into a protocol error rather than
+an envelope. `limits.py` carries the reproduction and the reasoning; the fix is
+one `clamp` call, and :func:`test_paginate_clamps_at_the_int64_boundary` tests
+**both** ends of the range rather than the one this module's first version
+happened to think of.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from agentprops.models import WARNING_DATASET_ARCHIVED, Dataset, DatasetQuery
 from agentprops.service.context import ServiceContext
 from agentprops.service.documents import read_document
 from agentprops.service.envelope import Reply, not_found, success, warning
+from agentprops.service.limits import clamp, storable
 from agentprops.storage import RecordNotFoundError
 from agentprops.validation import envelope as validation_envelope
 from agentprops.validation import validate_dataset
@@ -78,15 +86,20 @@ def find(context: ServiceContext, query: DatasetQuery) -> Reply:
 
 
 def paginate(query: DatasetQuery) -> DatasetQuery:
-    """``query`` with ``limit`` and ``offset`` defaulted and clamped.
+    """``query`` with ``limit`` and ``offset`` defaulted and clamped to ``[0, 2**63-1]``.
 
     Separate and public so the clamping has a test that does not need a store,
     and so M7's ``dataset_export`` gets the same defaults rather than its own.
+
+    The upper clamp is a *representability* bound rather than a policy cap - see
+    `limits.py`. A ``limit`` of ``2**63 - 1`` already means "every row there will
+    ever be", so a caller asking for more is asking for the same thing and
+    nothing is refused.
     """
     return query.model_copy(
         update={
-            "limit": max(DEFAULT_FIND_LIMIT if query.limit is None else query.limit, 0),
-            "offset": max(query.offset or 0, 0),
+            "limit": clamp(DEFAULT_FIND_LIMIT if query.limit is None else query.limit),
+            "offset": clamp(query.offset or 0),
         }
     )
 
@@ -95,10 +108,17 @@ def get(context: ServiceContext, dataset_id: str, version: int | None) -> Reply:
     """One dataset version in full. The latest when ``version`` is omitted.
 
     Archived datasets are returned, with a ``dataset_archived`` warning.
+
+    A ``version`` outside the range a row can hold is a **miss**, not a clamp: it
+    is not a large version, it is no version, and clamping an identifier would
+    answer a question the caller did not ask. Without the check the value reaches
+    pysqlite and raises ``OverflowError`` - see `limits.py`.
     """
+    if version is not None and not storable(version):
+        return not_found("dataset", field="dataset_id", dataset_id=dataset_id, version=version)
     dataset = context.store.get_dataset(dataset_id, version)
     if dataset is None:
-        return not_found("dataset", dataset_id=dataset_id, version=version)
+        return not_found("dataset", field="dataset_id", dataset_id=dataset_id, version=version)
     warnings = (
         [warning(WARNING_DATASET_ARCHIVED, dataset_id=str(dataset.id), version=dataset.version)]
         if dataset.archived
@@ -129,7 +149,7 @@ def _set_archived(context: ServiceContext, dataset_id: str, *, archived: bool) -
     try:
         summary = context.store.set_archived(dataset_id, archived)
     except RecordNotFoundError:
-        return not_found("dataset", dataset_id=dataset_id)
+        return not_found("dataset", field="dataset_id", dataset_id=dataset_id)
     return success("summary", summary.model_dump(mode="json"))
 
 
