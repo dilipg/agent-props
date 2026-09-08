@@ -42,7 +42,8 @@ uv run pytest              # tests
 uv run pytest -m integration --store sqlite   # integration tests, once a backend exists
 ```
 
-All four of the first four must pass before any commit.
+The first four must pass before any commit. The integration run is opt-in: it needs a storage
+backend, which arrives at M3.
 
 ## Repository layout
 

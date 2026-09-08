@@ -5,9 +5,8 @@ exercise. See docs/worked-example.md for what each fixture is and why.
 """
 
 import json
-from pathlib import Path
 
-FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
+from conftest import FIXTURES_DIR
 
 FIXTURE_FILES = [
     FIXTURES_DIR / "blueprints" / "location-onboarding-1.0.0.json",

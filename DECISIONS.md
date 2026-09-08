@@ -121,8 +121,7 @@ Alternative rejected: a minimal/sparse variant carrying only the fields section 
 names — rejected because the brief is explicit that it must carry every field the validator will
 require, not just the ones prose called out.
 
-## [M0] `client/python/`, `client/typescript/`, `web/`, `Dockerfile`, `docker-compose.yml`,
-## `alembic.ini` not created at M0
+## [M0] `client/python/`, `client/typescript/`, `web/`, `Dockerfile`, `docker-compose.yml` and `alembic.ini` not created at M0
 The repo layout diagram in `docs/build-handoff.md` section 3 shows the full phase-1 end state,
 including these paths. The M0 task brief's own "Scope: what M0 includes" section restricts the
 package-skeleton work to `src/agentprops/` and its subpackages, and explicitly says not to write a
