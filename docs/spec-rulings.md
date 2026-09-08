@@ -187,6 +187,15 @@ When `fault` is set, DS-004 **skips `output_schema` validation entirely** and re
 `output` to be absent or an object — reading "the fault shape" as "not the node's success
 shape". M2 adds one valid fault fixture to the corpus base and one DS-022 case.
 
+**Amendment, after M1's review.** "No additional properties" describes the *shape DS-022
+enforces*, not the model's config. `FaultSpec` uses `extra="allow"` so that an unknown key
+reaches the validator intact and DS-022 can report it with a rule id — under
+`extra="forbid"` the model would raise and DS-022 could never fire, which is the R-04
+failure mode again, and no DS-022 corpus case would be writable. Two consequences to carry
+forward: **DS-022 implements the unknown-key check itself** (M2), and the web app's live
+schema validation will not flag an unknown fault key (M9), because `$defs/FaultSpec` emits
+`additionalProperties: true`.
+
 **Owner question.** DS-004's "validated against the fault shape" sentence is the ambiguous
 one. If a faulted fixture is meant to carry a *structured error payload* with its own
 schema, say so and this ruling changes.
@@ -258,6 +267,72 @@ explicitly permits.
 **Cost if wrong.** Ids become non-reproducible across a re-expansion; no schema change.
 
 ---
+
+### R-23 — validate the raw document, then parse it
+
+Found by M1's review, which showed `seed: int` swallowing DS-020 — DS-020's entire check is
+"`seed` is an integer", so with `seed: int` on the model Pydantic owns the check and no rule
+id can ever be emitted for a non-integer seed.
+
+The underlying question the documents never answer: does the validator operate on a raw
+document or on a parsed model?
+
+**Ruling.** On the **raw document** — the `dict` that comes off `json.loads`. Model
+construction happens only *after* validation passes. Three reasons, in order of force:
+
+1. Every error carries an RFC 6901 JSON pointer "into the submitted document"
+   (`contracts.md` section 1). A pointer is meaningful against the submitted document, not
+   against a model instance that may have coerced, defaulted or dropped fields.
+2. It is what makes R-04's ten rule ids reachable at all.
+3. Ground rule 7 — "validation is strict at write time and absent at read time" — implies
+   the read path parses documents already known good. Validating first and parsing second
+   is exactly that ordering.
+
+So `validate_blueprint(doc: dict, ...)` and `validate_dataset(doc: dict, resolver)` take
+mappings, not models. `service/` validates, then constructs the model, then stores.
+
+**R-04 still stands** and is not made redundant by this. It is defence in depth: M1's
+round-trip test parses fixtures directly, `dataset_validate(dataset: object)` may be handed
+an already-parsed object, and any future path that parses before validating would otherwise
+swallow rule ids silently.
+
+**Consequently** `seed` stays typed `int` on the model, DS-020 is implemented against the
+raw document, and it gets a **real corpus case** (`{"op": "replace", "path": "/seed",
+"value": "not-a-number"}`) rather than the named coverage exemption the review offered as an
+alternative. Same for BP-008's "is an integer" half.
+
+**One hardening required.** Pydantic's lax coercion means `seed: "42"` parses and is
+silently rewritten to `42`, and `seed: true` parses as `1` — a document that parses but
+fails the R-08 round-trip criterion, which is worse than either accepting or rejecting it
+cleanly. Set `strict=True` on the fields where silent coercion changes the value: `seed`,
+`version`, `max_iterations`, `iteration`, `seq`, `after_ms`, `latency_hint_ms` and the
+boolean fields. Coercion must never be the reason a stored document stops round-tripping.
+
+**Cost if wrong.** If validation must instead take models, the rule signatures change and
+JSON pointers have to be reconstructed from field paths — the expensive direction, which is
+why this is ruled now rather than at M2.
+
+### R-24 — the model is the timestamp canonicaliser
+
+Also from M1's review. `Provenance.created_at` accepts four spellings of the same instant
+and only the one the golden fixtures happen to use survives the R-08 round-trip:
+`2026-09-08T10:14:22Z` round-trips; `…22.500Z` becomes `…22.500000Z`; `…22+00:00` becomes
+`…22Z`; `…22.000Z` becomes `…22Z`. All four are valid ISO-8601 and all four parse. Nothing
+fails today because both fixtures use the surviving spelling.
+
+**Ruling.** The model **is** the canonicaliser. "Round-trips without loss" means the model's
+canonical output, not the author's original bytes. Pin it with a parametrised test over
+several timestamp spellings asserting that each parses and that the canonical form is
+stable, so the contract is stated rather than derived from a failure later.
+
+**Why now.** This lands at M5 and M7. At M5 an LLM fills the provenance section and will
+plausibly emit fractional seconds or `+00:00`; the document validates and stores; then
+`dataset_export` emits different bytes than were submitted — which is precisely the
+byte-stability M7's "exported from SQLite, imported into Postgres" gate depends on.
+Discovering it with three backends in play is expensive; deciding it now is nearly free.
+
+**Cost if wrong.** If byte-preservation of the author's original spelling is ever required,
+the timestamp fields become `str` and comparison moves into the catalogue.
 
 ## Rulings that bind M2 (the validator)
 
