@@ -329,7 +329,7 @@ Warning codes are an open vocabulary (ruling R-22), so a tool may add one. M4 ad
 
 ### 3.5 Boundary codes
 
-**Not rules, and never registered as ones.** Three failures a user can cause happen before or after a document exists, so no `BP-*`/`DS-*` rule can own them; two more are resolution rather than validation, which section 1's envelope covers explicitly ("on a validation **or resolution** failure"). They appear in `rule`, carry a pointer at the offending *argument*, and are `error` severity. Added at M4; `service/envelope.py` is the implementation and `tests/unit/test_service_envelope.py` asserts they are disjoint from the registry and from this catalogue.
+**Not rules, and never registered as ones.** Three failures a user can cause happen before or after a document exists, so no `BP-*`/`DS-*` rule can own them; two more are resolution rather than validation, which section 1's envelope covers explicitly ("on a validation **or resolution** failure"); the sixth is a deterministic id space that has no free value left. They appear in `rule`, carry a pointer at the offending *argument*, and are `error` severity. Added at M4, extended at M5 by ruling R-49(b); `service/envelope.py` is the implementation and `tests/unit/test_service_envelope.py` asserts they are disjoint from the registry and from this catalogue.
 
 | Code | Meaning |
 |---|---|
@@ -338,6 +338,7 @@ Warning codes are an open vocabulary (ruling R-22), so a tool may add one. M4 ad
 | AP-003 | The document satisfied every catalogue rule and still would not construct as a model — the residue of rulings R-04 and R-23, since no rule owns an unknown key or a list where an object belongs |
 | AP-004 | No record with that id, or no such version |
 | AP-005 | The store refused a write through one of its programming-error guards. Reaching this means a rule that should have caught the condition did not |
+| AP-006 | A deterministic id space is exhausted: every id derivable from the given arguments already names a record. The arguments are well formed and simply cannot be served, so one of them has to change (ruling R-49(b): reporting this as `AP-001` said "bad argument" when the truth is "this seed's id space is full") |
 
 ## 4. MCP tool contracts
 
@@ -440,7 +441,7 @@ class Store(Protocol):
     # skeletons: partial fill state
     def put_skeleton(self, sk: Skeleton) -> Skeleton: ...
     def get_skeleton(self, skeleton_id: str) -> Skeleton | None: ...
-    def mark_skeleton_submitted(self, skeleton_id: str, dataset_id: str) -> None: ...
+    def mark_skeleton_submitted(self, skeleton_id: str, dataset_id: str) -> bool: ...  # CAS
 
     # runs
     def put_run(self, run: Run) -> Run: ...
@@ -456,6 +457,8 @@ class Store(Protocol):
 **There is no `delete_*` method on the Protocol.** That is deliberate and enforced by a test that asserts the Protocol has no method whose name starts with `delete`.
 
 `upsert_step` is idempotent on `(run_id, node_id, iteration)`. Calling it twice with the same key is a no-op that returns the existing record.
+
+`mark_skeleton_submitted` is a **compare-and-set** (ruling R-47): it claims the skeleton only if `submitted_as` is currently null and returns whether this call is the one that claimed it. `dataset_submit` orders itself validate -> CAS -> `SK-005` on loss -> `put_dataset` on win, which is what makes "a skeleton becomes exactly one dataset" an invariant the store holds rather than one the catalogue only asserts. It replaced a no-op replay tolerance, under which two concurrent submits both passed SK-005 and the loser silently received a success envelope for a second dataset version. Ruling R-48 deliberately leaves `put_skeleton` last-write-wins: a lost fill is visible in the next response's `remaining` and self-correcting; a lost submit is silent.
 
 `set_step_actual` is the other half, added by ruling R-33: `upsert_step` records **what was served** and its repeat must stay a literal no-op, so it can never also merge in an `actual`. `set_step_actual` records **what the agent did**, write-once per key, and fails if no step record exists — an actual cannot be reported for a step that was never served. Re-recording an identical actual is a no-op success; a differing one is refused. It writes to a run, never to a dataset, so ground rule 1 is untouched.
 

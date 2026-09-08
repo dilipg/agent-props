@@ -64,6 +64,7 @@ from agentprops.validation.registry import (
 from agentprops.validation.resolver import NullResolver, Resolver
 from agentprops.validation.skeleton import (
     FILL_RULES,
+    SK_SKELETON_STATE,
     SUBMIT_RULES,
     SkeletonContext,
 )
@@ -71,6 +72,7 @@ from agentprops.validation.skeleton import (
 __all__ = [
     "FILL_RULES",
     "RULE_REGISTRY",
+    "SK_SKELETON_STATE",
     "SUBMIT_RULES",
     "TARGETS",
     "TARGET_BLUEPRINT",
@@ -203,6 +205,11 @@ def _first_reporting(ctx: SkeletonContext, rules: Sequence[str]) -> ErrorEnvelop
     functions directly, so that the registry stays the single index of what a
     rule id means - which is what makes the drift test's guarantee worth
     anything.
+
+    Every finding in the returned envelope therefore comes from **one** rule,
+    which is what lets a caller read ``errors[0].rule`` as "the rule that
+    fired" rather than having to scan (see
+    `service/skeletons.py::_load`).
     """
     for rule in rules:
         findings = RULE_REGISTRY[rule].check(ctx)

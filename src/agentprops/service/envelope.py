@@ -44,6 +44,12 @@ nothing, and a store that refused a write. contracts section 1 covers the first
 explicitly - the envelope is what a tool returns "on a validation **or
 resolution** failure".
 
+A sixth, added at M5 by ruling R-49(b), covers a deterministic **id space** with
+no free value left. It is the counterpart to :data:`AP_ARGUMENT` rather than a
+variant of it: ``AP-001`` means an argument is malformed, and this means every
+argument is well formed and the request still cannot be served. Collapsing the
+two would tell a caller to fix a value that is already correct.
+
 ``AP-*`` ids are **not catalogue rules** and must never be registered as ones.
 ``tests/unit/test_service_envelope.py::test_boundary_codes_are_not_catalogue_rules``
 asserts they are disjoint from ``RULE_REGISTRY`` and from the documented
@@ -71,6 +77,7 @@ from agentprops.validation.pointers import pointer, section_for_pointer
 __all__ = [
     "AP_ARGUMENT",
     "AP_DOCUMENT_SHAPE",
+    "AP_ID_SPACE_EXHAUSTED",
     "AP_MALFORMED_JSON",
     "AP_NOT_FOUND",
     "AP_STORE_REFUSED",
@@ -106,8 +113,21 @@ AP_NOT_FOUND: Final = "AP-004"
 #: Reaching this means a rule that should have caught the condition did not.
 AP_STORE_REFUSED: Final = "AP-005"
 
+#: A deterministic id space is exhausted: every id derivable from the given
+#: arguments already names a record (ruling R-49(b)). Distinct from
+#: :data:`AP_ARGUMENT` on purpose - the arguments are well formed, and telling a
+#: caller to fix a value that is already correct is worse than saying nothing.
+AP_ID_SPACE_EXHAUSTED: Final = "AP-006"
+
 BOUNDARY_CODES: Final[frozenset[str]] = frozenset(
-    {AP_ARGUMENT, AP_MALFORMED_JSON, AP_DOCUMENT_SHAPE, AP_NOT_FOUND, AP_STORE_REFUSED}
+    {
+        AP_ARGUMENT,
+        AP_MALFORMED_JSON,
+        AP_DOCUMENT_SHAPE,
+        AP_NOT_FOUND,
+        AP_STORE_REFUSED,
+        AP_ID_SPACE_EXHAUSTED,
+    }
 )
 
 #: What every service function returns. `server/` dumps it and returns the dict.

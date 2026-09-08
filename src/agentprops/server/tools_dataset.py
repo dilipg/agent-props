@@ -159,8 +159,9 @@ def dataset_fill_part(skeleton_id: TextArg, section: TextArg, content: ObjectArg
     `section` is one of the manifest's ids, and may not be filled before every
     earlier one is (SK-002). `content` is a fragment of the dataset document: an
     object whose keys are the section's own top-level fields, as its manifest
-    entry says. Re-filling an already-filled section is allowed and replaces it,
-    which is how a rejected submit is repaired one part at a time.
+    entry says, and it must carry at least one of them. Re-filling an
+    already-filled section is allowed and replaces it, which is how a rejected
+    submit is repaired one part at a time.
     """
     args = ArgReader()
     wanted = args.text("skeleton_id", skeleton_id)

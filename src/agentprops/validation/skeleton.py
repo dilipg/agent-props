@@ -66,6 +66,7 @@ from agentprops.validation.pointers import (
 __all__ = [
     "FILL_RULES",
     "NODE_SECTIONS",
+    "SK_SKELETON_STATE",
     "SUBMIT_RULES",
     "SkeletonContext",
     "sk_001",
@@ -74,6 +75,13 @@ __all__ = [
     "sk_004",
     "sk_005",
 ]
+
+#: The rule that owns "does this skeleton exist and may it still be written
+#: to". Named because `service/skeletons.py` has to distinguish *its* findings
+#: from SK-004's: SK-005 means stop, while SK-004 means report and keep
+#: reporting. A string literal at that call site would be the one place a rule
+#: id is spelled outside this package.
+SK_SKELETON_STATE: Final = "SK-005"
 
 #: The two sections whose content is node fixtures, and therefore the two
 #: SK-003 applies to. ``nodes.core`` owns ``/nodes``; ``nodes.branches`` owns

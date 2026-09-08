@@ -48,15 +48,25 @@ Rule precedence, in one place
 -----------------------------
 
 Ruling R-45: **SK-004 owns an unfilled section; the ``DS-*`` provenance rules
-own a filled-but-bad one.** SK-004's precedence is total over section contents,
-so :func:`submit` runs the ``SK-*`` submit rules first and returns their
-findings *without* running the dataset catalogue. Otherwise submitting an empty
-skeleton would report most of the catalogue, and the one finding that says what
-to do ("you never filled provenance") would be buried in it.
+own a filled-but-bad one.** Otherwise submitting an empty skeleton would report
+most of the catalogue, and the one finding that says what to do ("you never
+filled provenance") would be buried in it.
+
+The suppression is **scoped to the sections that are actually unfilled**, which
+is narrower than the first implementation. R-45 grants that "no ``DS-*`` rule
+scoped to those sections fires at all" - *those* sections, not every section. So
+a submit with four of five sections filled and a blank ``provenance.title``
+reports SK-004 for the unfilled one **and** DS-025 for the filled one, in one
+response, instead of costing the author a whole round trip to discover the
+second problem. :func:`_scoped_out` is the filter, and SK-002 is what makes it
+sound: the filled sections are always a *prefix* of the manifest, so a finding
+scoped to a filled section can never be an artefact of a later one being
+absent.
 
 The order inside :func:`submit` is therefore: SK-005, SK-004, then the whole
 ``DS-*`` catalogue against the assembled document (ruling R-23's validate, then
-parse, then store).
+parse, then store), with the CAS from ruling R-47 between the parse and the
+write.
 """
 
 from __future__ import annotations
@@ -72,6 +82,7 @@ from agentprops.service.context import ServiceContext
 from agentprops.service.documents import parse
 from agentprops.service.envelope import (
     AP_ARGUMENT,
+    AP_ID_SPACE_EXHAUSTED,
     AP_STORE_REFUSED,
     Reply,
     blocking,
@@ -83,7 +94,13 @@ from agentprops.service.envelope import (
     warnings_from,
 )
 from agentprops.storage import RecordNotFoundError, StoreError
-from agentprops.validation import SkeletonContext, validate_dataset, validate_fill, validate_submit
+from agentprops.validation import (
+    SK_SKELETON_STATE,
+    SkeletonContext,
+    validate_dataset,
+    validate_fill,
+    validate_submit,
+)
 from agentprops.validation.context import BlueprintView
 from agentprops.validation.pointers import (
     SECTION_ENTITIES,
@@ -276,8 +293,8 @@ def instructions_for(manifest: Sequence[Section]) -> str:
         f"and is how you repair a rejection: an error carries the section to re-fill, so fix that "
         f"part rather than regenerating everything. A re-fill replaces the whole section.\n\n"
         f"content is a fragment of the dataset document - an object whose keys are the section's "
-        f"own top-level fields. {shapes}. Each section's description says what its fields must "
-        f"carry, and pointers in an error address your content directly.\n\n"
+        f"own top-level fields, at least one of them. {shapes}. Each section's description says "
+        f"what its fields must carry, and pointers in an error address your content directly.\n\n"
         f"blueprint, seed and labels are fixed by this skeleton and are not fillable sections. "
         f"Call label_vocabulary(agent_id, version) before dataset_skeleton if you are unsure "
         f"which label values a blueprint declares; a label outside its vocabulary is not "
@@ -369,10 +386,13 @@ def _pool_nodes(view: BlueprintView) -> list[str]:
 def _ordered(document: Mapping[str, Any]) -> dict[str, Any]:
     """``document`` in :data:`DATASET_FIELD_ORDER`, then anything unexpected.
 
-    The tail is not dead code: :func:`assemble` runs over caller-supplied parts,
-    and a part carrying an unowned field is an ``AP-001`` at fill time - but
-    ordering must not be the thing that silently drops a value, because a value
-    dropped here would be a value no rule could report.
+    The tail is **unreachable through the pipeline** and is there anyway. Every
+    part comes from :func:`fill_part`, which rejects an unowned field with
+    ``AP-001``, so no assembled document should carry a field outside
+    :data:`DATASET_FIELD_ORDER`. It is written this way because the failure mode
+    of the alternative is silent: a comprehension over a fixed field list would
+    *drop* an unexpected value, and a value dropped by a key-ordering helper is
+    a value no rule could ever report. Defence in depth, not a case.
     """
     known = {field: document[field] for field in DATASET_FIELD_ORDER if field in document}
     known.update({field: value for field, value in document.items() if field not in known})
@@ -403,7 +423,9 @@ def skeleton(
     resumed, skeleton_id = _claim(context, agent_id, version, labels, seed)
     if skeleton_id is None:
         return failure([_generations_exhausted(agent_id, version, seed)])
-    stored = resumed if resumed is not None else _write(context, skeleton_id, view, labels, seed)
+    stored, refused = (resumed, []) if resumed else _write(context, skeleton_id, view, labels, seed)
+    if stored is None:
+        return failure(refused)
     return success(
         "skeleton",
         {
@@ -421,9 +443,23 @@ def _write(
     view: BlueprintView,
     labels: Mapping[str, str],
     seed: int,
-) -> Skeleton:
-    """Persist a fresh skeleton. ``created_at`` comes from the ``Clock`` port."""
-    return context.store.put_skeleton(
+) -> tuple[Skeleton | None, list[RuleError]]:
+    """Persist a fresh skeleton. ``created_at`` comes from the ``Clock`` port.
+
+    Routed through :func:`_put` rather than calling ``put_skeleton`` directly,
+    which is the second half of ruling R-50: the first skeleton write gets the
+    same error translation the re-fill write already had. It bypassed the
+    helper, and that was where an out-of-range ``seed`` escaped as an
+    ``OverflowError``.
+
+    Worth being precise about what this half does and does not fix. ``_put``
+    catches ``StoreError``, and an ``OverflowError`` from the driver is not one -
+    so the load-bearing fix is the range check in
+    :meth:`~agentprops.server.args.ArgReader.integer`, and this is consistency
+    rather than a second line of defence.
+    """
+    return _put(
+        context,
         Skeleton(
             id=skeleton_id,
             agent_id=str(view.agent_id),
@@ -432,7 +468,7 @@ def _write(
             seed=seed,
             manifest=manifest_for(view),
             created_at=context.clock.now(),
-        )
+        ),
     )
 
 
@@ -505,17 +541,21 @@ def _dataset_salt(skeleton_id: UUID | str) -> str:
 
 
 def _generations_exhausted(agent_id: str, version: str, seed: int) -> RuleError:
-    """No free skeleton id left for this request. ``AP-001``, pointed at ``seed``.
+    """No free skeleton id left for this request. ``AP-006``, pointed at ``seed``.
 
-    The honest code for "your arguments cannot be served": every id this tuple
-    can derive names a skeleton that has already become a dataset, and the fix
-    is to vary an argument - the ``seed`` being the one that exists for exactly
-    this purpose. A sixth ``AP-*`` code would be a better fit and would mean
-    amending contracts section 3.5, which M5 was not asked to do; recorded in
-    `DECISIONS.md` rather than done quietly.
+    Every id this ``(agent_id, version, labels, seed)`` can derive names a
+    skeleton that has already become a dataset, so the arguments are well formed
+    and simply cannot be served; the fix is to vary one, and ``seed`` is the one
+    that exists for the purpose.
+
+    Ruling R-49(b) gave this its own code. It was ``AP-001`` in the first
+    implementation, which says "bad argument" when nothing about the argument is
+    bad - and that is the distinction that makes both codes useful: ``AP-001``
+    means fix this value, ``AP-006`` means this value is correct and its id
+    space is full.
     """
     return boundary(
-        AP_ARGUMENT,
+        AP_ID_SPACE_EXHAUSTED,
         field_pointer("seed"),
         f"all {SKELETON_GENERATIONS} skeleton ids derivable from this "
         f"(agent_id, version, labels, seed) name skeletons that were already submitted; "
@@ -536,7 +576,10 @@ def fill_part(
     Three checks, in this order, and each one removes the ground the next stands
     on: the ``SK-*`` fill rules (SK-005, SK-001, SK-002, SK-003, stopping at the
     first that reports), then the local schema-level check on the content, then
-    the write.
+    the write. **Any** fill-phase finding stops the call - unlike
+    :func:`submit`, where SK-004 is reported alongside the catalogue's findings
+    rather than instead of them, because a fill is a single action while a
+    submit is a verdict on a whole document.
 
     **A re-fill replaces the section.** PRD 6 flow B repairs "one part", and the
     part is the section; merging a partial re-fill into the stored content would
@@ -554,7 +597,7 @@ def fill_part(
     adapters pay for.
     """
     stored, findings = _load(context, skeleton_id, section=section, content=content)
-    if stored is None:
+    if stored is None or findings:
         return failure(findings)
     shape = _content_findings(section, content)
     if shape:
@@ -591,8 +634,28 @@ def _content_findings(section: str, content: Mapping[str, Any]) -> list[RuleErro
     An unowned key is ``AP-001`` rather than a rule: no ``SK-*`` rule covers
     the shape of ``content``, and section 3.5's family is for exactly the
     failures a user can cause that no catalogue rule describes.
+
+    **``content`` must carry at least one owned field.** An empty object marked
+    the section filled while contributing nothing, and the submit then said
+    nothing about it either: with ``entities`` and ``nodes.core`` both filled as
+    ``{}``, a submit reported eight DS-002 findings scoped to ``nodes.core`` and
+    not one word about the empty ``entities``. This does not touch ruling R-45's
+    reachability requirement, which is about an individually absent *field* -
+    ``{"provenance": {...}}`` without ``narrative`` is still accepted here and
+    still reported by DS-021 at submit.
     """
     owned = SECTION_FIELDS[section]
+    if not any(field in content for field in owned):
+        return [
+            boundary(
+                AP_ARGUMENT,
+                field_pointer("content"),
+                f"content for the {section!r} section must carry at least one of {list(owned)}.",
+                argument="content",
+                section=section,
+                owned=list(owned),
+            )
+        ]
     findings = [
         boundary(
             AP_ARGUMENT,
@@ -629,13 +692,12 @@ def _type_name(field: str) -> str:
 def submit(context: ServiceContext, skeleton_id: str) -> Reply:
     """Assemble the filled sections into a dataset, validate it all, and store it.
 
-    The one dataset write path in the service. Six steps, and the order is
-    ruling R-23's with ruling R-45's precedence in front of it:
+    The one dataset write path in the service. Seven steps:
 
     1. **SK-005 and SK-004** (:func:`validate_submit`). An unknown or
-       already-submitted skeleton, or any unfilled required section, is reported
-       here and the catalogue never runs - R-45's "SK-004's precedence is total
-       over section contents".
+       already-submitted skeleton stops here; an unfilled required section is
+       reported here *and* joined by whatever the catalogue finds in the
+       sections that **are** filled - see :func:`_scoped_out` and ruling R-45.
     2. **Assemble** the raw document from the parts plus the three fields the
        service owns.
     3. **Validate** the raw document against every ``DS-*`` rule (R-23: the raw
@@ -647,12 +709,19 @@ def submit(context: ServiceContext, skeleton_id: str) -> Reply:
     5. **Stamp** ``validated_at`` from the ``Clock`` port (ruling R-09). After
        parsing, so the raw document stays raw JSON and the timestamp is visibly
        the service's rather than authored content.
-    6. **Store**, then mark the skeleton submitted.
+    6. **Claim the skeleton** - ruling R-47's compare-and-set. It succeeds only
+       if ``submitted_as`` is still null, so of two concurrent submits exactly
+       one proceeds and the loser gets SK-005, the same rule id a sequential
+       second submit gets. The dataset id is available before the write because
+       R-10 derives it from ``(seed, salt)``.
+    7. **Store** the dataset.
 
-    Step 6 is in that order on purpose. A crash between the two leaves a stored
-    dataset and an unmarked skeleton, which a caller can see and recover from;
-    the reverse leaves a skeleton SK-005 has closed and no dataset, and the
-    filled work is unreachable.
+    Steps 6 and 7 are in **this** order, which reverses what the first
+    implementation did and the ``DECISIONS.md`` entry that argued for it (that
+    entry is retracted in place). Claiming first is what closes the concurrent
+    hole; the residue it leaves is "skeleton claimed, no dataset" after a crash
+    between the two, which is a visible dead skeleton rather than a silent
+    duplicate dataset version.
 
     Warning-severity findings (DS-007, DS-027, DS-032) do not block: they ride
     back as ``warnings`` on the success envelope (ruling R-13).
@@ -663,16 +732,43 @@ def submit(context: ServiceContext, skeleton_id: str) -> Reply:
 
     dataset_id = Seeded(stored.seed).uuid(_dataset_salt(stored.id))
     document = assemble(stored, dataset_id)
+    unfilled = _scoped_out(stored)
 
-    findings = validate_dataset(document, context.resolver).errors
-    if blocking(findings):
-        return failure(findings)
+    findings = [
+        finding
+        for finding in validate_dataset(document, context.resolver).errors
+        if finding.section not in unfilled
+    ]
+    if gate or blocking(findings):
+        return failure(gate + findings)
     model, shape_findings = parse(Dataset, document, pool_nodes=_pool_node_ids(context, stored))
     if model is None:
         return failure(findings + shape_findings)
 
     stamped = model.model_copy(update={"validated_at": context.clock.now()})
     return _store(context, stored, stamped, findings)
+
+
+def _scoped_out(stored: Skeleton) -> frozenset[str]:
+    """The sections whose ``DS-*`` findings SK-004 suppresses: the unfilled ones.
+
+    Ruling R-45, read exactly: SK-004 reports once per unfilled section "and no
+    ``DS-*`` rule scoped to **those** sections fires at all". An unfilled section
+    contributes no document, so a rule reading it has nothing to have an opinion
+    about - reporting DS-002 nine times for a ``nodes.core`` that was never
+    filled is noise on top of the one finding that says what to do.
+
+    A *filled* section is different, and this is where the first implementation
+    was too broad: it returned before the catalogue ran at all, so a blank
+    ``provenance.title`` alongside one unfilled section cost the author an extra
+    round trip to discover.
+
+    Safe because of SK-002. The filled sections are always a prefix of the
+    manifest, so a finding scoped to a filled section cannot be an artefact of a
+    later section being absent - there is no reachable state where, say,
+    ``nodes.core`` is filled and ``entities`` is not.
+    """
+    return frozenset(section.id for section in stored.manifest if section.id not in stored.parts)
 
 
 def _pool_node_ids(context: ServiceContext, stored: Skeleton) -> frozenset[str]:
@@ -713,21 +809,42 @@ def assemble(stored: Skeleton, dataset_id: UUID) -> dict[str, Any]:
 def _store(
     context: ServiceContext, stored: Skeleton, model: Dataset, findings: list[RuleError]
 ) -> Reply:
-    """Steps 6 and 7: write the dataset, then record what the skeleton became.
+    """Steps 6 and 7: claim the skeleton, then write the dataset.
 
-    Both store guards become findings. ``mark_skeleton_submitted`` refuses a
-    *different* dataset id over an existing one, which cannot happen through
-    this path - the id is derived from the skeleton, so a replay derives the
-    same one - so reaching that branch means a defect, which is what
-    ``AP-005`` says.
+    The claim is ruling R-47's compare-and-set and it comes **first**, which is
+    what makes "a skeleton becomes exactly one dataset" an invariant the store
+    holds. Losing it is not an error condition - it is the honest answer that
+    another caller got there first - so it becomes the same **SK-005** a
+    sequential second submit gets, through the same rule, rather than a boundary
+    code the caller would have to learn.
+
+    Both store guards still become findings. ``RecordNotFoundError`` here means
+    the skeleton vanished between :func:`_load` and this call, and a
+    ``StoreError`` means a guard fired that a rule should have caught first,
+    which is what ``AP-005`` says.
     """
     try:
+        claimed = context.store.mark_skeleton_submitted(str(stored.id), str(model.id))
+        if not claimed:
+            return failure(_lost_the_claim(context, stored))
         written = context.store.put_dataset(model)
-        context.store.mark_skeleton_submitted(str(stored.id), str(written.id))
     except (RecordNotFoundError, StoreError) as exc:
         return failure([boundary(AP_STORE_REFUSED, field_pointer("skeleton_id"), str(exc))])
     document: dict[str, Any] = written.model_dump(mode="json", exclude_unset=True)
     return success("dataset", document, warnings_from(findings))
+
+
+def _lost_the_claim(context: ServiceContext, stored: Skeleton) -> list[RuleError]:
+    """SK-005 for the loser of a concurrent submit, from the rule itself.
+
+    Re-read rather than reconstructed, so the finding names the dataset id the
+    *winner* claimed. Going through ``validate_submit`` rather than building a
+    ``RuleError`` here keeps the rule the single author of its own message and
+    context - the alternative is two places that have to agree about what SK-005
+    says.
+    """
+    current = context.store.get_skeleton(str(stored.id))
+    return validate_submit(_context_for(str(stored.id), current)).errors
 
 
 def _put(context: ServiceContext, model: Skeleton) -> tuple[Skeleton | None, list[RuleError]]:
@@ -751,19 +868,24 @@ def _load(
     content: Mapping[str, Any] | None = None,
     submitting: bool = False,
 ) -> tuple[Skeleton | None, list[RuleError]]:
-    """The skeleton this request may act on, or the ``SK-*`` findings that say why not.
+    """The skeleton this request may act on, plus whatever the phase rules reported.
 
-    One decision site for "does this skeleton exist, and may it be written to".
+    One decision site for "does this skeleton exist, and may it still be written
+    to". ``None`` means **stop**: there is nothing to act on and the findings say
+    why. A skeleton *with* findings means the request cannot be completed but the
+    state is still readable, which is the SK-004 case - ruling R-45 suppresses
+    the ``DS-*`` findings scoped to the unfilled sections and reports the rest,
+    so :func:`submit` needs both halves.
+
+    Three returns, one meaning each, and no ``assert`` narrowing a type - an
+    ``assert`` would be stripped under ``-O`` and become an ``AttributeError``
+    in the one situation it claimed to rule out.
+
+    Reading ``findings[0].rule`` is sound rather than a shortcut:
     :data:`~agentprops.validation.skeleton.FILL_RULES` and
-    :data:`~agentprops.validation.skeleton.SUBMIT_RULES` both begin with SK-005,
-    so a ``None`` skeleton always comes back with a finding and the caller's
-    ``if stored is None`` needs no second check for an empty-findings case that
-    cannot happen.
-
-    This is the shape :func:`~agentprops.service.documents.parse` established at
-    M4, and the reason there is no ``assert`` here: an ``assert`` narrowing the
-    type would be stripped under ``-O`` and become an ``AttributeError`` in the
-    one situation it claimed to rule out.
+    :data:`~agentprops.validation.skeleton.SUBMIT_RULES` are run by
+    ``_first_reporting``, which **stops at the first rule that reports**, so
+    every finding in one envelope comes from one rule.
 
     ``submitting`` selects the phase. A flag rather than two functions because
     everything either phase does with the answer is identical, and the two rule
@@ -772,9 +894,11 @@ def _load(
     stored = context.store.get_skeleton(skeleton_id)
     ctx = _context_for(skeleton_id, stored, section=section, content=content)
     findings = (validate_submit(ctx) if submitting else validate_fill(ctx)).errors
-    if stored is None or findings:
+    if stored is None:
         return None, findings
-    return stored, []
+    if findings and findings[0].rule == SK_SKELETON_STATE:
+        return None, findings
+    return stored, findings
 
 
 def _context_for(
