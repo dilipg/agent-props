@@ -63,7 +63,11 @@ ignore = []
 python_version = "3.12"
 strict = true
 mypy_path = "src"
-files = ["src"]
+# `tests/` is checked too. The suites now carry real load - the R-04, layering
+# and no-delete guards are AST walkers whose whole job is to be precise about
+# node types - and typing them cost three fixes at M3, all of them latent bugs
+# rather than annotation noise.
+files = ["src", "tests"]
 warn_unused_configs = true
 show_error_codes = true
 

@@ -22,7 +22,14 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
-from agentprops.schema_export import SCHEMA_DIALECT, SCHEMAS, build_schema, render, schemas_dir
+from agentprops.schema_export import (
+    SCHEMA_DIALECT,
+    SCHEMAS,
+    build_schema,
+    render,
+    repo_root,
+    schemas_dir,
+)
 from conftest import FIXTURES_DIR
 
 BLUEPRINT_FIXTURES = sorted((FIXTURES_DIR / "blueprints").glob("*.json"))
@@ -79,6 +86,24 @@ def test_dataset_schema_validates_fixture(path: Path) -> None:
     validator = Draft202012Validator(committed("dataset.schema.json"))
     document = load(path)
     assert validator.is_valid(document), f"{path.name}:\n{report(validator, document)}"
+
+
+def test_the_repo_root_guard_fires_outside_a_checkout(tmp_path: Path) -> None:
+    """A wrong invocation is loud, not quiet.
+
+    ``repo_root()`` is three parents up from this module, which is only the
+    repository in a source checkout. Installed from a wheel it resolves to
+    whatever contains `site-packages/agentprops`, and ``write_schemas`` would
+    have created a `schemas/` directory there and reported success. The guard
+    is a sibling `pyproject.toml`.
+    """
+    assert (repo_root() / "pyproject.toml").is_file()
+
+    fake = tmp_path / "site-packages" / "agentprops" / "schema_export.py"
+    fake.parent.mkdir(parents=True)
+    fake.touch()
+    with pytest.raises(RuntimeError, match="repository root"):
+        repo_root(fake)
 
 
 def test_schema_carries_shape_not_policy() -> None:

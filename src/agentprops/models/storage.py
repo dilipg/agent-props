@@ -7,8 +7,15 @@ against, one aggregate and live with it - ``BlueprintSummary`` in
 ``RunQuery`` and ``RunSummary`` in `run.py`, ``Skeleton`` in `skeleton.py`.
 
 :class:`StoreHealth` is the one that describes the *store* rather than anything
-in the domain, so it lives here. The ``Store`` Protocol itself is M3's, in
-`storage/base.py`; only its data shapes are M1's.
+in the domain, so it lives here.
+
+**This module holds no Protocol.** The filename sits next to a `storage/`
+package and implies otherwise, so to be unambiguous: the ``Store`` Protocol -
+contracts section 6's fifteen methods, and the two programming-error guards an
+adapter may raise - is :class:`agentprops.storage.base.Store`, in
+`src/agentprops/storage/base.py`. This module holds only the data shape that
+Protocol's ``health()`` returns. Nothing here does I/O, and
+`tests/unit/test_layering.py` asserts that `models/` never imports `storage/`.
 """
 
 from pydantic import StrictBool, StrictInt

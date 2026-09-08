@@ -29,7 +29,15 @@ from pydantic import BaseModel
 
 from agentprops.models import Blueprint, Dataset
 
-__all__ = ["SCHEMAS", "SCHEMA_DIALECT", "build_schema", "render", "schemas_dir", "write_schemas"]
+__all__ = [
+    "SCHEMAS",
+    "SCHEMA_DIALECT",
+    "build_schema",
+    "render",
+    "repo_root",
+    "schemas_dir",
+    "write_schemas",
+]
 
 SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 
@@ -42,14 +50,38 @@ SCHEMAS: dict[str, type[BaseModel]] = {
 }
 
 
-def schemas_dir() -> Path:
-    """The repository's `schemas/` directory.
+def repo_root(module_file: Path | None = None) -> Path:
+    """The repository root, or a loud error.
 
     Resolved from this file rather than the working directory, so the command
-    works from anywhere. ``src/agentprops/schema_export.py`` is three parents
-    below the repository root.
+    works from anywhere: ``src/agentprops/schema_export.py`` is three parents
+    below the root.
+
+    The guard exists because that arithmetic is only true in a source checkout.
+    Installed from a wheel, ``parents[2]`` points at whatever contains
+    `site-packages/agentprops` - and :func:`write_schemas` would then
+    ``mkdir(parents=True)`` and write two files into a virtualenv, silently,
+    reporting success. Asserting a sibling `pyproject.toml` turns that into a
+    message naming the path it tried.
+
+    ``module_file`` exists so the guard itself is testable: the failing case
+    cannot be reached by calling this from inside the repository, which is the
+    only place the tests run.
     """
-    return Path(__file__).resolve().parents[2] / "schemas"
+    origin = Path(module_file) if module_file is not None else Path(__file__)
+    root = origin.resolve().parents[2]
+    if not (root / "pyproject.toml").is_file():
+        raise RuntimeError(
+            f"{root} is not the agent-props repository root (no pyproject.toml beside it). "
+            "The JSON Schemas are generated and committed from a source checkout; "
+            "running this from an installed package has no `schemas/` to write to."
+        )
+    return root
+
+
+def schemas_dir() -> Path:
+    """The repository's `schemas/` directory."""
+    return repo_root() / "schemas"
 
 
 def build_schema(filename: str, model: type[BaseModel]) -> dict[str, Any]:
