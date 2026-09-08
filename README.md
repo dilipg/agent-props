@@ -17,9 +17,10 @@ See [`CLAUDE.md`](CLAUDE.md) for the invariants and layering rules that govern t
 ## Status
 
 Phase 1 is being built one milestone at a time, M0 through M11 (see
-[`docs/build-handoff.md`](docs/build-handoff.md) section 4). This repository currently has the
-scaffold from M0: package layout, tooling, CI, and the golden fixtures. There is no working service
-yet — `src/agentprops/` subpackages are empty modules waiting on their milestone.
+[`docs/build-handoff.md`](docs/build-handoff.md) section 4). This repository currently has the M0
+scaffold (package layout, tooling, CI, golden fixtures) and the M1 domain models in
+`src/agentprops/models/`. There is no working service yet — `validation/`, `storage/`, `service/`,
+`server/`, `expansion/` and `export/` are empty modules waiting on their milestone.
 
 ## Install
 
@@ -45,10 +46,23 @@ uv run pytest -m integration --store sqlite   # integration tests, once a backen
 The first four must pass before any commit. The integration run is opt-in: it needs a storage
 backend, which arrives at M3.
 
+## Regenerate the JSON Schemas
+
+```bash
+uv run python -m agentprops.schema_export
+```
+
+`schemas/blueprint.schema.json` and `schemas/dataset.schema.json` are generated from the Pydantic
+models and committed, because the web app validates against them in the browser. Run this after any
+change to `models/blueprint.py` or `models/dataset.py`; `tests/unit/test_schemas.py` fails if the
+committed files are stale. The schemas carry **shape only, not policy** — a document can satisfy
+them and still be rejected by the validation catalogue.
+
 ## Repository layout
 
 ```
 src/agentprops/   the service: models, validation, storage, service, server, expansion, export
+schemas/          Blueprint and Dataset JSON Schemas, generated from the models
 tests/            unit/, integration/, and fixtures/ (blueprints, datasets, broken)
 docs/             the specification (PRD, build handoff, contracts, worked example)
 ```
