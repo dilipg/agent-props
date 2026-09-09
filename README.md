@@ -30,12 +30,14 @@ registry and a declarative rejection corpus — the M3 `Store` Protocol and SQLi
 `run_get` and `run_find` in `src/agentprops/service/runs.py`, with step identity resolution in
 `src/agentprops/service/resolution.py`, and the M7 backends and promotion path: the Postgres and
 Mongo adapters in `src/agentprops/storage/`, `Dockerfile` and `docker-compose.yml`, and
-`dataset_expand`, `dataset_export` and `dataset_import`. **Twenty-three tools, three backends.**
-`export/` is an empty module waiting on M10.
+`dataset_expand`, `dataset_export` and `dataset_import`, and the M8 Python client in
+`client/python/` — a separately installable `agent-props-client` with the three comparison helpers
+— alongside its two server-side writes, `record_step` and `run_finish`. **Twenty-five tools, three
+backends, two packages.** `export/` is an empty module waiting on M10.
 
-Not yet built: the Python client and `record_step` (M8), the web app (M9), the evidence bundle
-(M10). `tests/unit/test_tool_surface.py` lists exactly which documented tools are still deferred,
-and to which milestone.
+Not yet built: the web app (M9), the evidence bundle (M10), the TypeScript client (M11).
+`tests/unit/test_tool_surface.py` lists exactly which documented tools are still deferred, and to
+which milestone.
 
 ## Author a dataset
 
@@ -100,6 +102,51 @@ fixture and records nothing new, so a retry an hour later resolves to the same a
 the served step **to the run** and never to a dataset;
 `tests/unit/test_runtime_is_read_only.py` enforces that on the call graph and behaviourally.
 
+Then report what the agent did and close the run:
+
+```python
+call("record_step", run_id=run_id, node_id="receive_request", actual={"store_id": "ST-4471"})
+call("run_finish", run_id=run_id, outcome={"onboarding_status": "complete"}, status="finished")
+```
+
+`record_step` addresses a step exactly as `fetch_step` does and keys on the resolved node, so a
+step fetched by tool name can be recorded by node id. It is write-once per step: the identical
+`actual` again is a no-op, a *different* one keeps the recorded value and warns with
+`step_actual_conflict`, and an actual for a step that was never fetched is `AP-004`. `run_finish`
+is the same shape — the first close wins, a divergent second one warns with `run_finish_mismatch`
+— and a closed run **still serves** `fetch_step`, with a `run_already_finished` warning, because
+the fixtures are pinned and immutable and nothing here refuses.
+
+Neither of them grades. `actual` and `outcome` are stored verbatim, checked against neither
+`expected.final` nor any schema, because comparison lives in the client.
+
+## Grade a run
+
+```python
+from agentprops_client import connect, grade
+
+with connect("http://localhost:8000/mcp", agent_id="location-onboarding") as client:
+    client.run_start({"labels": {"scenario": "missing-documents"}})
+    step = client.fetch_step(tool_name="delightree.stores.get")
+    step.resolved_node_id            # 'fetch_store_profile' — resolved by position
+    client.record_step(step.output, node_id=step.resolved_node_id)
+    run = client.run_finish({"onboarding_status": "complete", "outstanding_tasks": 0})
+
+grade(dataset["expected"]["comparison"], dataset["expected"]["final"], run["outcome"])
+```
+
+`agent-props-client` is a **separate distribution** (`client/python/`): the run id is generated when
+the client is constructed, before the first call, and carried on every call. `connect_async` is the
+same surface awaited. Both accept anything `mcp.Client` accepts — a URL, a `StdioServerParameters`,
+or a server object for an in-process session.
+
+The three comparison helpers — `exact`, `schema`, `subset`, and `grade` to dispatch on the mode the
+dataset declared — are **pure functions with no network dependency at all**, so a run can be graded
+from stored documents with no server: `tests/unit/test_client_import_isolation.py` measures that in
+a fresh interpreter rather than claiming it. `subset` recurses into nested objects and is positional
+over arrays; an expected `null` requires the key to be present; `1` equals `1.0` and `true` never
+equals `1`.
+
 ## Validate a document
 
 ```python
@@ -162,11 +209,12 @@ argument also reads an `AGENTPROPS_*` environment variable, which is how the con
 configured. A SQLite file is created if absent and Mongo's indexes are declared on startup; a
 Postgres database is neither, because it is migrated.
 
-Twenty-three tools. Blueprint: `blueprint_upsert`, `blueprint_get`, `blueprint_list`,
+Twenty-five tools. Blueprint: `blueprint_upsert`, `blueprint_get`, `blueprint_list`,
 `blueprint_validate`, `blueprint_diff`. Dataset: `dataset_skeleton`, `dataset_fill_part`,
 `dataset_submit`, `dataset_validate`, `dataset_find`, `dataset_get`, `dataset_archive`,
 `dataset_restore`, `dataset_expand`, `dataset_export`, `dataset_import`. Run: `run_start`,
-`fetch_step`, `run_get`, `run_find`. Admin: `store_status`, `label_vocabulary`, `agent_list`.
+`fetch_step`, `record_step`, `run_finish`, `run_get`, `run_find`. Admin: `store_status`,
+`label_vocabulary`, `agent_list`.
 
 Every tool answers one of the two envelopes in [`docs/contracts.md`](docs/contracts.md) section 1,
 and never raises for anything that reaches it — a malformed argument, an unknown id, a rule
@@ -285,11 +333,13 @@ them and still be rejected by the validation catalogue.
 
 ```
 src/agentprops/   the service: models, validation, storage, service, server, expansion, export
+client/python/    agent-props-client: the run client and the three comparison helpers
 schemas/          Blueprint and Dataset JSON Schemas, generated from the models
 tests/            unit/, integration/, and fixtures/ (blueprints, datasets, broken)
 docs/             the specification (PRD, build handoff, contracts, worked example)
 ```
 
 `Dockerfile`, `docker-compose.yml` and `.dockerignore` sit beside them at the repository root.
-`client/python`, `client/typescript` and `web/` arrive with the milestones that own them (M8, M11,
-M9).
+`client/python/` is its **own distribution** with its own `pyproject.toml` and no dependency on the
+service; it is on this project's dev dependency group so one `uv run pytest` covers both packages.
+`client/typescript` and `web/` arrive with the milestones that own them (M11, M9).

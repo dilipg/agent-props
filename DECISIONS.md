@@ -3816,3 +3816,290 @@ checked for it - or it forces the documentation to stop being concrete. So it pa
 that collects string constants equal to the prefix and excludes docstrings by position. Comments
 never reach the AST at all. `test_the_bare_prefix_guard_sees_a_value_and_not_a_docstring` pins all
 four cases, including a function that has both a docstring and a value.
+
+
+## [M8] `record_step` and `run_finish` answer a re-write the way `run_start` answers a re-start
+Both tools can meet a value that is already recorded, which no read path can. Ruling R-53 already
+settled the shape for `run_start` — keep the stored value, return it, attach a warning naming the
+divergence — and M8 applies it to both writes rather than inventing a second answer: a repeated
+identical call is a **silent** no-op success, and a divergent one is a success carrying
+`step_actual_conflict` or `run_finish_mismatch`.
+Reason: ground rule 3 decides it without a new principle. "Mismatches produce warnings attached to
+the response and to the stored run", and a retried request after a network blip must neither fail
+nor overwrite — which is the whole reason the run id is generated up front. A step's recorded
+`actual` and a run's `outcome` are *evidence*, and evidence a second caller can overwrite is worth
+less than none; evidence a second caller cannot report at all is a gate.
+Alternative rejected: an error envelope for the conflicting write, on the model of `SK-005` for a
+lost skeleton CAS. SK-005 is the **authoring** flow, where validation is strict at write time; these
+two are the runtime, where the service never gates. There is also no code that fits — `RT-E01..04`
+are resolution failures and `AP-001..006` are boundary conditions — so refusing would have meant
+inventing a rule id for a policy verdict, which is what ground rule 3 forbids.
+Also rejected: silently accepting the second write. That is the only option that loses information,
+and it loses the half a developer needs (the agent produced two different answers for one step).
+Residue, stated: a caller that ignores warnings sees a success and assumes its own document was
+stored. The response carries the **stored** step, so the value it gets back is the recorded one
+rather than its own — which is what makes ignoring the warning survivable rather than silent.
+
+## [M8] `Store.mark_run_finished`: a compare-and-set on three columns
+`run_finish` writes through a new narrow Protocol method rather than through `put_run`.
+Reason, twice over. **The column bound** is `set_run_warnings`' guarantee mirrored: `put_run` writes
+every column from the model it is handed, so finishing a run through an edited snapshot would revert
+the `warnings` a concurrent `fetch_step` had just merged in. M6 fixed that bug in one direction and
+recorded that it was unreachable only because `run_finish` did not exist; it exists now, so the
+counterpart write had to be equally narrow or the fix would have been half a fix. **The
+compare-and-set** is ruling R-47's argument: an unconditional update makes the loser of two
+concurrent finishes disappear silently *and* hands both callers a success envelope naming their own
+outcome while the row holds one of them. The database decides once, and the boolean it returns is
+the whole of the service's branch — one decision site, no read-then-write.
+`finished_at IS NULL` is the predicate rather than `status = 'running'`: both terminal statuses set
+it, so one clause covers `finished` and `abandoned` and the Protocol holds no opinion about a
+vocabulary it does not own.
+Cost, stated: a Protocol method added after M7, so two signed-off adapters implement one more
+method. R-33 and R-55 both made this trade in the other direction (add it early, cheaply); this one
+could not be, because the tool that needs it is M8's. Four conformance cases, so both adapters
+inherit them.
+Alternative rejected: `put_run` with a fresh read. Observably identical in a sequential test — which
+is exactly why it is dangerous, and it is recorded in the conformance test's own docstring: a
+planted fresh-read `put_run` **passes** that test, and only the service-level stale-read test catches
+it. A narrower window is a smaller version of the same bug (ruling R-37).
+
+## [M8] What `run_finish` touches, and what it deliberately does not
+Touches: `status`, `outcome`, `finished_at`. Nothing else — not `warnings`, not `steps`, not
+`external_refs`, not `declared_bp_version`, not `started_at`.
+Does **not** validate `outcome` against the blueprint's `outcome_schema`, and does not compare it
+with `expected.final`. Ground rule 2: the service stores expectations and emits evidence, and the
+comparison lives in the client. A run whose agent produced nonsense is a run whose evidence records
+nonsense; validating here would turn a finding *about the agent* into a refusal to record what the
+agent did, and would put the client's own comparison on the write path.
+There are tests for the losing side of both halves — an `actual` the node's `output_schema` rejects
+and an `outcome` the blueprint's `outcome_schema` rejects are both stored verbatim.
+`status` is `finished` or `abandoned`; `running` is refused with `AP-001` naming the vocabulary, the
+way `run_class` is. Reason: the tool *closes* a run, and accepting `running` would advertise an
+un-finish that the compare-and-set cannot perform anyway.
+
+## [M8] Ruling R-54(c)'s open half is taken as the warning, not the refusal
+`fetch_step` and `record_step` against a run whose `finished_at` is set attach a
+`run_already_finished` warning and serve normally.
+Reason: R-54(c) says a finished run still serves and "M8 may add a warning if it proves useful; it
+must not add a refusal". It proves useful — an agent still fetching steps after its harness closed
+the run is a real defect in the harness, and nothing else in the response says so. The read path is
+pin-scoped and immutable, so serving is not the defect.
+Keyed off `finished_at` rather than `status`, for `mark_run_finished`'s reason: one predicate covers
+both terminal statuses. The detail carries no `node_id`, so R-54(b)'s merge key records it **once
+per run** rather than once per step — an agent looping against a closed run must not grow the stored
+warning list without bound, and every response carries its own copy regardless.
+Tested from the losing side: the fixture served after the close is compared **byte for byte** with
+the one served before it, and a step the run had never served is fetched *after* the close. A test
+that checked only the warning would pass against a `fetch_step` that had started refusing, and a
+planted refusal fails both.
+
+## [M8] `record_step`'s two failure classifications, and why the service re-reads to choose
+`set_step_actual` raises `StoreError` for two different conditions: a *different* actual is already
+recorded, and its retry budget ran out with nothing recorded. `service/runs.py::_conflicted`
+re-reads the step and classifies — a recorded differing actual becomes the `step_actual_conflict`
+warning, and no recorded actual at all becomes `AP-005`.
+Reason: reporting contention as a conflict would tell a caller its evidence lost to a value that
+does not exist. This is not a second decision site for the *write* — the store made that decision,
+once, in its own single-decision loop — it is classification of the refusal the store returned.
+An actual for a step that was never served is `AP-004` rather than an `RT-*` code, because
+resolution *succeeded*: the node exists in the blueprint and the run exists in the store, and what
+names nothing is the step key. The pointer addresses whichever argument the caller used to address
+the step, so a `tool_name` caller is not pointed at a `node_id` it never sent, and
+`resolved_node_id` rides in the context either way.
+Verified: with the classification removed, the contention case reports a conflict warning on a
+success envelope, and the test fails.
+
+## [M8] The client is packaged separately, and depends on nothing of the service's
+`client/python/` is its own distribution: `agent-props-client`, its own `pyproject.toml`, its own
+`hatchling` build, and **no** dependency on `agentprops` — not a path dependency, not a version
+pin, not an import.
+Reason: a client speaks MCP to a *server*, which may be another process, another machine or another
+language (M11 is the TypeScript one). A path dependency would make "separately installable" false
+and would be invisible in this repository, where the service is installed anyway. So the evidence is
+a wheel built into a throwaway venv that then imports the client and grades a document, with the
+service's *absence* asserted — `tests/unit/test_client_packaging.py`.
+It is wired into this repository's **dev** dependency group with a `[tool.uv.sources]` path entry, so
+one `uv run pytest` covers both packages: the end-to-end test needs the client and the server in one
+process. The dependency direction is service→client for *testing* only, and the client's own
+metadata carries none of it.
+Alternative rejected: one distribution with an extra (`agent-props[client]`). It would make the
+client's release cadence the service's, and it would put the whole service — SQLAlchemy, pymongo,
+alembic, opentelemetry — behind `pip install` for someone who wanted three comparison functions.
+
+## [M8] `compare.py` imports `jsonschema` and nothing else, and a guard measures it
+The three helpers depend on exactly one third-party library, for the Draft 2020-12 validator
+`schema` mode needs. `run.py` and `envelope.py` depend on none. `session.py` is the only module that
+imports a transport, and the package's `__init__` reaches `connect`/`connect_async` through PEP 562's
+module `__getattr__` so that `from agentprops_client import subset` pays for nothing.
+Reason: ground rule 2 promises the helpers are usable by someone with two documents, no server and
+no network. That is only a real property if the import graph says so.
+**The guard is an allowlist over the whole transitive import set, and the allowlist is measured
+rather than typed**: in a fresh subprocess, what `agentprops_client.compare` imports minus what
+`jsonschema` alone imports must be the client's own modules and nothing else. A denylist of today's
+network libraries holds only against the names someone thought of; this fails on anything new, by
+name, with no edit to the guard. An audit hook fails the probe on any socket or SSL audit event
+during import, which covers a module that opens a connection without `socket` ever appearing.
+`socket` is the named sentinel because it is the chokepoint — every stdlib network path reaches the
+OS through it. `_socket`, the C extension, is deliberately **not**: `typing_extensions` imports it to
+read a C-API capsule, so a guard on `_socket` would fail today because of a *typing* library. That is
+measured in the test rather than asserted in prose.
+Verified failing against three plants: `import socket` in `compare.py`, a transport import in
+`compare.py`, and an eager `session` import in `__init__.py`. An eager **run** import passes all
+seventeen assertions — so the lazy import is load-bearing for `session.py` and a consistency choice
+for `run.py`, and the module docstring says exactly that rather than claiming both.
+
+## [M8] The sync/async split: two facades over one set of pure functions
+`RunClient` and `AsyncRunClient` share `_Requests` (argument dicts) and `_Responses` (envelope
+readers). Each method is one line: build the request, call the transport, read the response.
+Reason: the two APIs cannot disagree about what a request looks like or what a response means, and
+`test_the_two_clients_send_identical_requests` records both and compares them — so a parameter added
+to one facade and forgotten in the other fails a test rather than shipping.
+Alternatives rejected. **Generating the sync client from the async one** (an `unasync`-style build
+step) makes the code a reader sees different from the code that runs. **Wrapping every async method
+in `asyncio.run`** re-opens the session per call, which for a stdio server spawns the process again
+per step, and hides the lifecycle where a caller cannot see it.
+The transport owns the bridge instead, once: `anyio.from_thread.start_blocking_portal` plus
+`portal.wrap_async_context_manager`. Not a hand-rolled loop thread — an `anyio` cancel scope must be
+exited **by the task that entered it**, which `tests/toolclient.py` already paid for with
+`RuntimeError: Attempted to exit cancel scope in a different task`, and the portal's context-manager
+wrapper is the supported primitive for exactly that. The sync end-to-end test is a *synchronous*
+test function, so the portal is doing real work rather than being exercised from inside a loop.
+
+## [M8] `subset`'s array semantics: positional, same length, element-wise
+`subset` recurses into objects — a nested extra field is ignored — and over arrays it requires the
+**same length** and subsets element *i* against element *i*.
+Reason: PRD 5.2 says "extra **fields** ignored", and an array is a value rather than a bag of
+fields. An agent that assigned three training modules where two were expected produced a different
+answer, not a superset of the right one. Element-wise recursion is what makes `subset` useful for
+arrays of objects (`[{"code": "late"}]` matches `[{"code": "late", "days": 4}]`), so the relaxation
+that matters is kept.
+Alternative rejected: **set-like containment** — every expected element appears somewhere. It would
+call the three-module answer correct, it makes order meaningless (which the golden
+`assigned_modules` relies on), and matching a multiset under *subset* semantics is a bipartite
+matching problem: a grader whose cost is not obvious from its contract is a grader nobody trusts.
+Also rejected: whole-array equality, which would stop the recursion at the array and make
+`subset` useless for arrays of objects — a caller who wants that has `exact`.
+`test_a_superset_array_is_not_a_subset` pins the decision *against* containment specifically: every
+expected element is present, in order, with one appended, so a containment implementation answers
+`ok` and this one does not. Six rows fail against a planted containment version.
+
+## [M8] Two more comparison decisions PRD 5.2's one-liners leave open
+**Numbers compare across `int`/`float`; `bool` is not a number.** `1` and `1.0` are the same JSON
+value and differ only in how a decoder spelled them, so `exact` and `subset` treat them as equal.
+`True` is a *different JSON type* from `1`, and Python's `True == 1` is the trap — `server/args.py`
+records the same trap one layer out and `validation.context.as_int` excludes `bool` so DS-020 cannot
+accept `"seed": true`. A grader that called `{"compliant": 1}` a match for `{"compliant": true}`
+would pass an agent that returned the wrong type. Four rows fail against a plain `==`.
+**`null` is not absence.** `subset` requires the expected key to be *present*, so
+`{"escalated_to": None}` does not match `{}`. This is the case a naive `actual.get(key) == value`
+gets wrong in the direction that looks like success, which is why it is a row rather than a remark.
+Deliberately out of scope: `NaN`. JSON has no `NaN`, the documents come from a JSON store, and the
+IEEE rule would make a document unequal to itself.
+
+## [M8] What `schema` validates against, and what it refuses to do
+`schema(instance, outcome_schema)` validates the **actual** against the blueprint's `outcome_schema`
+and ignores `expected.final` entirely — PRD 5.2's "validates against `outcome_schema` only", taken
+literally. Its signature therefore takes a schema rather than an expected document, and
+`grade(mode="schema", ...)` requires `outcome_schema` and raises `ValueError` without one.
+Reason for raising rather than answering `ok: False`: a missing schema is a programming error in the
+caller, and reporting it as a failed comparison would say the agent failed when the harness is
+misconfigured. That is the distinction `server/app.py::bound` draws for an unbound store.
+`Draft202012Validator` is **pinned**, per CLAUDE.md's style rule and contracts 2.1: letting
+`jsonschema` infer a dialect from an absent `$schema` would make the answer depend on the installed
+library's default. Every failure is reported, not the first, with the failing keyword as the
+difference's `reason` so a caller can branch on `additionalProperties` versus `required` versus
+`type` without parsing prose.
+Two behaviours inherited rather than smoothed over, and both are table rows so they are visible:
+`additionalProperties: false` does not see properties declared in a sibling `allOf` (so such a
+schema rejects everything), and a whole float **is** an integer to JSON Schema — `0.0` passes
+`{"type": "integer"}` where `exact` would also accept it, and `0.5` does not. That the two modes
+happen to agree about numbers is a coincidence, not a shared rule.
+The reference registry is empty, so a remote `$ref` is *unresolvable* rather than fetched — which is
+what keeps the no-network claim true of the module's behaviour as well as its imports, and there is
+a test for it.
+
+## [M8] The client raises for a failure envelope, and never for a warning
+The typed methods (`run_start`, `fetch_step`, `record_step`, `run_finish`) raise `ToolError` on
+`{ok: false}`; `call()` returns the parsed envelope and raises nothing.
+Reason: "structured errors, never exceptions" is a rule about the **service** — an exception cannot
+cross a protocol boundary as an answer — and it has already been honoured by the time a response
+reaches the client: the failure arrived as data, with a rule id and a pointer. What a Python caller
+then wants is a return type it can rely on, so `fetch_step` can be annotated `-> Step` and mean it.
+The alternative, a union at every call site, moves the check everywhere and makes the common path
+noisy, which is how a caller ends up not checking.
+`call()` is the escape hatch and it is load-bearing rather than decorative: the authoring tools are
+not part of a run, and PRD 6 flow B's repair loop depends on reading `SK-002` and `DS-017` as
+*information*. The end-to-end test's step 3 uses it for exactly that.
+**Warnings never raise**, on any path. A client that turned `pool_exhausted` into an exception would
+re-introduce the gate the service refuses to be.
+A protocol-level fault is kept separate from both: `is_error: true` means the tool *raised*, which
+the service promises never to do, so it becomes a `RuntimeError` rather than an empty `ToolError` —
+"the server said no" and "nobody answered" need different handling.
+
+## [M8] The end-to-end test is not `expected.expected_path`, and cannot be
+The run's reconstructed path is asserted against the **script's own call sequence**, key for key,
+plus the first-visit order of every node `expected.expected_path` declares. Not against
+`expected_path` itself.
+Reason, and it is a property of the product rather than of the test. `expected_path` is a
+**traversal** and may revisit a node — the golden one visits `check_docs` twice. A reconstructed
+path is the distinct *steps* that were served, and `fetch_step` is idempotent on
+`(run_id, resolved_node_id, iteration)`, so the loop's second visit to a `pool: false` node is the
+same step: it replays and appends no path entry. Only a pool node can appear twice, because only a
+pool node has a second iteration. Separately, section 7's script draws **four** `request_docs`
+iterations on purpose, to reach the `pool_exhausted` boundary either side, where the dataset declares
+one.
+So the two disagree by construction, and a test asserting equality would have to be "fixed" by
+weakening the walk — which is the failure mode M7's round warned about. The reframing is stated in
+the test's own docstring, with both reasons.
+
+## [M8] `record_step`'s payload carries the resolved node id, not just `{ok}`
+contracts section 4 documents the return as `{ok}`, which the envelope itself carries. The named key
+(`record`) holds the stored step plus `resolved_node_id`.
+Reason: a caller that addressed the step by `tool_name` has no other way to learn which node the key
+was built from — the same reason `fetch_step` returns it — and a caller that hit
+`step_actual_conflict` needs to see the actual it is disagreeing with. The step comes back **as
+stored**, so a caller that ignored the warning still cannot mistake its own document for the
+recorded one.
+The envelope's `warnings` is **this call's** list rather than the run's, which is `fetch_step`'s
+convention. `run_finish` differs deliberately and the difference is recorded in `_finished`: its
+payload *is* the run, so the run is dumped with the merged warning list substituted, while the
+envelope carries what this call found. Without that split, a second diverging finish would report
+the *first* divergence's detail, because `_flag` dedupes `run_finish_mismatch` by `(code, None, None)`.
+
+## [M8] Two guards fired on their own during this milestone, which is the point of them
+`test_bounded_integers.py`'s enumeration failed with `('record_step', 'iteration')` named, before
+that parameter had a case — the fourth time it has caught a new integer entry point (M6 twice, M7
+once). Its `COVERED` row then needed something no input schema could supply: an actual can only be
+recorded for a step that was **served**, so the fixture had to fetch one first or the in-range
+control would answer `AP-004` and the out-of-range assertion would prove nothing.
+`test_tool_surface.py`'s three guards failed together: the tool count, the stale `DEFERRED` entries,
+and the per-tool coverage scan naming `record_step` and `run_finish` as registered-but-untested.
+That is the mechanism working for the fourth milestone running, and both are recorded here because a
+guard that has only ever been green is a guard nobody has evidence for.
+
+## Questions for the owner — M8
+1. **`step_actual_conflict` and `run_finish_mismatch` are warnings, not errors.** Ruling R-53 and
+   ground rule 3 point that way and the entry above argues it, but the alternative reading — that a
+   *write* which cannot be performed should be a failure envelope, the way `SK-005` is for the
+   authoring flow — is defensible. If it is wanted, it needs a code: `RT-E01..04` are resolution
+   failures and `AP-001..006` are boundary conditions, and neither family fits a policy verdict.
+2. **`run_already_finished` is a third addition to the warning vocabulary this milestone.** R-54(c)
+   explicitly permits it ("may warn"), and R-22 keeps the vocabulary open. Worth an owner's glance
+   because the alternative reading is that a closed run should say nothing at all, which is what M6
+   shipped.
+3. **`run_finish` accepts `finished` and `abandoned` and refuses `running`.** contracts 2.3 lists
+   three statuses; a caller who wants to *reopen* a run has no tool, deliberately. If reopening is
+   ever wanted it is a new tool rather than a status value, because `mark_run_finished`'s
+   compare-and-set is what makes the first close authoritative.
+4. **`subset` over arrays is positional.** Recorded above with its alternatives. It is the one
+   comparison decision where a reasonable person might want the other answer, and changing it later
+   changes what a stored dataset means rather than only what a helper does.
+5. **`grade` is a fourth exported function** beside the three the milestone names. It dispatches on
+   `expected.comparison` and adds no comparison logic of its own. PRD 5.2's "every consumer grades
+   it the same way instead of each inventing its own rule" is the argument for it existing;
+   a purist reading of "three comparison helpers" would leave the `if` to every caller.
+6. **The client's `mcp` dependency is required, not an extra.** So `pip install agent-props-client`
+   pulls a transport even for a grading-only user. The import graph is clean either way (the guard
+   measures that), but a `[grading]`/`[client]` extra split would make the packaging match the
+   layering. Left as one distribution because the client's primary job is talking to a server, and a
+   default install that cannot do that is user-hostile.
