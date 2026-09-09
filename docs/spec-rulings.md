@@ -1830,7 +1830,7 @@ while proving nothing, and the first where the fixture *itself* was the falsehoo
 ### R-73 — a tracked source file must be readable by the tools that review it
 
 `web/src/lib/validation.ts` embeds a raw NUL byte as a dedup separator
-(`` `${finding.rule} ${finding.pointer}` ``). Git's NUL heuristic therefore classifies the
+(`` `${finding.rule}U+0000${finding.pointer}` ``). Git's NUL heuristic therefore classifies the
 file as **binary**: the review diff showed `Bin 0 -> 6841 bytes` and `Binary files differ`, and
 `git grep`, ripgrep and GitHub's diff view all skip it. I confirmed it — 88 of 90 tracked
 source files are text, and this is one of the two that are not.
@@ -1838,9 +1838,29 @@ source files are text, and this is one of the two that are not.
 **The module implementing clause 1's entire local half was never visible to the review.** Not
 misdescribed, not under-tested — *unreadable*, by every tool the review depends on.
 
-**Ruling.** No tracked source file may contain a NUL byte. Use ` ` as an escape, or any
-printable separator. Add a guard asserting every tracked file under `src/`, `web/src/`,
-`client/` and `tests/` is text, in the shape of this build's other enumerating guards.
+**Ruling.** No tracked source file may contain a NUL byte. Use a `U+0000` escape sequence, or
+any printable separator. Add a guard asserting it over **every tracked file**, in the shape of
+this build's other enumerating guards.
+
+**Amended twice, both times by measurement:**
+
+**(a) The scope was too narrow, and this file proved it.** I first scoped the guard to `src/`,
+`web/src/`, `client/` and `tests/`. M9's implementer then found that **`docs/spec-rulings.md`
+was itself binary** — two NUL bytes, at offsets 113554 and 114131, **inside R-73's own text**.
+I put them there: writing the ruling that bans the byte, I emitted the byte. So the
+authoritative register could not be grepped, by the same mechanism the ruling describes, in the
+paragraph describing it.
+
+The implementer handled that exactly right: it recorded the measurement in a test that does not
+fail, and raised it as a question rather than silently editing my authoritative document. I have
+repaired both occurrences, and the guard's scope is now every tracked file — no directory list,
+because a directory list is what failed.
+
+**(b) The guard must test for a NUL byte, not for git's text heuristic.** `git grep -Il ''`
+reports **empty** files as non-text, because there is no line to match. Four tracked files are
+legitimately empty: two `py.typed` markers, which PEP 561 *requires* to be empty, and two
+`__init__.py`. A heuristic-based guard would flag all four and be deleted as broken within a
+milestone. Verified after the repair: **zero tracked files contain a NUL byte.**
 
 **Why this earns a ruling rather than a one-character fix.** Every other failure this build has
 found was a claim that proved less than it stated — something readable that said the wrong
@@ -1850,6 +1870,46 @@ It happened to be found; a guard means it does not depend on that.
 
 **Cost if wrong.** A binary fixture that genuinely needs to be tracked gets a named exemption,
 the way R-20 and R-31 handle theirs.
+
+### R-74 — a client-local error code does not join the `AP-*` family
+
+M9 invented `AP-000` for "the catalogue could not be reached" — a client-side transport
+failure with no service equivalent, deliberately placed outside `AP-001..007` and never
+leaving the browser.
+
+**Ruling.** The need is real; the prefix is wrong. `AP-*` is the **service's** boundary
+vocabulary (R-43), documented in `contracts.md` section 3.5 and pinned by a disjointness
+guard. A code the service never emits, sitting inside that family, blurs whose vocabulary it
+is — and the next reader of section 3.5 will look for `AP-000` and not find it.
+
+Give it a client-local prefix (`WEB-001` or similar), document it in the web app's own
+`DECISIONS.md` entry rather than in `contracts.md`, and assert it can never appear in a
+service reply. Then the two vocabularies stay separable, which is what makes either of them
+mean anything.
+
+**Cost if wrong.** A string rename in one module and its test.
+
+### R-75 — three M9 round-1 ratifications
+
+**(a) DS-027 warns and the app stores anyway. Correct.** Ground rule 3 is explicit that
+policy problems come back as warnings, and PRD 5.7 says the validator *warns* on an
+intent-equals-narrative collision precisely "because that is what a hurried author does".
+Rendering it prominently and storing is right; blocking would be the gating ground rule 3
+forbids. The reviewer's job is to see the warning, not to be prevented from saving.
+
+**(b) The text guard reads the index, not the working tree — and that is the correct choice.**
+The implementer noted it "failed on an already-fixed working tree because the committed blob
+was still binary", and called it "the only one of its three checks measuring what a review
+actually sees". Exactly: a review reads committed blobs. A guard against unreviewable files
+must therefore read the index, or it would pass on a repaired working tree while the reviewable
+artifact stayed broken.
+
+**(c) A second instance of R-72's class, one level down.** `ToolWarning` declared
+`{code, message, context}` while the real `Warning` is `{code, detail}` — two of three field
+names wrong, invisible because the component was never imported. Found "by reading the model
+rather than the client type". That is R-72's lesson applied at the field level: a client type
+asserting a shape nobody checks against the source is the same falsehood as a harness emitting
+one. Two instances in one milestone is why R-72 asks for an assertion rather than diligence.
 
 ## Owner scope decisions
 
