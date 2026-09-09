@@ -120,6 +120,7 @@ __all__ = [
     "WARNING_EXPANSION_ADDED_NOTHING",
     "expand",
     "expansion_salt",
+    "jittered_range",
 ]
 
 #: The most entries one ``dataset_expand`` call may add.
@@ -254,9 +255,17 @@ def _grown(
 
     One ``Seeded`` per position rather than one stream for the batch, which is
     the decision the module docstring argues for: an entry is then a pure
-    function of ``(seed, node_id, position)``, so expanding by 5 and expanding
-    by 2 then 3 produce the same pool, and re-expanding a later version keeps
-    the entries an earlier one produced.
+    function of ``(seed, node_id, position)`` **and of the templates it was
+    drawn from**, so re-expanding a later version keeps the entries an earlier
+    one produced - their positions did not move.
+
+    It does **not** make expanding by 5 equal to expanding by 2 then 3, and the
+    module docstring records why: ``templates`` is the pool as it stands at the
+    start of the call, so the second call draws from a longer list. The prefix
+    is preserved; the continuation is not. An earlier version of this docstring
+    claimed otherwise and
+    ``test_a_split_expansion_keeps_the_prefix_and_may_diverge_after_it`` is what
+    disproved it.
     """
     start = len(templates)
     return [
@@ -280,16 +289,42 @@ def _replicated(source: Seeded, templates: Sequence[Mapping[str, Any]]) -> dict[
     the reason the module docstring gives: inventing schema-conforming content
     needs a model, and ground rule 4 forbids one here.
 
-    The range is half to double the template's hint, clamped into the storable
-    range at the top so a hint near ``2**63`` cannot double out of it, and at
-    zero at the bottom so a nonsensical negative hint yields zero rather than an
-    inverted range.
+    The range is :func:`jittered_range`, which is a named function rather than
+    an expression here because its two clamps are the whole of it and both have
+    a boundary worth testing exactly.
     """
     entry = copy.deepcopy(dict(source.choice(templates)))
     hint = entry.get("latency_hint_ms")
     if isinstance(hint, int) and not isinstance(hint, bool):
-        entry["latency_hint_ms"] = source.int(clamp(hint // 2), clamp(hint * 2))
+        entry["latency_hint_ms"] = source.int(*jittered_range(hint))
     return entry
+
+
+def jittered_range(hint: int) -> tuple[int, int]:
+    """``(lo, hi)`` for a ``latency_hint_ms`` of ``hint``: half to double, clamped.
+
+    Public and named because the two clamps are the only arithmetic in this
+    module and each prevents a different failure that a behavioural test
+    catches only by luck:
+
+    - **the top** keeps the range inside what a column can hold. A hint at
+      ``MAX_STORED_INT`` doubles out of it, and the doubled value is the draw's
+      upper bound - so without the clamp the expansion can write a
+      ``latency_hint_ms`` no backend can store, which is ruling R-50's failure
+      one layer in from the boundary. Whether it *does* depends on where the
+      draw lands, which is exactly why the range is tested rather than the
+      value.
+    - **the bottom** keeps the range from inverting. A negative hint - nonsense,
+      but nothing forbids it, because ruling R-04 keeps value constraints out of
+      the models and no ``DS-*`` rule has an opinion about this field - would
+      give ``lo > hi`` and raise ``ValueError`` out of ``Seeded.int``: an
+      exception where an envelope belongs.
+
+    ``lo <= hi`` for every ``int``, which is the property
+    `tests/unit/test_service_expansion.py` asserts over generated hints rather
+    than over the four an author thought of.
+    """
+    return clamp(hint // 2), clamp(hint * 2)
 
 
 def _unexpandable(

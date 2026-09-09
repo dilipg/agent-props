@@ -22,8 +22,11 @@ so that a future change to the rule cannot quietly drop them.
 
 The seeding decisions get their own tests, because they are the part no ruling
 specified: an entry is addressed by its **position in the pool**, which is what
-makes expanding by 5 equal to expanding by 2 then 3, and what makes expanding
-version 2 leave version 1's entries alone.
+makes expanding version 2 leave version 1's entries alone. It does **not** make
+expanding by 5 equal to expanding by 2 then 3 - this file's own
+``test_a_split_expansion_keeps_the_prefix_and_may_diverge_after_it`` was written
+to assert that and disproved it, and this paragraph said the opposite until the
+same grep that found the claim on the tool surface found it here.
 """
 
 from __future__ import annotations
@@ -33,6 +36,8 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from agentprops.expansion.seeded import Seeded
 from agentprops.models import Dataset, DatasetQuery
@@ -42,8 +47,9 @@ from agentprops.service.expansion import (
     WARNING_EXPANSION_ADDED_NOTHING,
     expand,
     expansion_salt,
+    jittered_range,
 )
-from agentprops.service.limits import MAX_STORED_INT
+from agentprops.service.limits import MAX_STORED_INT, clamp, storable
 from conftest import FROZEN_NOW, load_document
 
 #: The golden blueprint declares this node ``pool: true`` with
@@ -377,6 +383,143 @@ def test_a_second_expansion_leaves_the_first_entries_alone(roomy: ServiceContext
     first = payload(expand(roomy, ROOMY_DATASET_ID, POOL_NODE, 2))["data"]["dataset"]
     second = payload(expand(roomy, ROOMY_DATASET_ID, POOL_NODE, 2))["data"]["dataset"]
     assert second["pools"][POOL_NODE][: AUTHORED_ENTRIES + 2] == first["pools"][POOL_NODE]
+
+
+#: A dataset whose pool entries carry ``latency_hint_ms``, which the golden
+#: fixtures do not - so the one field expansion actually *varies* had no test
+#: and the clamp arithmetic around it had no case. The value is a plain
+#: ``NodeFixture`` field with no schema behind it (DS-019 validates ``output``
+#: against ``output_schema`` and ``input`` against ``input_schema``), which is
+#: exactly why it is the field chosen.
+LATENCY_DATASET_ID: Final = "3f8c1a20-0000-4000-8000-00000000e002"
+
+
+def _with_latency(hint: int, dataset_id: str = LATENCY_DATASET_ID) -> dict[str, Any]:
+    """The golden dataset under a new id, with ``hint`` on every pool entry."""
+    document = load_document("datasets/priya-missing-docs.json")
+    document["id"] = dataset_id
+    for entry in document["pools"][POOL_NODE]:
+        entry["latency_hint_ms"] = hint
+    return document
+
+
+@pytest.fixture
+def latency(seeded: ServiceContext) -> ServiceContext:
+    """The published blueprint plus a dataset whose pool carries a latency hint."""
+    seeded.store.put_dataset(Dataset.model_validate(_with_latency(400)))
+    return seeded
+
+
+def test_the_latency_hint_is_varied_within_half_to_double_the_template(
+    latency: ServiceContext,
+) -> None:
+    """The one field expansion changes, and the range the module docstring claims.
+
+    Every other field is copied verbatim, because inventing schema-conforming
+    content needs a model and ground rule 4 forbids one. ``latency_hint_ms`` is
+    the exception: no schema constrains it and the entity timeline does not
+    depend on it, so varying it cannot make a conforming fixture
+    non-conforming - which is the whole basis for varying it at all.
+
+    Half to double, so a template of 400 yields something in ``[200, 800]``.
+    The generated entry is otherwise identical to the template it was copied
+    from, which is asserted here rather than left implied.
+    """
+    reply = expand(latency, LATENCY_DATASET_ID, POOL_NODE, 1)
+    assert reply.ok, reply
+    pool = payload(reply)["data"]["dataset"]["pools"][POOL_NODE]
+    added_entry = pool[AUTHORED_ENTRIES]
+
+    assert 200 <= added_entry["latency_hint_ms"] <= 800
+    without_hint = {key: value for key, value in added_entry.items() if key != "latency_hint_ms"}
+    templates = [
+        {key: value for key, value in entry.items() if key != "latency_hint_ms"}
+        for entry in pool[:AUTHORED_ENTRIES]
+    ]
+    assert without_hint in templates, "the entry is not a copy of an authored fixture"
+
+
+def test_the_jitter_is_deterministic_like_everything_else(latency: ServiceContext) -> None:
+    """The hint is drawn from the same seeded stream as the template choice.
+
+    Which means it is re-derivable: one ``Seeded`` per position, one ``choice``
+    then one ``int``, in that order. Re-deriving it here from the public
+    :func:`expansion_salt` is what makes this a test of the *contract* rather
+    than of the code agreeing with itself.
+    """
+    grown = payload(expand(latency, LATENCY_DATASET_ID, POOL_NODE, 1))["data"]["dataset"]
+    templates = grown["pools"][POOL_NODE][:AUTHORED_ENTRIES]
+
+    source = Seeded(grown["seed"], expansion_salt(POOL_NODE, AUTHORED_ENTRIES))
+    chosen = source.choice(templates)
+    hint = int(chosen["latency_hint_ms"])
+    assert grown["pools"][POOL_NODE][AUTHORED_ENTRIES]["latency_hint_ms"] == source.int(
+        clamp(hint // 2), clamp(hint * 2)
+    )
+
+
+@pytest.mark.parametrize(
+    ("hint", "expected"),
+    [
+        (0, (0, 0)),
+        (1, (0, 2)),
+        (400, (200, 800)),
+        (MAX_STORED_INT, (MAX_STORED_INT // 2, MAX_STORED_INT)),
+        (MAX_STORED_INT // 2 + 1, (MAX_STORED_INT // 4 + 1, MAX_STORED_INT)),
+        (-5, (0, 0)),
+        (-(10**30), (0, 0)),
+    ],
+    ids=["zero", "one", "typical", "at-the-width", "doubles-past-the-width", "negative", "absurd"],
+)
+def test_the_jitter_range_clamps_at_both_ends(hint: int, expected: tuple[int, int]) -> None:
+    """The clamp arithmetic, asserted **exactly** rather than through a draw.
+
+    This is the second attempt and the reason for it is worth recording. The
+    first version asserted the *stored* hint fell inside the expected band, and
+    at ``MAX_STORED_INT`` it **passed without the clamp** - the draw happened to
+    land below the column width, so the test proved nothing about the case it
+    was written for. Verified by removing the clamp: the negative case failed,
+    the at-the-width case did not.
+
+    So the range is the unit. ``doubles-past-the-width`` is the case that
+    matters: the unclamped upper bound is above ``MAX_STORED_INT`` while the
+    lower bound is not, so the clamp is doing work no draw can hide.
+    """
+    assert jittered_range(hint) == expected
+
+
+@given(hint=st.integers())
+def test_the_jitter_range_is_never_inverted_and_never_unstorable(hint: int) -> None:
+    """The two properties, over every ``int`` rather than over seven of them.
+
+    ``lo <= hi``, because an inverted range raises ``ValueError`` out of
+    ``Seeded.int`` - and a ``latency_hint_ms`` is authored content that ruling
+    R-04 puts no constraint on, so any integer can arrive. And both ends
+    storable, because the value drawn from this range is written to a column.
+    """
+    low, high = jittered_range(hint)
+    assert low <= high
+    assert storable(low) and storable(high)
+
+
+def test_the_stored_hint_lands_in_the_range_for_a_hint_at_the_column_width(
+    seeded: ServiceContext,
+) -> None:
+    """And the behavioural half, at the boundary, so the two are connected.
+
+    The range is exact above; this is that range reaching a column. A hint at
+    ``MAX_STORED_INT`` is the case where an unclamped range could write an
+    unstorable value, so the assertion is ``storable`` rather than a band.
+    """
+    identifier = "3f8c1a20-0000-4000-8000-00000000e0ff"
+    seeded.store.put_dataset(Dataset.model_validate(_with_latency(MAX_STORED_INT, identifier)))
+
+    reply = expand(seeded, identifier, POOL_NODE, 1)
+    assert reply.ok, reply
+    added_entry = payload(reply)["data"]["dataset"]["pools"][POOL_NODE][AUTHORED_ENTRIES]
+    low, high = jittered_range(MAX_STORED_INT)
+    assert low <= added_entry["latency_hint_ms"] <= high
+    assert storable(added_entry["latency_hint_ms"])
 
 
 def test_the_expansion_salt_is_the_documented_shape() -> None:

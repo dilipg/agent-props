@@ -32,14 +32,17 @@ whether a Postgres database matches.
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+from uuid import UUID
 
 import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import inspect, text
+from sqlalchemy import Engine, insert, inspect, select, text
 
 from agentprops.models import Blueprint, Dataset, DatasetQuery
 from agentprops.storage import (
@@ -49,7 +52,14 @@ from agentprops.storage import (
     create_engine_for,
     sqlite_url,
 )
-from agentprops.storage.sql import include_object
+from agentprops.storage.sql import (
+    blueprints,
+    datasets,
+    include_object,
+    run_steps,
+    runs,
+    skeletons,
+)
 from conftest import postgres_test_url
 from integration.conftest import make_run
 
@@ -278,39 +288,152 @@ def test_the_runs_index_keeps_its_descending_column(migrated: str) -> None:
         engine.dispose()
 
 
-def test_the_json_and_boolean_defaults_execute_on_this_dialect(migrated: str) -> None:
-    """M3's second open note, closed by *executing* it rather than compiling it.
+#: Every ``server_default`` in the schema, with the value the DDL says it
+#: produces. Read as a table so the test below cannot exercise three of them and
+#: claim seven - which is what it did until this round: its docstring promised a
+#: row omitting "every one of them" and its body inserted one ``skeletons`` row
+#: and read back ``parts``.
+#:
+#: ``None`` means "a timestamp, so any value will do" - the assertion for those
+#: is that the column is populated at all, because the value is a clock reading
+#: and there is nothing to compare it to.
+SERVER_DEFAULTS: tuple[tuple[str, str, object], ...] = (
+    ("blueprints", "created_at", None),
+    ("datasets", "archived", False),
+    ("skeletons", "parts", {}),
+    ("skeletons", "created_at", None),
+    ("runs", "run_class", "dev"),
+    ("runs", "warnings", []),
+    ("runs", "external_refs", {}),
+    ("runs", "started_at", None),
+    ("run_steps", "fetched_at", None),
+)
 
-    ``skeletons.parts``, ``runs.warnings`` and ``runs.external_refs`` declare
-    ``server_default=sa.text("'{}'")`` and ``"'[]'"``, and
-    ``datasets.archived`` declares ``sa.false()``. All four were verified only
-    as **compiled SQL** at M3: "Postgres coerces an unknown-type literal to
+
+def _defaulted_rows(engine: Engine) -> dict[str, Any]:
+    """One row per table, each **omitting every defaulted column**, read back.
+
+    Written through SQLAlchemy Core rather than raw SQL so the values bind
+    through the column types: a ``jsonb`` column needs a cast from a text
+    parameter on Postgres and does not on SQLite, and hand-writing that is how a
+    test ends up proving something about its own SQL.
+
+    Insert order follows the foreign keys, which both SQL dialects enforce.
+    """
+    when = datetime(2026, 9, 8, 10, 14, 22, tzinfo=UTC)
+    identifier = UUID("3f8c1a20-0000-4000-8000-0000000000b1")
+    with engine.begin() as connection:
+        connection.execute(
+            insert(blueprints).values(
+                agent_id="defaults", version="1.0.0", status="draft", document={}
+            )
+        )
+        connection.execute(
+            insert(datasets).values(
+                id=identifier,
+                version=1,
+                agent_id="defaults",
+                bp_version="1.0.0",
+                labels={},
+                seed=1,
+                title="t",
+                intent="i",
+                author_name="n",
+                author_handle="h",
+                author_agent="human",
+                document={},
+                created_at=when,
+            )
+        )
+        connection.execute(
+            insert(skeletons).values(
+                id=identifier,
+                agent_id="defaults",
+                bp_version="1.0.0",
+                labels={},
+                seed=1,
+                manifest=[],
+            )
+        )
+        connection.execute(
+            insert(runs).values(
+                id="defaults-run",
+                agent_id="defaults",
+                dataset_id=identifier,
+                dataset_ver=1,
+                bp_version="1.0.0",
+                status="running",
+            )
+        )
+        connection.execute(
+            insert(run_steps).values(
+                run_id="defaults-run", node_id="n", iteration=0, seq=1, served={}
+            )
+        )
+        return {
+            table: dict(connection.execute(select(target)).one()._mapping)
+            for table, target in (
+                ("blueprints", blueprints),
+                ("datasets", datasets),
+                ("skeletons", skeletons),
+                ("runs", runs),
+                ("run_steps", run_steps),
+            )
+        }
+
+
+def test_every_server_default_executes_on_this_dialect(migrated: str) -> None:
+    r"""M3's second open note, closed by *executing* every default rather than one.
+
+    Nine ``server_default``\ s across five tables, and M3 verified all of them
+    only as **compiled SQL**: "Postgres coerces an unknown-type literal to
     ``jsonb``, which is why they are written that way, but 'coerces' is a claim
     about the server and no server has been asked."
 
-    Asked here, on both dialects, by inserting a row that omits every one of
-    them and reading the values back. A ``DEFAULT 0`` on a boolean - which is
-    what autogenerate rendered for SQLite - is an error on Postgres, and that is
-    the shape of failure this catches.
+    Asked here, on both dialects, by inserting a row per table that omits every
+    defaulted column and reading the values back. Two of the nine are the ones
+    that would fail loudly rather than subtly: ``sa.false()`` on a boolean,
+    because ``DEFAULT 0`` - which is what autogenerate rendered for SQLite - is
+    an error on Postgres; and ``sa.text("'{}'")`` on a ``jsonb`` column, which
+    is the coercion M3's note was actually about.
+
+    This test used to exercise **one** of them while its docstring claimed all,
+    which is the same class of overclaim this milestone corrected twice
+    elsewhere. :data:`SERVER_DEFAULTS` is now a table, so the count is the
+    schema's rather than the author's.
     """
     engine = create_engine_for(migrated)
     try:
-        with engine.begin() as connection:
-            connection.execute(
-                text(
-                    "insert into skeletons (id, agent_id, bp_version, labels, seed, manifest) "
-                    "values (:id, 'a', '1.0.0', :labels, 1, :manifest)"
-                ),
-                {
-                    "id": "3f8c1a20-0000-4000-8000-0000000000b1",
-                    "labels": "{}",
-                    "manifest": "[]",
-                },
-            )
-            parts = connection.execute(text("select parts from skeletons")).scalar_one()
-        assert parts in ({}, "{}"), f"the parts default did not execute: {parts!r}"
+        rows = _defaulted_rows(engine)
     finally:
         engine.dispose()
+
+    for table, column, expected in SERVER_DEFAULTS:
+        value = rows[table][column]
+        if expected is None:
+            assert value is not None, f"{table}.{column} has no value, so its default never ran"
+            assert isinstance(value, datetime), f"{table}.{column} is {value!r}, not a timestamp"
+            continue
+        assert value == expected, f"{table}.{column} defaulted to {value!r}, not {expected!r}"
+
+
+def test_the_defaults_table_covers_every_declared_default() -> None:
+    """The guard for the table, so the test above cannot go stale silently.
+
+    :data:`SERVER_DEFAULTS` is compared against ``METADATA`` itself, so a column
+    that gains or loses a ``server_default`` fails here rather than being
+    quietly unexercised - which is exactly the failure the test above had.
+    """
+    declared = {
+        (table.name, column.name)
+        for table in METADATA.sorted_tables
+        for column in table.columns
+        if column.server_default is not None
+    }
+    covered = {(table, column) for table, column, _ in SERVER_DEFAULTS}
+    assert covered == declared, (
+        f"uncovered: {sorted(declared - covered)}; stale: {sorted(covered - declared)}"
+    )
 
 
 def test_a_write_journey_runs_against_a_migrated_database(
