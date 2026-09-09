@@ -1346,6 +1346,39 @@ two checks that cannot disagree.
 
 **Cost if wrong.** One Protocol method; the sequential path is unchanged.
 
+## Rulings that bind M7 (Postgres, Mongo, containers, promotion)
+
+### R-56 — `dataset_expand` validates before storing, and never silently clamps
+
+This settles finding F-25, deferred from the pre-flight scan: `dataset_expand(dataset_id,
+node_id, count)` can produce a pool longer than `max_iterations`, which DS-023 forbids.
+
+**Ruling.** `dataset_expand` is a **write path**, so R-23 applies unchanged: build the
+expanded document, validate it, and store only if it passes. An expansion that would push a
+loop node's pool past `max_iterations` therefore returns **DS-023** and stores nothing.
+
+Two alternatives rejected:
+
+- **Silently clamping to `max_iterations`** breaks the determinism contract the tool exists
+  to provide. Design principle 3 is "same seed plus same blueprint version yields the same
+  dataset"; a caller asking for `count=10` and receiving 3 without being told has no way to
+  know its output is not what it requested.
+- **Storing the over-long pool** violates ground rule 7 and PRD design principle 4, "reject
+  invalid data loudly at write time". A dataset in the store is trusted by the read path;
+  writing one that fails its own catalogue is the one thing the validator exists to prevent.
+
+Returning DS-023 is **not** gating. Ground rule 3 forbids refusing to serve over a *policy*
+judgement; this is a validation failure on a write, which section 1's envelope covers
+explicitly. Put `max_iterations` and the resulting length in the error's `context` so the
+caller can retry with a workable `count` rather than guessing.
+
+**Also:** PRD section 4 tags `dataset_expand` "phase 1.5" while M7's acceptance criteria
+require it. Same class as R-15 — the milestone gate wins, and the phase tag means "not
+required for a working phase-1 runtime", not "must not exist".
+
+**Cost if wrong.** If clamping is preferred, it becomes a clamp plus a warning naming the
+requested and actual counts — never a silent one.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
