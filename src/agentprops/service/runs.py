@@ -1,13 +1,20 @@
-"""The runtime read path: ``run_start``, ``fetch_step``, ``run_get``, ``run_find``.
+"""The runtime: ``run_start``, ``fetch_step``, ``record_step``, ``run_finish``, and the two reads.
 
 This module is where PRD 5.6 - "the runtime is read-only" - is either true or
 false. Everything in it reads a blueprint and a dataset and writes **only** the
-run: ``put_run`` for the run row and ``upsert_step`` for the step that was
-served. There is no call to ``put_dataset`` or ``set_archived`` anywhere on
-these paths, and that is asserted mechanically rather than claimed here -
+run: ``put_run`` for the run row, ``upsert_step`` for the step that was served,
+``set_step_actual`` for what the agent did there, ``set_run_warnings`` for the
+warning merge and ``mark_run_finished`` for the lifecycle. There is no call to
+``put_dataset`` or ``set_archived`` anywhere on these paths, and that is
+asserted mechanically rather than claimed here -
 `tests/unit/test_runtime_is_read_only.py` walks the call graph of every entry
-point in this module and fails on any store mutator that is not one of the
-three run writes.
+point in this module and fails on any store mutator that is not one of those
+five run writes.
+
+"Read-only" is about the *world*, and M8's two writes do not weaken it.
+``record_step`` writes an ``actual`` onto a step of a run and ``run_finish``
+closes a run; neither can reach a dataset, which is PRD 5.6's own division -
+"``record_step`` writes to the run, never to the world".
 
 The pin, and why every read goes through it
 -------------------------------------------
@@ -68,11 +75,37 @@ nothing" literally true.
 micro-optimisation.** ``put_run`` writes every column from the model it is
 handed, so flagging a warning through an edited copy of the run this call read
 at the top would revert ``status``, ``outcome`` and ``finished_at`` to whatever
-they were at the snapshot - un-finishing a run that M8's ``run_finish``
-completed in between. Nothing today would catch it, because ``run_finish`` does
-not exist yet. `storage/base.py::set_run_warnings` carries the full reasoning;
-the short version is that the column bound is the guarantee, and a transaction
+they were at the snapshot - un-finishing a run that ``run_finish`` completed in
+between. `storage/base.py::set_run_warnings` carries the full reasoning; the
+short version is that the column bound is the guarantee, and a transaction
 around a read and a write would not have been one (ruling R-37).
+
+**M8 built the other half of that pair.** ``run_finish`` writes through
+``mark_run_finished``, which sets ``status``, ``outcome`` and ``finished_at``
+and touches no other column - so it cannot revert the ``warnings`` a concurrent
+``fetch_step`` just merged in either. The two narrow writes are each other's
+counterpart, and until M8 the bug was unreachable only because one of them did
+not exist.
+
+Closing a run, and the two mismatches (rulings R-53, R-54(c))
+-------------------------------------------------------------
+
+``run_finish`` and ``record_step`` are writes, so both meet a condition
+``fetch_step`` never does: the value is **already there**. Both answer it the
+way R-53 answers a diverging ``run_start`` - keep what is stored, return it,
+and attach a warning naming the divergence - because ground rule 3 is
+"mismatches produce warnings attached to the response and to the stored run",
+and because a retried request after a network blip must neither fail nor
+overwrite. So a repeated identical call is a silent no-op success, and a
+differing one is a success carrying ``run_finish_mismatch`` or
+``step_actual_conflict``.
+
+Neither refuses, and neither is a policy verdict. R-54(c) settles the third
+case in the same direction: a **finished** run still serves, because nothing
+reads ``Run.status`` at read time and the read path is pin-scoped. M8 takes the
+"may warn" half of that ruling - ``fetch_step`` and ``record_step`` against a
+closed run attach ``run_already_finished`` - and not the refusal, which the
+ruling forbids.
 """
 
 from __future__ import annotations
@@ -105,6 +138,7 @@ from agentprops.service.documents import parse
 from agentprops.service.envelope import (
     AP_ARGUMENT,
     AP_NOT_FOUND,
+    AP_STORE_REFUSED,
     Reply,
     boundary,
     failure,
@@ -115,20 +149,29 @@ from agentprops.service.envelope import (
 )
 from agentprops.service.limits import page, storable
 from agentprops.service.resolution import resolve
+from agentprops.storage import RecordNotFoundError, StoreError
 
 __all__ = [
     "DEFAULT_RUN_CLASS",
+    "FINISH_STATUSES",
     "RUN_CLASSES",
     "RUN_ID_MAX_LENGTH",
     "RUN_ID_MIN_LENGTH",
     "RUN_ID_PATTERN",
+    "STATUS_ABANDONED",
+    "STATUS_FINISHED",
     "STATUS_RUNNING",
     "WARNING_DATASET_SELECTION_AMBIGUOUS",
+    "WARNING_RUN_ALREADY_FINISHED",
+    "WARNING_RUN_FINISH_MISMATCH",
     "WARNING_RUN_START_MISMATCH",
+    "WARNING_STEP_ACTUAL_CONFLICT",
     "fetch_step",
     "find",
+    "finish",
     "get",
     "paginate",
+    "record_step",
     "start",
 ]
 
@@ -148,9 +191,20 @@ RUN_CLASSES: Final[frozenset[str]] = frozenset({"dev", "eval", "load"})
 #: storage adapter (``Run.run_class``'s own docstring asks for that).
 DEFAULT_RUN_CLASS: Final = "dev"
 
-#: A run's status the moment ``run_start`` returns. ``run_finish`` moves it at
-#: M8; nothing in phase 1 reads it, because the service never gates.
+#: A run's status the moment ``run_start`` returns. ``run_finish`` moves it to
+#: one of :data:`FINISH_STATUSES`; nothing on the *read* path reads it, because
+#: the service never gates (ruling R-54(c)).
 STATUS_RUNNING: Final = "running"
+
+#: The two statuses ``run_finish`` may move a run to. contracts 2.3's
+#: vocabulary is ``running | finished | abandoned``, and ``running`` is
+#: deliberately not accepted here: ``run_finish`` closes a run, and a tool that
+#: accepted ``running`` would advertise an un-finish that
+#: ``mark_run_finished``'s compare-and-set cannot perform anyway. An unknown
+#: value is ``AP-001`` naming the vocabulary, the way ``run_class`` is.
+STATUS_FINISHED: Final = "finished"
+STATUS_ABANDONED: Final = "abandoned"
+FINISH_STATUSES: Final[frozenset[str]] = frozenset({STATUS_FINISHED, STATUS_ABANDONED})
 
 #: Attached when a ``{labels}`` selector matched more than one dataset, naming
 #: how many and which one was assigned. ``Warning.code`` is an open string
@@ -169,6 +223,32 @@ WARNING_DATASET_SELECTION_AMBIGUOUS: Final = "dataset_selection_ambiguous"
 #: shape as ``blueprint_version_mismatch`` - the caller declared one thing, the
 #: run is pinned to another, so serve the pin and report the difference.
 WARNING_RUN_START_MISMATCH: Final = "run_start_mismatch"
+
+#: Attached when ``run_finish`` names a run that is **already closed** with a
+#: different ``status`` or ``outcome``. R-53's shape, one tool along: the run
+#: keeps the outcome it was closed with, because a run's recorded outcome is
+#: evidence and evidence that a second caller can overwrite is worth less than
+#: none. The divergence is reported rather than ignored, and rather than
+#: refused - ground rule 3. A repeated *identical* finish adds no warning at
+#: all, so a retry after a network blip is silent.
+WARNING_RUN_FINISH_MISMATCH: Final = "run_finish_mismatch"
+
+#: Attached when ``record_step`` reports an ``actual`` for a step that already
+#: records a **different** one. ``set_step_actual`` is write-once per key
+#: (ruling R-33) and refuses at the store; this is how that refusal reaches a
+#: caller, because the service never gates and a step's served fixture and
+#: recorded actual are both evidence. The stored actual is what comes back, so
+#: the caller can see what it is disagreeing with.
+WARNING_STEP_ACTUAL_CONFLICT: Final = "step_actual_conflict"
+
+#: Attached when ``fetch_step`` or ``record_step`` addresses a run whose
+#: lifecycle is closed. Ruling R-54(c): "a finished run still serves, and that
+#: is correct ... M8 may add a warning if it proves useful; it must not add a
+#: refusal." This is the warning half. An agent still fetching steps after its
+#: harness closed the run is a real defect in the harness and nothing else in
+#: the response says so - but the fixtures are pin-scoped and immutable, so
+#: serving them is not the defect and refusing would be a gate.
+WARNING_RUN_ALREADY_FINISHED: Final = "run_already_finished"
 
 
 def start(
@@ -257,9 +337,7 @@ def fetch_step(
 
     run = context.store.get_run(run_id)
     if run is None:
-        return failure(
-            [runtime(RT_E03, field_pointer("run_id"), f"no run {run_id!r}.", run_id=run_id)]
-        )
+        return failure([_no_run(run_id)])
 
     blueprint = context.store.get_blueprint(run.agent_id, run.pin.blueprint_version)
     if blueprint is None:  # pragma: no cover - DS-001 plus BP-016 make this unreachable
@@ -283,8 +361,112 @@ def fetch_step(
         ]
 
     served = _serve(context, run, resolved, index, fixture)
+    warnings += _lifecycle(run)
     _flag(context, run, warnings)
     return success("step", {"fixture": served, "resolved_node_id": resolved}, warnings)
+
+
+def record_step(
+    context: ServiceContext,
+    run_id: str,
+    actual: dict[str, Any],
+    *,
+    node_id: str | None = None,
+    tool_name: str | None = None,
+    iteration: int | None = None,
+) -> Reply:
+    """What the agent produced at one step. ``{step, resolved_node_id}``.
+
+    The write half of ``fetch_step``, and deliberately the *same* addressing:
+    ``node_id`` or ``tool_name``, resolved through `resolution.py` against the
+    run's reconstructed position, with the same ``iteration``. The key is the
+    **resolved** one - ``(run_id, resolved_node_id, iteration)`` - so a step
+    fetched by tool name and recorded by node id is one step, which is what
+    ruling R-64 means by "the same key means the same step".
+
+    Four things this deliberately does not do:
+
+    - **It does not grade.** Ground rule 2: the service "stores expectations and
+      emits evidence" and holds no comparison logic. ``actual`` is stored
+      verbatim, unvalidated against ``expected.final`` and unvalidated against
+      the blueprint's ``output_schema`` - a run whose agent produced nonsense is
+      a run whose evidence records nonsense, and the client's three comparison
+      helpers are what decide whether that passes.
+    - **It does not serve a step it has not served.** ``set_step_actual`` fails
+      when no step record exists (ruling R-33), because an actual cannot be
+      reported for a step that was never fetched. That is ``AP-004``: the step
+      key names no record.
+    - **It does not overwrite.** ``set_step_actual`` is write-once per key. An
+      identical re-record is a no-op success - which is what makes a retry after
+      a network blip safe - and a *differing* one keeps the stored value and
+      warns with ``step_actual_conflict``. See :func:`_conflicted`.
+    - **It does not refuse a closed run.** Ruling R-54(c) again: the warning,
+      not the gate.
+    """
+    index, bad = _iteration(iteration)
+    if bad:
+        return failure(bad)
+
+    run = context.store.get_run(run_id)
+    if run is None:
+        return failure([_no_run(run_id)])
+
+    blueprint = context.store.get_blueprint(run.agent_id, run.pin.blueprint_version)
+    if blueprint is None:  # pragma: no cover - DS-001 plus BP-016 make this unreachable
+        return failure([_no_blueprint(run)])
+
+    resolved, findings = resolve(blueprint, run, node_id=node_id, tool_name=tool_name)
+    if resolved is None:
+        return failure(findings)
+
+    try:
+        step = context.store.set_step_actual(run_id, resolved, index, actual)
+    except RecordNotFoundError:
+        return failure([_step_not_served(run_id, resolved, index, node_id, tool_name)])
+    except StoreError:
+        return _conflicted(context, run, resolved, index, actual)
+    return _recorded(context, run, resolved, step, [])
+
+
+def finish(context: ServiceContext, run_id: str, outcome: dict[str, Any], status: str) -> Reply:
+    """Close a run: ``status``, ``outcome``, ``finished_at``. Returns the stored run.
+
+    Ruling R-15 lands this at M8, the milestone whose gate needs a recorded
+    outcome to grade. Three properties, and the middle one is the reason the
+    store method is a compare-and-set:
+
+    **The write is narrow.** ``mark_run_finished`` sets three columns and
+    touches no other, which is ``set_run_warnings``' guarantee mirrored: a
+    ``fetch_step`` running concurrently owns ``warnings``, and neither write can
+    revert the other's column. ``put_run`` with an edited copy of the run read
+    here would revert exactly the warning a concurrent exhausted draw had just
+    merged in - the M6 finding, in the opposite direction.
+
+    **The first finish wins, and a divergent second one warns.** The
+    compare-and-set decides that once, in the database, and the boolean it
+    returns is the whole of this function's branch. An unconditional write would
+    hand *both* callers a success envelope naming their own outcome while the row
+    held one of them, which is the silent shape ruling R-47 rejected for
+    ``mark_skeleton_submitted``. A repeated *identical* finish adds no warning,
+    so a retry is indistinguishable from the first call.
+
+    **It does not grade, and it does not validate the outcome.** Ground rule 2:
+    ``outcome`` is stored as given, even when it contradicts the blueprint's
+    ``outcome_schema``. Validating it here would put the comparison the client
+    owns onto the write path and would turn a *finding about the agent* into a
+    refusal to record what the agent did.
+    """
+    findings = _finish_argument_findings(status)
+    if findings:
+        return failure(findings)
+    try:
+        claimed = context.store.mark_run_finished(run_id, status, outcome, context.clock.now())
+    except RecordNotFoundError:
+        return failure([_no_run(run_id)])
+    run = context.store.get_run(run_id)
+    if run is None:  # pragma: no cover - no hard delete, so the run cannot vanish
+        return failure([_no_run(run_id)])
+    return _finished(context, run, [] if claimed else _finish_divergence(run, status, outcome))
 
 
 def get(context: ServiceContext, run_id: str) -> Reply:
@@ -298,9 +480,7 @@ def get(context: ServiceContext, run_id: str) -> Reply:
     """
     run = context.store.get_run(run_id)
     if run is None:
-        return failure(
-            [runtime(RT_E03, field_pointer("run_id"), f"no run {run_id!r}.", run_id=run_id)]
-        )
+        return failure([_no_run(run_id)])
     return success("run", run.model_dump(mode="json"))
 
 
@@ -477,6 +657,32 @@ def _iteration(iteration: int | None) -> tuple[int, list[RuleError]]:
             )
         ]
     return index, []
+
+
+def _finish_argument_findings(status: str) -> list[RuleError]:
+    """``run_finish``'s one argument check: the status vocabulary.
+
+    ``AP-001`` naming the two accepted values, for the reason ``run_class`` is
+    an ``AP-001``: the vocabulary is closed and no catalogue rule owns it.
+    ``running`` is rejected along with everything else - see
+    :data:`FINISH_STATUSES`.
+
+    ``outcome`` is **not** checked here beyond the object-ness the boundary
+    already enforced. Ground rule 2: its content is the agent's, and the service
+    does not have an opinion about it.
+    """
+    if status in FINISH_STATUSES:
+        return []
+    return [
+        boundary(
+            AP_ARGUMENT,
+            field_pointer("status"),
+            f"status must be one of {sorted(FINISH_STATUSES)}.",
+            argument="status",
+            given=status,
+            allowed=sorted(FINISH_STATUSES),
+        )
+    ]
 
 
 # ------------------------------------------------------------------ selection
@@ -826,7 +1032,229 @@ def _flag(context: ServiceContext, run: Run, warnings: list[Warning]) -> list[Wa
     return context.store.set_run_warnings(run.id, merged)
 
 
+# ------------------------------------------------- record_step and run_finish
+
+
+def _lifecycle(run: Run) -> list[Warning]:
+    """``run_already_finished``, if the run is closed. Ruling R-54(c)'s warn half.
+
+    Keyed off ``finished_at`` rather than ``status``, for the reason
+    ``mark_run_finished``'s compare-and-set is: the timestamp is set by both
+    terminal statuses, so one predicate covers ``finished`` and ``abandoned``
+    without this module holding an opinion about the vocabulary in two places.
+
+    The detail carries neither ``node_id`` nor ``iteration``, which makes
+    :func:`_warning_key` record it **once per run** rather than once per step -
+    deliberate, and the same choice ``run_start_mismatch`` makes: an agent
+    looping against a closed run must not grow the run's warning list without
+    bound, and every response carries its own copy regardless.
+    """
+    if run.finished_at is None:
+        return []
+    return [
+        warning(
+            WARNING_RUN_ALREADY_FINISHED,
+            run_id=run.id,
+            status=run.status,
+            finished_at=run.finished_at.isoformat(),
+        )
+    ]
+
+
+def _recorded(
+    context: ServiceContext, run: Run, resolved: str, step: StepRecord, warnings: list[Warning]
+) -> Reply:
+    """``{step, resolved_node_id}`` for ``record_step``, with the run flagged.
+
+    contracts section 4 documents the return as ``{ok}``, which the envelope
+    itself carries. The named key holds the **stored** step and the resolved
+    node id, for ``fetch_step``'s reason: a caller who addressed the step by
+    tool name has no other way to learn which node it landed on, and a caller
+    who hit :data:`WARNING_STEP_ACTUAL_CONFLICT` needs to see the actual it is
+    disagreeing with.
+
+    The envelope's ``warnings`` is **this call's** list rather than the run's,
+    which is ``fetch_step``'s convention: a caller wants to know what happened
+    to its request, and the run's whole history is what ``run_get`` is for. The
+    merge onto the run still happens - contracts 3.4 attaches a warning to both
+    - and :func:`_flag` is called for that effect.
+    """
+    attached = warnings + _lifecycle(run)
+    _flag(context, run, attached)
+    return success(
+        "record",
+        {"step": step.model_dump(mode="json"), "resolved_node_id": resolved},
+        attached,
+    )
+
+
+def _conflicted(
+    context: ServiceContext, run: Run, resolved: str, iteration: int, actual: dict[str, Any]
+) -> Reply:
+    """``set_step_actual`` refused. Which refusal was it?
+
+    The store raises :class:`StoreError` for two different conditions and they
+    need different answers, so this **re-reads the step and classifies** rather
+    than assuming the common one:
+
+    - a *different* actual is recorded: the write-once conflict. The stored step
+      comes back with a ``step_actual_conflict`` warning, because ground rule 3
+      makes a mismatch a warning and R-33 makes the stored value the winner;
+    - no actual is recorded at all: the store exhausted its retry budget under
+      contention. That is ``AP-005`` - "the store refused a write through one of
+      its programming-error guards" - and it is emphatically not a conflict,
+      because nothing is stored to conflict with. Reporting it as one would tell
+      a caller their evidence lost to a value that does not exist.
+
+    This is not a second decision site for the *write*: the store decided that,
+    once, and this classifies the refusal it returned. The comparison is
+    ``==`` on the two decoded documents rather than the adapter's canonical
+    form, which is enough to tell the two conditions apart - the losing branch
+    is "no actual at all", not "an equal one".
+    """
+    stored = _step_of(context, run.id, resolved, iteration)
+    if stored is None or stored.actual is None:
+        return failure([_store_refused(run.id, resolved, iteration)])
+    conflict = warning(
+        WARNING_STEP_ACTUAL_CONFLICT,
+        run_id=run.id,
+        node_id=resolved,
+        iteration=iteration,
+        recorded_at=None if stored.recorded_at is None else stored.recorded_at.isoformat(),
+        differs=stored.actual != actual,
+    )
+    return _recorded(context, run, resolved, stored, [conflict])
+
+
+def _step_of(
+    context: ServiceContext, run_id: str, node_id: str, iteration: int
+) -> StepRecord | None:
+    """The stored step for one key, read back through ``get_run``.
+
+    A re-read rather than the snapshot ``record_step`` took at the top, because
+    the snapshot is exactly what a concurrent writer has invalidated - it is the
+    reason there is a conflict to report at all.
+    """
+    reread = context.store.get_run(run_id)
+    if reread is None:  # pragma: no cover - no hard delete, so the run cannot vanish
+        return None
+    return next(
+        (step for step in reread.steps if step.node_id == node_id and step.iteration == iteration),
+        None,
+    )
+
+
+def _finished(context: ServiceContext, run: Run, diverged: list[Warning]) -> Reply:
+    """``{run}`` for ``run_finish``, with the merged warnings on both.
+
+    The run is dumped with the **merged** warning list substituted rather than
+    the list it was read with, because contracts section 4 documents this tool's
+    return as "the stored run" and a caller reading ``data.run.warnings`` would
+    otherwise miss the warning this very call attached. ``_started`` leaves that
+    to the envelope, which is right for a payload whose named key is ``start``;
+    here the named key is the run itself.
+
+    So the two lists here are deliberately different, and each is the useful
+    one: the **payload** run carries every warning the run has ever recorded,
+    and the **envelope** carries what this call found. ``_started``'s replay
+    reports the run's list on the envelope because its payload run is not
+    re-dumped with the merge; this one is. The difference matters for a second
+    diverging finish - ``_flag`` dedupes ``run_finish_mismatch`` by
+    ``(code, None, None)`` so the run records it once, and a caller that read
+    the run's copy would see the *first* divergence's detail rather than its own.
+    """
+    merged = _flag(context, run, diverged)
+    return success(
+        "run", run.model_copy(update={"warnings": merged}).model_dump(mode="json"), diverged
+    )
+
+
+def _finish_divergence(run: Run, status: str, outcome: dict[str, Any]) -> list[Warning]:
+    """Ruling R-53's comparison, for a run that was already closed.
+
+    Called only when the compare-and-set reported that this call did **not**
+    close the run, so the stored values are another caller's (or this caller's
+    own retry). A repeated identical finish diverges in nothing and therefore
+    warns about nothing, which is what makes a retry after a network blip
+    silent.
+
+    The two documents are compared as they now stand: ``run.outcome`` is the
+    stored one, because :func:`finish` re-reads the run after the write.
+    """
+    diverged = [
+        name
+        for name, differs in (("status", run.status != status), ("outcome", run.outcome != outcome))
+        if differs
+    ]
+    if not diverged:
+        return []
+    return [
+        warning(
+            WARNING_RUN_FINISH_MISMATCH,
+            diverged=diverged,
+            run_id=run.id,
+            recorded={
+                "status": run.status,
+                "finished_at": None if run.finished_at is None else run.finished_at.isoformat(),
+            },
+            requested={"status": status},
+        )
+    ]
+
+
 # ------------------------------------------------------------------- findings
+
+
+def _no_run(run_id: str) -> RuleError:
+    """RT-E03. The one finding four entry points share, so they cannot drift."""
+    return runtime(RT_E03, field_pointer("run_id"), f"no run {run_id!r}.", run_id=run_id)
+
+
+def _step_not_served(
+    run_id: str, resolved: str, iteration: int, node_id: str | None, tool_name: str | None
+) -> RuleError:
+    """``AP-004`` for a ``record_step`` on a step that was never fetched.
+
+    The step key names no record, which is what ``AP-004`` is: "no record with
+    that id". Not an ``RT-*`` code - resolution *succeeded*, the node exists in
+    the blueprint and the run exists in the store; what is missing is the served
+    step, and ruling R-33 is explicit that an actual cannot be reported for one.
+
+    The pointer addresses **whichever argument the caller used** to address the
+    step, so a ``tool_name`` caller is not pointed at a ``node_id`` they never
+    sent. ``resolved_node_id`` rides in the context either way, because a
+    tool-name caller needs to know which node the key was built from.
+    """
+    return boundary(
+        AP_NOT_FOUND,
+        field_pointer("node_id" if node_id is not None else "tool_name"),
+        f"run {run_id!r} has no served step {resolved}/{iteration}: an actual cannot be "
+        f"recorded for a step that was never fetched.",
+        run_id=run_id,
+        resolved_node_id=resolved,
+        iteration=iteration,
+        node_id=node_id,
+        tool_name=tool_name,
+    )
+
+
+def _store_refused(run_id: str, resolved: str, iteration: int) -> RuleError:
+    """``AP-005`` for a ``set_step_actual`` that refused with nothing recorded.
+
+    The store exhausted its retry budget without any actual being stored, which
+    is contention rather than a conflict. ``AP-005`` is the code for "the store
+    refused a write through one of its programming-error guards", and its
+    catalogue entry says the right thing about this: reaching it means something
+    upstream did not hold.
+    """
+    return boundary(
+        AP_STORE_REFUSED,
+        field_pointer("actual"),
+        f"the store refused to record an actual for {run_id}/{resolved}/{iteration}.",
+        run_id=run_id,
+        resolved_node_id=resolved,
+        iteration=iteration,
+    )
 
 
 def _dataset_missing(dataset_id: str, agent_id: str) -> RuleError:

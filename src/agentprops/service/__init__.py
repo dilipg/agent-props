@@ -25,7 +25,7 @@ The layout
 `datasets.py`                the five dataset tools M4 owns
 `skeletons.py`               the authoring flow, and the one dataset write
 `resolution.py`              contracts section 5, the step identity algorithm
-`runs.py`                    the runtime read path, which writes only the run
+`runs.py`                    the runtime: the read path plus M8's two run writes
 `expansion.py`               ``dataset_expand``: seeded, validated, then stored
 `promotion.py`               ``dataset_export`` and ``dataset_import``
 `admin.py`                   the three admin reads

@@ -1,14 +1,24 @@
-"""The four run tools. contracts section 4, Run table.
+"""The six run tools. contracts section 4, Run table.
 
-``run_start`` and ``fetch_step`` are the runtime, and phase 1 ships them **as
-reads**: neither writes a dataset, and `service/runs.py` is where that is
-enforced and `tests/unit/test_runtime_is_read_only.py` is where it is proved.
-``run_get`` and ``run_find`` land here too, because ruling R-15 assigns them to
-"M6 with the run storage they read".
+``run_start`` and ``fetch_step`` are the runtime read path: neither writes a
+dataset, and `service/runs.py` is where that is enforced and
+`tests/unit/test_runtime_is_read_only.py` is where it is proved. ``run_get`` and
+``run_find`` land here too, because ruling R-15 assigns them to "M6 with the run
+storage they read".
 
-``record_step`` and ``run_finish`` are M8's, ``run_evidence`` and ``run_export``
-are M10's. All four are listed in `tests/unit/test_tool_surface.py`'s
-``DEFERRED`` until then.
+``record_step`` and ``run_finish`` are M8's, by the same ruling: contracts
+section 4 tags them phase 2, and R-15 reads that tag as "not required for a
+working phase-1 runtime" rather than "must not exist" - M8's gate needs a
+recorded outcome to grade. Both write to the **run** and can reach no dataset,
+so ground rule 1 is untouched; the read-only guard's call graph covers them
+alongside the other four. ``run_evidence`` and ``run_export`` are M10's and stay
+in `tests/unit/test_tool_surface.py`'s ``DEFERRED`` until then.
+
+Neither of M8's two tools grades anything (ground rule 2) and neither refuses:
+a re-record with a different actual and a re-finish with a different outcome
+both keep the stored value and come back with a warning, which is ruling R-53's
+answer to a diverging ``run_start`` applied to the two writes that can meet an
+already-recorded value.
 
 One deviation from the contract's parameter *order*, and none from its
 parameter *set*: contracts section 4 lists ``run_start`` as ``run_id, agent_id,
@@ -36,7 +46,7 @@ from agentprops.server.args import (
 )
 from agentprops.service import failure, runs
 
-__all__ = ["fetch_step", "run_find", "run_get", "run_start"]
+__all__ = ["fetch_step", "record_step", "run_find", "run_finish", "run_get", "run_start"]
 
 
 @mcp.tool()
@@ -110,6 +120,70 @@ def fetch_step(
     return reply(
         runs.fetch_step(bound(), identifier, node_id=node, tool_name=tool, iteration=index)
     )
+
+
+@mcp.tool()
+def record_step(
+    run_id: TextArg,
+    actual: ObjectArg,
+    node_id: OptionalTextArg = None,
+    tool_name: OptionalTextArg = None,
+    iteration: IntArg = None,
+) -> dict[str, Any]:
+    """Record what your agent actually produced at one step of a run.
+
+    Address the step exactly as `fetch_step` does - `node_id` or `tool_name`,
+    plus `iteration` for a pool node - and the key is the resolved one, so a
+    step fetched by tool name can be recorded by node id.
+
+    The step must already have been fetched: an actual for a step that was never
+    served is `AP-004`. Recording is write-once per step. Sending the identical
+    `actual` again is a no-op success, so a retry is safe; sending a *different*
+    one keeps the recorded value, returns it, and warns with
+    `step_actual_conflict`.
+
+    Nothing here grades. `actual` is stored verbatim and is never compared with
+    `expected.final` or checked against the node's `output_schema` - the three
+    comparison helpers in the Python client are what do that.
+    """
+    args = ArgReader()
+    identifier = args.text("run_id", run_id)
+    produced = args.mapping("actual", actual)
+    node = args.optional_text("node_id", node_id)
+    tool = args.optional_text("tool_name", tool_name)
+    index = args.number("iteration", iteration)
+    if args.errors:
+        return reply(failure(args.errors))
+    return reply(
+        runs.record_step(
+            bound(), identifier, produced, node_id=node, tool_name=tool, iteration=index
+        )
+    )
+
+
+@mcp.tool()
+def run_finish(run_id: TextArg, outcome: ObjectArg, status: TextArg) -> dict[str, Any]:
+    """Close a run with the outcome your agent produced. Returns the stored run.
+
+    `status` is `finished` or `abandoned`. `outcome` is what the agent ended up
+    producing - stored as given, never validated against the blueprint's
+    `outcome_schema` and never graded, because grading is the client's job.
+
+    The first finish wins. Calling this again with the same `status` and
+    `outcome` is a no-op success; calling it with different ones keeps the
+    recorded outcome, returns it, and warns with `run_finish_mismatch`.
+
+    A finished run still serves `fetch_step` - the fixtures are pinned and
+    immutable, so nothing here refuses. A fetch against a closed run warns with
+    `run_already_finished`.
+    """
+    args = ArgReader()
+    identifier = args.text("run_id", run_id)
+    produced = args.mapping("outcome", outcome)
+    state = args.text("status", status)
+    if args.errors:
+        return reply(failure(args.errors))
+    return reply(runs.finish(bound(), identifier, produced, state))
 
 
 @mcp.tool()

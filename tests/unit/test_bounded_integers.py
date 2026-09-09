@@ -29,8 +29,14 @@ rather than being silently skipped. That is the same arrangement
 M6 added `iteration` on `fetch_step` and `limit`/`offset` on `run_find`, and it
 **did** find out here: the enumeration failed with those three pairs named
 before any of them had a case. M7 added `count` on `dataset_expand` and found
-out the same way. That is the guard working as designed rather than a story
-about how it would have.
+out the same way, and M8 added `iteration` on `record_step` and found out for a
+fourth time. That is the guard working as designed rather than a story about how
+it would have.
+
+`record_step`'s row also shows what :data:`COVERED` is *for*. Its in-range
+control cannot pass against a fixture that merely starts a run: an actual can
+only be recorded for a step that was served, so the fixture has to fetch one
+first. No input schema could have said that.
 
 `count` answers a *third* way, which is why the distinction in `limits.py` is
 worth three names rather than two. A value above `2**63` is `AP-001`, like
@@ -161,6 +167,10 @@ COVERED: Final[dict[tuple[str, str], tuple[dict[str, Any], int]]] = {
         20260908,
     ),
     ("fetch_step", "iteration"): ({"run_id": GOLDEN_RUN, "node_id": POOL_NODE}, 1),
+    ("record_step", "iteration"): (
+        {"run_id": GOLDEN_RUN, "node_id": POOL_NODE, "actual": {"received": ["fssai"]}},
+        1,
+    ),
     ("run_find", "limit"): ({}, 50),
     ("run_find", "offset"): ({}, 0),
 }
@@ -168,17 +178,26 @@ COVERED: Final[dict[tuple[str, str], tuple[dict[str, Any], int]]] = {
 
 @pytest.fixture
 def seeded(context: ServiceContext) -> Iterator[ServiceContext]:
-    """The published blueprint, the golden dataset, and one started run.
+    """The published blueprint, the golden dataset, one started run, one served step.
 
     The run is what makes ``fetch_step``'s case non-vacuous: without it the tool
     answers RT-E03 before it ever looks at `iteration`, which is the same shape
     of vacuity that would have let this guard pass against the code M5 shipped
     broken.
+
+    M8's ``record_step`` needs one thing more, and it is the same argument a
+    turn deeper: an actual can only be recorded for a step that was **served**
+    (ruling R-33), so without the ``fetch_step`` below the in-range control
+    answers ``AP-004`` at the step key and never reaches the integer either.
+    Iteration 1 rather than 0 because 1 is the in-range value the ``record_step``
+    row uses.
     """
     blueprints.upsert(context, load_document(GOLDEN_BLUEPRINT), publish=True)
     context.store.put_dataset(Dataset.model_validate(load_document(GOLDEN_DATASET)))
     started = runs.start(context, GOLDEN_RUN, "location-onboarding", {"dataset_id": dataset_id()})
     assert started.ok, started
+    served = runs.fetch_step(context, GOLDEN_RUN, node_id=POOL_NODE, iteration=1)
+    assert served.ok, served
     yield context
 
 

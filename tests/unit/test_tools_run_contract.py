@@ -1,4 +1,4 @@
-"""The four run tools over a real in-memory MCP session.
+"""The six run tools over a real in-memory MCP session.
 
 The same division of labour `test_tools_contract.py` records: **envelopes,
 warnings and determinism** here, behaviour in `test_service_runs.py` and
@@ -7,7 +7,7 @@ would test the SDK's serialisation another fifty times.
 
 What genuinely needs a client, and is therefore here rather than there:
 
-- the four tools answer the section 1 envelope over a round trip at all, which
+- the six tools answer the section 1 envelope over a round trip at all, which
   is what registers them for `test_tool_surface.py`'s coverage guard;
 - a malformed argument becomes ``AP-001`` rather than an MCP protocol error -
   the property `server/args.py` exists for, and the one that would break
@@ -152,6 +152,24 @@ async def test_a_malformed_argument_is_an_envelope_and_not_a_protocol_error(
         bad_limit = await invoke(client, "run_find", limit=True)
         assert rules(bad_limit) == ["AP-001"], "true is not an integer"
 
+        bad_actual = await invoke(
+            client, "record_step", run_id=RUN_ID, actual="complete", node_id=POOL_NODE
+        )
+        assert rules(bad_actual) == ["AP-001"]
+        assert bad_actual["errors"][0]["pointer"] == "/actual"
+
+        bad_outcome = await invoke(
+            client, "run_finish", run_id=RUN_ID, outcome=["complete"], status="finished"
+        )
+        assert rules(bad_outcome) == ["AP-001"]
+        assert bad_outcome["errors"][0]["pointer"] == "/outcome"
+
+        bad_status = await invoke(
+            client, "run_finish", run_id=RUN_ID, outcome={}, status=["finished"]
+        )
+        assert rules(bad_status) == ["AP-001"]
+        assert bad_status["errors"][0]["pointer"] == "/status"
+
 
 async def test_fetch_step_is_byte_identical_on_the_wire(seeded: ServiceContext) -> None:
     """M6's first acceptance clause, in the form it is written: byte-identical.
@@ -244,3 +262,111 @@ async def test_run_find_returns_rows_and_is_deterministic(seeded: ServiceContext
         assert [row["id"] for row in first["data"]["runs"]] == [RUN_ID, "m6-wire-run-two"]
         filtered = await invoke(client, "run_find", run_class="load")
         assert [row["id"] for row in filtered["data"]["runs"]] == ["m6-wire-run-two"]
+
+
+# ------------------------------------------------------- record_step, run_finish
+
+
+async def test_record_step_and_run_finish_over_the_wire(seeded: ServiceContext) -> None:
+    """M8's two writes, end to end on one session: fetch, record, finish, read back.
+
+    The payload shapes contracts section 4 documents, under M4's one-named-key
+    convention: ``record`` carries the stored step plus the resolved node id -
+    which is the field a ``tool_name`` caller has no other way to learn - and
+    ``run_finish`` returns the run itself.
+    """
+    async with connected(seeded) as client:
+        await invoke(
+            client, "run_start", run_id=RUN_ID, agent_id=AGENT, selector={"dataset_id": PRIYA}
+        )
+        await invoke(client, "fetch_step", run_id=RUN_ID, node_id="receive_request")
+        recorded = await invoke(
+            client,
+            "record_step",
+            run_id=RUN_ID,
+            actual={"store_id": "store_bengaluru_04", "franchisee": "priya"},
+            tool_name="delightree.onboarding.intake",
+        )
+        assert recorded["ok"] is True
+        assert set(recorded["data"]) == {"record"}
+        payload = recorded["data"]["record"]
+        assert set(payload) == {"step", "resolved_node_id"}
+        assert payload["resolved_node_id"] == "receive_request", "addressed by tool name"
+        assert payload["step"]["actual"] == {
+            "store_id": "store_bengaluru_04",
+            "franchisee": "priya",
+        }
+        assert codes(recorded) == []
+
+        finished = await invoke(
+            client,
+            "run_finish",
+            run_id=RUN_ID,
+            outcome={"onboarding_status": "complete", "outstanding_tasks": 0},
+            status="finished",
+        )
+        assert finished["ok"] is True
+        assert set(finished["data"]) == {"run"}
+        run = finished["data"]["run"]
+        assert run["status"] == "finished"
+        assert run["outcome"] == {"onboarding_status": "complete", "outstanding_tasks": 0}
+        assert run["finished_at"] is not None
+        assert codes(finished) == []
+
+        stored = await invoke(client, "run_get", run_id=RUN_ID)
+        assert stored["data"]["run"]["steps"][0]["actual"] == payload["step"]["actual"]
+        assert stored["data"]["run"]["status"] == "finished"
+
+
+async def test_a_record_step_for_an_unserved_step_is_ap_004(seeded: ServiceContext) -> None:
+    """Ruling R-33's "an actual cannot be reported for a step that was never served".
+
+    ``escalate`` is a real node in the blueprint, so resolution succeeds and the
+    finding is about the *step key* rather than about the address - which is why
+    it is ``AP-004`` and not an ``RT-*`` code.
+    """
+    async with connected(seeded) as client:
+        await invoke(
+            client, "run_start", run_id=RUN_ID, agent_id=AGENT, selector={"dataset_id": PRIYA}
+        )
+        answered = await invoke(
+            client,
+            "record_step",
+            run_id=RUN_ID,
+            actual={"onboarding_status": "escalated"},
+            node_id="escalate",
+        )
+        assert rules(answered) == ["AP-004"]
+        assert answered["errors"][0]["pointer"] == "/node_id"
+        assert answered["errors"][0]["context"]["resolved_node_id"] == "escalate"
+
+
+async def test_an_unknown_run_is_rt_e03_on_both_run_writes(seeded: ServiceContext) -> None:
+    """The same answer the two reads give, so a caller learns one code for one cause."""
+    async with connected(seeded) as client:
+        recorded = await invoke(
+            client, "record_step", run_id="nobodys-run", actual={}, node_id="receive_request"
+        )
+        assert rules(recorded) == ["RT-E03"]
+        finished = await invoke(
+            client, "run_finish", run_id="nobodys-run", outcome={}, status="finished"
+        )
+        assert rules(finished) == ["RT-E03"]
+
+
+async def test_an_unknown_finish_status_is_ap_001_naming_the_vocabulary(
+    seeded: ServiceContext,
+) -> None:
+    """``running`` is refused with the rest: ``run_finish`` closes a run."""
+    async with connected(seeded) as client:
+        await invoke(
+            client, "run_start", run_id=RUN_ID, agent_id=AGENT, selector={"dataset_id": PRIYA}
+        )
+        for status in ("running", "done", ""):
+            answered = await invoke(client, "run_finish", run_id=RUN_ID, outcome={}, status=status)
+            assert rules(answered) == ["AP-001"], status
+            assert answered["errors"][0]["pointer"] == "/status"
+            assert answered["errors"][0]["context"]["allowed"] == ["abandoned", "finished"]
+        assert (await invoke(client, "run_get", run_id=RUN_ID))["data"]["run"][
+            "status"
+        ] == "running", "a refused status wrote nothing"

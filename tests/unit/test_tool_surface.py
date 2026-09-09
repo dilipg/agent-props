@@ -59,9 +59,9 @@ TESTS_DIR: Final[Path] = Path(__file__).parents[1]
 
 #: Tools `docs/contracts.md` documents that this milestone deliberately does
 #: not register, each with the milestone that owns it. M5 landed the three
-#: skeleton tools by deleting their entries, M6 removed the four run tools, and
-#: M7 removed ``dataset_expand``, ``dataset_export`` and ``dataset_import``,
-#: which is the mechanism working three times.
+#: skeleton tools by deleting their entries, M6 removed the four run tools, M7
+#: removed ``dataset_expand``, ``dataset_export`` and ``dataset_import``, and M8
+#: removed ``record_step`` and ``run_finish`` - the mechanism working four times.
 #: **Delete an entry when you land it** -
 #: :func:`test_no_deferral_is_stale` fails if a deferred tool is registered
 #: anyway, and :func:`test_every_documented_tool_is_registered_or_deferred`
@@ -71,8 +71,6 @@ TESTS_DIR: Final[Path] = Path(__file__).parents[1]
 #: tags it *(phase 1.5)* and says "Not in phase 1".
 DEFERRED: Final[dict[str, str]] = {
     "blueprint_infer": "phase 1.5; contracts section 4 says 'Not in phase 1'",
-    "record_step": "M8, whose gate needs it (ruling R-15)",
-    "run_finish": "M8, whose gate needs it (ruling R-15)",
     "run_evidence": "M10, the evidence bundle (ruling R-15)",
     "run_export": "M10, the evidence bundle (ruling R-15)",
 }
@@ -113,9 +111,9 @@ def test_the_server_registered_its_tools() -> None:
     Every test below would pass vacuously against an empty surface, and would
     blame the wrong thing while doing it.
     """
-    assert len(TOOL_NAMES) == 23, (
-        f"expected M4's thirteen tools plus M5's three plus M6's four plus M7's three, "
-        f"got {TOOL_NAMES}"
+    assert len(TOOL_NAMES) == 25, (
+        f"expected M4's thirteen tools plus M5's three plus M6's four plus M7's three plus "
+        f"M8's two, got {TOOL_NAMES}"
     )
 
 

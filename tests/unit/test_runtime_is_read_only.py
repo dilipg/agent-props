@@ -42,6 +42,7 @@ import ast
 import copy
 import json
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -94,18 +95,29 @@ READING_VERBS: Final[tuple[str, ...]] = ("get_", "find_", "list_")
 READING_NAMES: Final[frozenset[str]] = frozenset({"health"})
 
 #: The writes the runtime is *allowed* to make. PRD 5.6: "``record_step`` writes
-#: to the run, never to the world." ``set_step_actual`` is M8's and is
-#: allowlisted here rather than at M8, because the property being asserted is
-#: "only the run is written", not "only the calls that exist today".
+#: to the run, never to the world." ``set_step_actual`` was allowlisted at M3,
+#: before ``record_step`` existed, because the property being asserted is "only
+#: the run is written", not "only the calls that exist today" - and M8 landing
+#: ``record_step`` and ``run_finish`` is what that foresight bought:
+#: ``mark_run_finished`` is the one name that had to be added.
 RUN_WRITES: Final[frozenset[str]] = frozenset(
-    {"put_run", "upsert_step", "set_step_actual", "set_run_warnings"}
+    {"put_run", "upsert_step", "set_step_actual", "set_run_warnings", "mark_run_finished"}
 )
 
 #: Where the runtime starts. Every public function in `service/runs.py`, named
 #: as ``(module, function)`` pairs so the closure below is unambiguous about
-#: which ``get`` or ``find`` it means.
+#: which ``get`` or ``find`` it means. M8's two writes are entry points like the
+#: other four: they write a *run*, and the claim being guarded is that nothing
+#: reachable from them writes anything else.
 RUNTIME_ENTRY_POINTS: Final[frozenset[tuple[str, str]]] = frozenset(
-    {("runs.py", "start"), ("runs.py", "fetch_step"), ("runs.py", "get"), ("runs.py", "find")}
+    {
+        ("runs.py", "start"),
+        ("runs.py", "fetch_step"),
+        ("runs.py", "record_step"),
+        ("runs.py", "finish"),
+        ("runs.py", "get"),
+        ("runs.py", "find"),
+    }
 )
 
 #: The authoring entry points, for the other half of
@@ -167,7 +179,7 @@ def test_every_store_method_is_classifiable() -> None:
 
     :func:`store_mutators` is a prefix test, and every public method it does not
     match is treated as a read by mechanisms 1 and 2. That is fine for the
-    sixteen methods on the Protocol today and it is *not* self-maintaining: a
+    seventeen methods on the Protocol today and it is *not* self-maintaining: a
     method named ``archive_dataset``, ``record_outcome`` or ``bump_version``
     would write the world and be classified as harmless, with only mechanism 3
     left to notice.
@@ -178,7 +190,7 @@ def test_every_store_method_is_classifiable() -> None:
     is allowed to reach.
     """
     public = {name for name in dir(Store) if not name.startswith("_")}
-    assert len(public) >= 16, f"the Protocol enumeration is broken: {sorted(public)}"
+    assert len(public) >= 17, f"the Protocol enumeration is broken: {sorted(public)}"
     unclassifiable = {
         name
         for name in public
@@ -311,8 +323,9 @@ def test_the_runtime_does_write_the_run_so_the_guard_is_not_vacuous() -> None:
     records the served step to the run.
     """
     calls = reachable(RUNTIME_ENTRY_POINTS)
-    assert {"put_run", "upsert_step"} <= calls, (
-        f"the runtime makes neither of the run writes it is supposed to: {sorted(calls)}"
+    assert calls >= RUN_WRITES, (
+        f"the runtime does not make every run write it is supposed to; missing "
+        f"{sorted(RUN_WRITES - calls)}"
     )
     assert {"get_run", "get_dataset", "get_blueprint", "find_runs"} <= calls, (
         "the runtime does not read what it is supposed to read"
@@ -525,6 +538,11 @@ class RunOnlyStore:
     ) -> StepRecord:
         return self.inner.set_step_actual(run_id, node_id, iteration, actual)
 
+    def mark_run_finished(
+        self, run_id: str, status: str, outcome: Mapping[str, Any], finished_at: datetime
+    ) -> bool:
+        return self.inner.mark_run_finished(run_id, status, outcome, finished_at)
+
     # everything else: refused
 
     def put_blueprint(self, bp: Blueprint, publish: bool) -> Blueprint:
@@ -589,6 +607,11 @@ def test_a_whole_runtime_walk_makes_no_world_write(guarded: ServiceContext) -> N
     Every kind of call M6 ships: a pin by label query, addressing by node id and
     by tool name in both directions, an in-pool draw, an exhausted draw, a
     replay, an unresolvable tool name, a refused iteration, and both run reads.
+    **Plus M8's two writes**, which is the half that matters now that the module
+    has write entry points: a ``record_step`` against a served step, a
+    re-``record_step`` of the same actual, a ``run_finish``, a diverging
+    re-``run_finish``, and a ``fetch_step`` *after* the run is closed - so the
+    R-54(c) path that keeps serving a finished run is inside the wrapper too.
     None of them may write anything but the run.
     """
     assert runs.start(guarded, RUN_ID, AGENT, {"labels": {"scenario": "missing-documents"}}).ok, (
@@ -609,6 +632,15 @@ def test_a_whole_runtime_walk_makes_no_world_write(guarded: ServiceContext) -> N
     step(node_id=POOL_NODE, iteration=0)
     step(node_id=POOL_NODE, iteration=MAX_STORED_INT + 1)
     step(node_id="no_such_node")
+
+    produced = {"requested": ["fssai"], "received": []}
+    assert runs.record_step(guarded, RUN_ID, produced, node_id=POOL_NODE, iteration=0).ok
+    assert runs.record_step(guarded, RUN_ID, produced, node_id=POOL_NODE, iteration=0).ok
+    assert runs.record_step(guarded, RUN_ID, produced, node_id="escalate").ok is False
+    assert runs.finish(guarded, RUN_ID, {"onboarding_status": "complete"}, "finished").ok
+    assert runs.finish(guarded, RUN_ID, {"onboarding_status": "escalated"}, "abandoned").ok
+    step(node_id="receive_request")
+
     runs.get(guarded, RUN_ID)
     runs.find(guarded, RunQuery())
 

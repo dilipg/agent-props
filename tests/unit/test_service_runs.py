@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -57,7 +56,7 @@ from agentprops.service.runs import (
     WARNING_RUN_START_MISMATCH,
 )
 from agentprops.service.runs import paginate as paginate_runs
-from conftest import load_document
+from conftest import FROZEN_NOW, load_document
 from envelopes import codes, data, findings, rules, warnings_of
 
 AGENT = "location-onboarding"
@@ -813,11 +812,12 @@ def test_a_replayed_warning_writes_nothing_to_the_run(
 def test_a_stale_fetch_that_flags_a_warning_leaves_the_run_lifecycle_alone(
     started: ServiceContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The losing side of the write ``_flag`` used to make. **A note for M8.**
+    """The losing side of the write ``_flag`` used to make. **M8's ``run_finish``.**
 
-    ``run_finish`` does not exist yet, so the finished state is written here
-    through ``put_run`` directly - that is the simulation, and it is the only
-    part of this test M8 should replace. Everything else is the real path.
+    The finished state used to be written here through ``put_run`` directly,
+    because ``run_finish`` did not exist. It exists now, so this drives the real
+    tool - which makes the test a claim about two production writes racing rather
+    than about one write racing a simulation.
 
     What is being guarded: ``_flag`` once handed ``put_run`` an edited copy of
     the run snapshot ``fetch_step`` read at the top, and ``put_run`` writes
@@ -827,25 +827,20 @@ def test_a_stale_fetch_that_flags_a_warning_leaves_the_run_lifecycle_alone(
     ``outcome`` and ``finished_at`` - a run that un-finishes itself under load.
     The fix narrows the write to ``set_run_warnings``, one column.
 
+    `test_service_run_writes.py::test_a_stale_finish_cannot_revert_the_runs_warnings`
+    is the same race in the other direction, and between them the two narrow
+    writes are shown not to be able to revert each other.
+
     Forced with the M3 race technique: one internal read returns the pre-finish
     snapshot, which is exactly what the concurrent caller holds. Note that a
     *sequential* version of this test cannot fail - a fresh snapshot carries the
     finished state, so writing every column writes it back unchanged - which is
     why the stale read is the test rather than a convenience.
     """
-    finished_at = datetime(2026, 9, 8, 13, 0, 0, tzinfo=UTC)
     real_get_run = started.store.get_run
     stale = real_get_run(RUN_ID)
     assert stale is not None
-    started.store.put_run(
-        stale.model_copy(
-            update={
-                "status": "finished",
-                "finished_at": finished_at,
-                "outcome": {"training": "reduced"},
-            }
-        )
-    )
+    assert runs.finish(started, RUN_ID, {"training": "reduced"}, "finished").ok
 
     monkeypatch.setattr(started.store, "get_run", lambda run_id: stale)
     reply = fetch(started, node_id=POOL_NODE, iteration=POOL_LENGTH)
@@ -854,7 +849,7 @@ def test_a_stale_fetch_that_flags_a_warning_leaves_the_run_lifecycle_alone(
     after = real_get_run(RUN_ID)
     assert after is not None
     assert after.status == "finished", "a warning write reverted the run's lifecycle"
-    assert after.finished_at == finished_at
+    assert after.finished_at == FROZEN_NOW
     assert after.outcome == {"training": "reduced"}
     assert [item.code for item in after.warnings] == [WARNING_POOL_EXHAUSTED]
 
