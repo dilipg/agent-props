@@ -1273,6 +1273,50 @@ from the spec and R-44 now guards it.
 
 **Cost if wrong.** One boundary constant and its assertions.
 
+### R-53 — a diverging `run_start` warns and serves the pinned run
+
+M6 found that `run_start` on an existing `run_id` with a **different selector** silently
+returns the first run. It chose that deliberately — re-pinning would break copy-on-write —
+and made the pin visible in the response.
+
+**Ruling.** Keep returning the first run, and **attach a warning** when the selector
+diverges from what the run was pinned with. Ground rule 3 decides this without needing a new
+principle: "Mismatches produce warnings attached to the response and to the stored run." A
+diverging selector *is* a mismatch, and it is exactly the shape
+`blueprint_version_mismatch` already handles — the caller declared one thing, the run is
+pinned to another, so serve the pin and say so.
+
+Erroring is not available: the service never gates. Silently ignoring the selector is the
+only other option and it is the one that surprises a caller who mistyped a `dataset_id`.
+
+`run_start` staying idempotent matters — a retried request after a network blip must not
+create a second run, and must not fail.
+
+**Cost if wrong.** One warning code; the served result is unchanged either way.
+
+### R-54 — four M6 decisions, ratified
+
+**(a) `dataset_selection_ambiguous` as a new warning code.** Ratified. R-22 deliberately kept
+`Warning.code` an open string so the vocabulary could grow without a model change, and M4 set
+the precedent. Selecting by labels when several datasets match is a real condition a caller
+should know about, and it must not gate.
+
+**(b) The warning merge is read-modify-write on a JSON column**, so concurrent fetches of the
+same exhausted iteration can duplicate or lose a warning. Accepted under R-48's standard —
+each response carries its own warnings, so nothing is silent. **One requirement:** dedupe the
+merge by `(code, node_id, iteration)` so that losing a duplicate is provably a no-op. That
+makes the common case safe by construction and narrows the residue to genuinely distinct
+concurrent warnings, which is worth a `DECISIONS.md` note rather than a lock.
+
+**(c) A finished run still serves, and that is correct.** Nothing reads `Run.status` at read
+time. Ground rule 3 forbids refusing to serve, and PRD 5.6's whole argument is that the read
+path is immutable and pin-scoped — a run's lifecycle is bookkeeping about the *caller*, not
+about the fixtures. M8 may add a warning if it proves useful; it must not add a refusal.
+
+**(d) Two pre-existing staleness bugs fixed in passing** — `test_transports.py` asserting
+`len(tools) == 16` and the README listing thirteen tools. Ratified, and worth noting as the
+kind of drift a tool-count assertion is *supposed* to catch: it did its job.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
