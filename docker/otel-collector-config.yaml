@@ -1,0 +1,66 @@
+# The local OpenTelemetry collector M10's first acceptance clause is measured
+# against. A **real** collector, not a mock: `docker compose --profile otel up -d
+# otel-collector`, then `uv run pytest -m integration -k otel_collector`.
+#
+# Two exporters, because a human and a test want different things from the same
+# trace:
+#
+#   * `debug` with `verbosity: detailed` prints every span, its ids, its
+#     attributes and its parent to the collector's stdout - which is what
+#     `docker compose logs otel-collector` shows and what the milestone report
+#     quotes as evidence that a run arrived as a trace with one span per step;
+#   * `file` writes the same spans as OTLP/JSON to /data/traces.jsonl, mounted
+#     to ./.otel on the host, so a test can read them back and *count* the
+#     spans rather than parsing a log format that is explicitly documented as
+#     unstable.
+#
+# The file exporter is why this uses the `-contrib` image: `debug` ships in the
+# core distribution and `file` does not.
+#
+# Ports: the receiver listens on 4318 inside the container and the compose file
+# publishes it on **4418** on the host. That is ruling R-60 applied to a third
+# protocol - a default that can reach a *foreign* server is the defect, and 4318
+# is the OTLP default, so any other collector on this machine would answer it.
+# 27017 became 27117 and 5432 became 5442 for exactly this reason.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        # 0.0.0.0 rather than localhost: inside the container, localhost is the
+        # container, and the published port would reach nothing.
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: detailed
+  file:
+    path: /data/traces.jsonl
+    # Append, so a second export in one session does not silently replace the
+    # first - a test that counted spans against a truncated file would report a
+    # plausible number for the wrong reason.
+    append: true
+    # **Required, not a tuning knob.** With `append: true` the exporter wraps the
+    # file in a buffered writer, and with no `flush_interval` it flushes only on
+    # shutdown - so the collector received ten spans, printed all ten through the
+    # `debug` exporter, and left the file empty. Measured, not guessed: the first
+    # run of the clause-1 test failed with an empty `.otel/` while the collector
+    # log showed every span.
+    flush_interval: 1s
+
+extensions:
+  # What compose's healthcheck asks. Without it `depends_on: service_healthy`
+  # would have to guess, and a TCP probe answers before the receiver is
+  # listening - the same lesson the Mongo healthcheck records.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug, file]
+  telemetry:
+    logs:
+      level: info

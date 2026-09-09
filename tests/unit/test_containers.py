@@ -67,8 +67,20 @@ DOCKERFILE_PATH: Final[Path] = REPO_ROOT / "Dockerfile"
 DOCKERIGNORE_PATH: Final[Path] = REPO_ROOT / ".dockerignore"
 
 #: The two profiles `docs/build-handoff.md` section 2 names, and the database
-#: each one is for.
+#: each one is for. These are the two **service deployments**, and they are
+#: alternatives: exactly one of them runs at a time.
 PROFILES: Final[dict[str, str]] = {"local": "mongo", "shared": "postgres"}
+
+#: The profiles that carry no service and no store, so the guards below about a
+#: store variable do not apply to them.
+#:
+#: ``otel`` is M10's local OpenTelemetry collector, and it is a third profile
+#: rather than an addition to either of the two above because it is
+#: **orthogonal**: a caller may want it beside `local`, beside `shared`, or on
+#: its own with the service run containerless against SQLite. Folding it into
+#: both would have started two collectors for anyone who tried both, and putting
+#: it in neither would have made it unreachable through compose.
+AUXILIARY_PROFILES: Final[frozenset[str]] = frozenset({"otel"})
 
 #: The host ports a foreign server would be sitting on. Ruling R-60 moved the
 #: published ports off these, so finding one here again is the hazard returning.
@@ -145,16 +157,36 @@ def test_the_container_files_exist() -> None:
     assert DOCKERIGNORE_PATH.is_file()
 
 
-def test_the_compose_file_declares_exactly_two_profiles() -> None:
-    """``local`` and ``shared``, and nothing else.
+def test_the_compose_file_declares_only_the_documented_profiles() -> None:
+    """``local`` and ``shared`` as deployments, plus M10's auxiliary ``otel``.
 
-    Both halves matter. A third profile would be a deployment shape nobody
-    documented; a *missing* one is an acceptance criterion that cannot be run.
+    Both halves matter. A profile nobody documented is a deployment shape nobody
+    reviewed; a *missing* one is an acceptance criterion that cannot be run. The
+    set is asserted as equality against a named union rather than as containment,
+    so adding a fourth profile is a visible edit here as well as in the compose
+    file.
     """
     declared = {
         profile for definition in services().values() for profile in definition.get("profiles", [])
     }
-    assert declared == set(PROFILES)
+    assert declared == set(PROFILES) | AUXILIARY_PROFILES
+
+
+def test_no_service_is_in_both_a_deployment_and_an_auxiliary_profile() -> None:
+    """The two kinds of profile stay separate, which is what makes the split real.
+
+    A service in ``shared`` *and* ``otel`` would make the collector start with a
+    deployment and stop being orthogonal to it - and the guards below, which ask
+    every deployment profile for a store variable, would then ask the collector
+    for one it has no business having.
+    """
+    overlapping = {
+        name: definition["profiles"]
+        for name, definition in services().items()
+        if set(definition.get("profiles", [])) & set(PROFILES)
+        and set(definition.get("profiles", [])) & AUXILIARY_PROFILES
+    }
+    assert not overlapping, overlapping
 
 
 def test_every_service_is_in_a_profile() -> None:

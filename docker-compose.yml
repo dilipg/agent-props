@@ -169,6 +169,54 @@ services:
       retries: 12
       start_period: 5s
 
+  # ------------------------------------------------------------------- otel
+  # M10's first acceptance clause needs a **real** collector, so here is one.
+  # Its own profile, because it is not an alternative to `local` or `shared` -
+  # it is orthogonal, and a caller may want it beside either or neither:
+  #
+  #   docker compose --profile otel up -d otel-collector
+  #   uv run pytest -m integration -k otel_collector
+  #
+  # Published on **4418**, not OTLP's default 4318, and that is ruling R-60
+  # applied to a third protocol: a default that can reach a foreign server is
+  # the defect. Any other collector on a developer's machine answers 4318, and a
+  # clause-1 test that passed against someone else's collector would be worth
+  # exactly as much as the Mongo run that passed against a foreign database.
+  # Container-internal it is still 4318.
+  #
+  # `-contrib` rather than the core image because the `file` exporter lives
+  # there. The test needs to *read the spans back and count them*, and the
+  # `debug` exporter's stdout format is documented as unstable.
+  otel-collector:
+    profiles: ["otel"]
+    image: otel/opentelemetry-collector-contrib:0.144.0
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    ports:
+      # 4418 on the host, 4318 inside. See the R-60 note above.
+      - "${AGENTPROPS_OTLP_PORT:-4418}:4318"
+      # The health-check extension, off its default 13133 for the same reason.
+      - "${AGENTPROPS_OTLP_HEALTH_PORT:-13233}:13133"
+    volumes:
+      - ./docker/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+      - ./.otel:/data
+    # The image runs as a non-root user, and the bind mount above has to be
+    # writable by it for the file exporter to work. Docker Desktop's mounts are
+    # permissive; on a native Linux host, `mkdir -p .otel && chmod 777 .otel`.
+    user: "0:0"
+    healthcheck:
+      # The collector image is distroless - no shell, no curl, no wget - so a
+      # command-based probe has nothing to run. The collector's own binary can
+      # answer, and this is the documented way: `--help` exits 0 once the
+      # process is up. The *test* probes the health endpoint over HTTP from the
+      # host, which is the check that actually matters and the one whose URL the
+      # skip message names.
+      test: ["CMD", "/otelcol-contrib", "--help"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
 volumes:
   mongo-data:
   postgres-data:

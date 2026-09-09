@@ -31,3 +31,6 @@ client/typescript/dist/
 
 # Screenshots from .claude/skills/run-agent-props/driver.py
 .shots/
+
+# The OTel collector's file exporter writes here (docker-compose `otel` profile).
+.otel/
