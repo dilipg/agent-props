@@ -85,6 +85,7 @@ from agentprops.validation import validate_blueprint
 __all__ = [
     "WARNING_BLUEPRINT_VERSION_MISSING",
     "diff",
+    "document",
     "get",
     "list_summaries",
     "upsert",
@@ -100,10 +101,10 @@ WARNING_BLUEPRINT_VERSION_MISSING = "blueprint_version_missing"
 
 def upsert(context: ServiceContext, payload: object, *, publish: bool) -> Reply:
     """Validate, parse and store a blueprint. See the module docstring's pipeline."""
-    document = read_document("blueprint", payload)
-    if not document.ok:
-        return failure(list(document.findings))
-    normalised = dict(document.value)
+    resolved = read_document("blueprint", payload)
+    if not resolved.ok:
+        return failure(list(resolved.findings))
+    normalised = dict(resolved.value)
     normalised["status"] = STATUS_PUBLISHED if publish else STATUS_DRAFT
 
     findings = validate_blueprint(normalised, context.resolver).errors
@@ -145,7 +146,7 @@ def _store(
         )
     except StoreError as exc:
         return failure([boundary(AP_STORE_REFUSED, field_pointer("blueprint"), str(exc))])
-    return success("blueprint", _document(stored), warnings_from(findings))
+    return success("blueprint", document(stored), warnings_from(findings))
 
 
 def get(context: ServiceContext, agent_id: str, version: str | None) -> Reply:
@@ -153,7 +154,7 @@ def get(context: ServiceContext, agent_id: str, version: str | None) -> Reply:
     blueprint = context.store.get_blueprint(agent_id, version)
     if blueprint is None:
         return not_found("blueprint", field="agent_id", agent_id=agent_id, version=version)
-    return success("blueprint", _document(blueprint))
+    return success("blueprint", document(blueprint))
 
 
 def list_summaries(context: ServiceContext, status: str | None) -> Reply:
@@ -183,10 +184,10 @@ def validate(context: ServiceContext, payload: object) -> Reply:
     and is why this does not use ``validate_blueprint``'s ``NullResolver``
     default.
     """
-    document = read_document("blueprint", payload)
-    if not document.ok:
-        return validation_envelope(list(document.findings))
-    return validate_blueprint(document.value, context.resolver)
+    resolved = read_document("blueprint", payload)
+    if not resolved.ok:
+        return validation_envelope(list(resolved.findings))
+    return validate_blueprint(resolved.value, context.resolver)
 
 
 def diff(context: ServiceContext, agent_id: str, from_version: str, to_version: str) -> Reply:
@@ -211,15 +212,20 @@ def diff(context: ServiceContext, agent_id: str, from_version: str, to_version: 
     computed = diff_blueprints(
         agent_id,
         from_version,
-        _document(before) if before is not None else None,
+        document(before) if before is not None else None,
         to_version,
-        _document(after) if after is not None else None,
+        document(after) if after is not None else None,
     )
     return success("diff", computed, warnings)
 
 
-def _document(blueprint: Blueprint) -> dict[str, Any]:
-    """The stored document, as submitted.
+def document(blueprint: Blueprint) -> dict[str, Any]:
+    """The stored document, as submitted. Public because a resource serves it too.
+
+    ``service/examples.py`` hands this exact function's output to
+    ``resources/read``, so the bytes a resource serves and the bytes
+    ``blueprint_get`` serves come from one place rather than from two dumps that
+    agree today.
 
     ``exclude_unset=True`` per ruling R-08's round-trip criterion: the golden
     blueprint omits ``tool_name`` on three nodes and ``max_iterations`` on

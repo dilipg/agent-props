@@ -43,7 +43,7 @@ from agentprops.models import DatasetQuery, DatasetSummary
 from agentprops.service.context import ServiceContext
 from agentprops.service.envelope import Reply, not_found, success
 
-__all__ = ["agents", "label_vocabulary", "store_status"]
+__all__ = ["agents", "label_vocabulary", "store_status", "value_counts"]
 
 
 def store_status(context: ServiceContext) -> Reply:
@@ -74,16 +74,21 @@ def label_vocabulary(context: ServiceContext, agent_id: str, version: str | None
             "label_schema": {
                 "dimensions": {name: list(values) for name, values in dimensions.items()}
             },
-            "counts": _counts(dimensions, rows),
+            "counts": value_counts(dimensions, rows),
             "dataset_count": len(rows),
         },
     )
 
 
-def _counts(
+def value_counts(
     dimensions: Mapping[str, list[str]], rows: list[DatasetSummary]
 ) -> dict[str, dict[str, int]]:
     """Per-value dataset counts, in the blueprint's declaration order.
+
+    Public because ``service/prompts.py::cover_the_label_space`` needs exactly
+    this number to name the values with **zero** datasets, and a second
+    implementation of "how many datasets carry this value" is a second thing to
+    keep in step with DS-012.
 
     A value carried by a dataset but absent from the vocabulary is **not**
     reported, because DS-012 makes it unstorable: every label dimension and

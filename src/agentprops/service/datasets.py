@@ -59,6 +59,7 @@ from agentprops.validation import validate_dataset
 __all__ = [
     "DEFAULT_FIND_LIMIT",
     "archive",
+    "document",
     "find",
     "get",
     "paginate",
@@ -128,7 +129,7 @@ def get(context: ServiceContext, dataset_id: str, version: int | None) -> Reply:
         if dataset.archived
         else []
     )
-    return success("dataset", _document(dataset), warnings)
+    return success("dataset", document(dataset), warnings)
 
 
 def archive(context: ServiceContext, dataset_id: str) -> Reply:
@@ -169,15 +170,19 @@ def validate(context: ServiceContext, payload: object, text: str = "") -> Reply:
     warnings (DS-007, DS-027, DS-032) reports ``ok: true`` with them in
     ``errors`` (ruling R-13).
     """
-    document = read_document("dataset", payload, text_field="dataset_json", text=text)
-    if not document.ok:
-        return validation_envelope(list(document.findings))
+    resolved = read_document("dataset", payload, text_field="dataset_json", text=text)
+    if not resolved.ok:
+        return validation_envelope(list(resolved.findings))
     return validate_dataset(
-        document.value, context.resolver, duplicate_keys=document.duplicate_keys
+        resolved.value, context.resolver, duplicate_keys=resolved.duplicate_keys
     )
 
 
-def _document(dataset: Dataset) -> dict[str, Any]:
-    """The stored document, as submitted (ruling R-08's ``exclude_unset``)."""
+def document(dataset: Dataset) -> dict[str, Any]:
+    """The stored document, as submitted (ruling R-08's ``exclude_unset``).
+
+    Public for the reason ``service/blueprints.py::document`` is: a resource
+    serves the same bytes ``dataset_get`` does, from one function.
+    """
     document: dict[str, Any] = dataset.model_dump(mode="json", exclude_unset=True)
     return document
