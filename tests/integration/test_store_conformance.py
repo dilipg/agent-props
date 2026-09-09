@@ -29,6 +29,7 @@ measurement it came from.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -403,6 +404,143 @@ def test_find_returns_one_row_per_id_at_its_latest_version(
     store.put_dataset(dataset)
     rows = store.find_datasets(DatasetQuery())
     assert [(row.id, row.version) for row in rows] == [(dataset.id, 2)]
+
+
+@pytest.fixture
+def heterogeneous(store: Store, published: Blueprint, blueprint: Blueprint) -> Blueprint:
+    """Two more published blueprints, so a lineage can *change* agent and version.
+
+    ``datasets`` has a foreign key on ``(agent_id, bp_version)`` and both SQL
+    dialects enforce it, so a version-2 document pointing somewhere else needs
+    somewhere else to exist. Derived from the golden blueprint rather than
+    hand-written, so the fixture stays valid when it changes.
+    """
+    store.put_blueprint(blueprint.model_copy(update={"version": "1.1.0"}), publish=True)
+    store.put_blueprint(blueprint.model_copy(update={"agent_id": "other-onboarding"}), publish=True)
+    return published
+
+
+#: ``(name, query, the version-2 edit)`` for each of ``find_datasets``'s four
+#: **promoted** filters. ``q`` is absent: it is applied in Python over rows the
+#: query already returned, so it cannot decide which version is the row.
+LINEAGE_FILTERS: tuple[tuple[str, DatasetQuery, dict[str, Any]], ...] = (
+    ("labels", DatasetQuery(labels={"tier": "regional"}), {"labels": {"tier": "national"}}),
+    ("author", DatasetQuery(author="pnair"), {"author": {"handle": "someone-else"}}),
+    (
+        "blueprint_version",
+        DatasetQuery(blueprint_version="1.0.0"),
+        {"blueprint": {"version": "1.1.0"}},
+    ),
+    (
+        "agent_id",
+        DatasetQuery(agent_id="location-onboarding"),
+        {"blueprint": {"agent_id": "other-onboarding"}},
+    ),
+)
+
+
+def _edited(source: Dataset, edit: Mapping[str, Any]) -> Dataset:
+    """``source`` with one promoted field changed, for a version-2 write.
+
+    The three shapes the four filters need: a whole ``labels`` map, a nested
+    ``provenance.author`` field, and a nested ``blueprint`` field. Spelled here
+    rather than in the table so the table reads as "which filter, and what
+    changes".
+    """
+    if "labels" in edit:
+        return source.model_copy(update={"labels": dict(edit["labels"])})
+    if "author" in edit:
+        author = source.provenance.author.model_copy(update=dict(edit["author"]))
+        return source.model_copy(
+            update={"provenance": source.provenance.model_copy(update={"author": author})}
+        )
+    return source.model_copy(
+        update={"blueprint": source.blueprint.model_copy(update=dict(edit["blueprint"]))}
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "query", "edit"), LINEAGE_FILTERS, ids=[case[0] for case in LINEAGE_FILTERS]
+)
+def test_find_filters_the_latest_version_and_not_whichever_version_matched(
+    store: Store,
+    heterogeneous: Blueprint,
+    dataset: Dataset,
+    name: str,
+    query: DatasetQuery,
+    edit: Mapping[str, Any],
+) -> None:
+    """A **heterogeneous lineage**: two versions of one dataset that filter differently.
+
+    Ruling R-38 is "one row per dataset lineage, at its **latest** version", and
+    every other test in this file writes the *same* document twice - so both
+    readings of that sentence agree on every fixture that exists, and the suite
+    was blind to the difference. This is the case no fixture builds: version 1
+    matches the filter and version 2 does not.
+
+    The two readings are "the latest version of the lineage, filtered" and "the
+    latest version *that matched the filter*", and they are not the same
+    answer. The first is R-38's, and the second surfaces a dataset that no
+    longer has the property the caller searched for. ``find_datasets`` is the
+    review surface M9 builds on (PRD 5.7: "a stranger has to judge relevance
+    without opening anything"), so a search for ``tier=regional`` returning a
+    dataset that is now ``national`` is not a near miss - it is the surface
+    lying.
+
+    **This failed on Mongo when it was written.** The aggregation applied the
+    filters before grouping, so the group saw only matching versions and
+    ``$first`` returned version 1. Reachable through a shipped feature rather
+    than in theory: ``dataset_import`` writes a bundle's document as a new
+    version of an existing lineage id, so a bundle whose labels, blueprint
+    version or author differ from the store's copy produces exactly this
+    lineage.
+
+    All four promoted filters, because the defect was in one ``$match`` that
+    carried all of them and fixing one would have fixed none.
+    """
+    store.put_dataset(dataset)
+    store.put_dataset(_edited(dataset, edit))
+
+    assert store.find_datasets(DatasetQuery()) == [
+        row for row in store.find_datasets(DatasetQuery()) if row.version == 2
+    ], "the lineage is not at version 2, so this test is not testing what it says"
+
+    assert store.find_datasets(query) == [], (
+        f"the {name} filter matched a version that is no longer the latest"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "query", "edit"), LINEAGE_FILTERS, ids=[case[0] for case in LINEAGE_FILTERS]
+)
+def test_find_matches_a_lineage_that_only_the_latest_version_satisfies(
+    store: Store,
+    heterogeneous: Blueprint,
+    dataset: Dataset,
+    name: str,
+    query: DatasetQuery,
+    edit: Mapping[str, Any],
+) -> None:
+    """The same boundary from the other side, which is the half that says *why*.
+
+    The edit is applied to version **1** and reverted at version 2, so the
+    lineage's latest version matches and an earlier one does not. Both readings
+    of R-38 agree here - which is exactly why the test above needed writing and
+    why this one is not sufficient on its own.
+
+    What it does establish is that the filter reads the *latest* version's
+    fields rather than any version's: an implementation that returned a lineage
+    when **any** version matched would also pass the test above (it would
+    return nothing there for the wrong reason) and would fail here by returning
+    the row at version 1.
+    """
+    store.put_dataset(_edited(dataset, edit))
+    store.put_dataset(dataset)
+
+    rows = store.find_datasets(query)
+    assert [(row.id, row.version) for row in rows] == [(dataset.id, 2)], (
+        f"the {name} filter did not match the lineage at its latest version"
+    )
 
 
 def test_find_carries_provenance_and_an_excerpt_but_no_fixtures(

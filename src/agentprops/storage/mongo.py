@@ -423,7 +423,7 @@ class MongoStore:
         document = stored_document(bp, status=status)
         key = _blueprint_key(bp.agent_id, bp.version)
         for attempt in range(FIRST_WRITE_ATTEMPTS):
-            existing = self._blueprints.find_one({"_id": key})
+            existing = self._blueprint_doc(bp.agent_id, bp.version)
             if existing is None:
                 try:
                     self._blueprints.insert_one(
@@ -563,6 +563,44 @@ class MongoStore:
         exactly the licence contracts section 7 grants and the conformance suite
         checks.
 
+        **The order of the stages is the whole correctness of this method, and
+        the first version got it wrong.** Every filter runs *after*
+        ``$replaceRoot``, so what is filtered is the lineage's latest version.
+        The filters were in a ``$match`` before the ``$group`` at first, which
+        reads perfectly and answers a different question: the group then sees
+        only *matching* versions, and ``$first`` returns the latest version
+        **that matched** rather than the latest version of the lineage. For a
+        lineage whose promoted fields differ between versions those are
+        different rows, and Mongo returned a non-latest one - contradicting
+        R-38 literally while agreeing with SQL on every fixture that writes the
+        same document twice.
+
+        Why it matters rather than merely differs: ``find_datasets`` is the
+        review surface M9 builds on (PRD 5.7, "a stranger has to judge
+        relevance without opening anything"), so a search for
+        ``tier=regional`` that surfaces a dataset which is now ``national`` is
+        the surface lying rather than a near miss. And it is reachable through
+        a shipped feature - ``dataset_import`` writes a bundle's document as a
+        new version of an existing lineage id, so a bundle whose labels,
+        blueprint version or author differ from the store's copy produces
+        exactly such a lineage.
+        ``test_find_filters_the_latest_version_and_not_whichever_version_matched``
+        is the conformance test, and it failed on this backend and passed on
+        both SQL dialects when it was written.
+
+        ``archived`` moved with the rest, even though ruling R-34 makes it
+        lineage-level and pre-filtering it would therefore be equivalent
+        *today*. An optimisation whose correctness depends on an invariant
+        enforced two modules away is the shape of thing that survives the
+        invariant, and SQL does not pre-filter it either.
+
+        The cost, stated: the group now runs over the whole collection rather
+        than over the filtered subset. ``datasets_lineage`` (``{id, version
+        desc}``) serves the sort that feeds it, and the volumes are a local
+        authoring instance's - the same trade ruling R-39(a) accepted for the
+        ``q`` filter and M6 accepted for ``_by_labels``. Identical results
+        first; contracts section 7 licenses the different plan.
+
         The ``q`` filter is applied in Python, after the query filters and the
         ordering, through the same
         :func:`~agentprops.storage.common.q_matches` both adapters use.
@@ -573,10 +611,10 @@ class MongoStore:
         it: a page sliced before the filter returns short.
         """
         pipeline: list[dict[str, Any]] = [
-            {"$match": self._dataset_match(q)},
             {"$sort": {"id": ASCENDING, "version": DESCENDING}},
             {"$group": {"_id": "$id", "latest": {"$first": "$$ROOT"}}},
             {"$replaceRoot": {"newRoot": "$latest"}},
+            {"$match": self._dataset_match(q)},
             {"$sort": {"created_at": ASCENDING, "id": ASCENDING}},
         ]
         if q.q is None:
@@ -642,7 +680,7 @@ class MongoStore:
             "created_at": sk.created_at,
         }
         for attempt in range(FIRST_WRITE_ATTEMPTS):
-            if self._skeletons.find_one({"_id": sk.id}, {"_id": 1}) is None:
+            if not self._skeleton_exists(sk.id):
                 try:
                     self._skeletons.insert_one(
                         _encoded(SKELETONS, {"_id": sk.id, "id": sk.id, **record})
@@ -685,7 +723,7 @@ class MongoStore:
         if identifier is None:
             raise RecordNotFoundError(f"no skeleton {skeleton_id!r}")
         dataset = require_uuid(dataset_id, "dataset_id")
-        if self._skeletons.find_one({"_id": identifier}, {"_id": 1}) is None:
+        if not self._skeleton_exists(identifier):
             raise RecordNotFoundError(f"no skeleton {skeleton_id!r}")
         claimed = self._skeletons.update_one(
             {"_id": identifier, "submitted_as": None}, {"$set": {"submitted_as": dataset}}
@@ -718,7 +756,7 @@ class MongoStore:
             "external_refs": run.external_refs,
         }
         for attempt in range(FIRST_WRITE_ATTEMPTS):
-            if self._runs.find_one({"_id": run.id}, {"_id": 1}) is None:
+            if not self._run_exists(run.id):
                 try:
                     self._runs.insert_one(_encoded(RUNS, {"_id": run.id, "id": run.id, **record}))
                 except DuplicateKeyError:
@@ -957,6 +995,35 @@ class MongoStore:
     def _steps(self) -> Collection[dict[str, Any]]:
         return self._db[RUN_STEPS]
 
+    def _blueprint_doc(self, agent_id: str, version: str) -> dict[str, Any] | None:
+        """The stored record for one blueprint version, or ``None``.
+
+        A method rather than an inline ``find_one`` for the reason
+        ``sql.py``'s ``_blueprint_row`` is one: it is the read
+        :meth:`put_blueprint` decides on, so **the losing side of a concurrent
+        first write is reachable in a test by making this return ``None``
+        once** - which is how `test_mongo_allocation_races.py` reaches R-29's
+        no-op convergence without threads. A read spelled inline is a branch
+        with no way in.
+        """
+        return self._blueprints.find_one({"_id": _blueprint_key(agent_id, version)})
+
+    def _skeleton_exists(self, skeleton_id: uuid.UUID) -> bool:
+        """Whether a skeleton record exists. See :meth:`_blueprint_doc` for why
+        this is a method.
+
+        Two callers ask it for different reasons and that is deliberate:
+        :meth:`put_skeleton` decides insert-or-update, and
+        :meth:`mark_skeleton_submitted` distinguishes "no such skeleton" from
+        "already claimed", because the second is a ``bool`` answer and the first
+        is not.
+        """
+        return self._skeletons.find_one({"_id": skeleton_id}, {"_id": 1}) is not None
+
+    def _run_exists(self, run_id: str) -> bool:
+        """Whether a run record exists. See :meth:`_blueprint_doc`."""
+        return self._runs.find_one({"_id": run_id}, {"_id": 1}) is not None
+
     def _server_now(self) -> datetime:
         """The **server's** clock, from the ``hello`` command's ``localTime``.
 
@@ -1056,6 +1123,11 @@ class MongoStore:
         must match, which is ``DatasetQuery.labels``'s documented meaning.
 
         **``q`` is deliberately absent.** See :meth:`find_datasets`.
+
+        Every clause this returns is applied **after** the lineage has been
+        reduced to its latest version, which is not a detail of the caller's
+        choosing - see :meth:`find_datasets` for what happened when they ran
+        first.
         """
         match: dict[str, Any] = {"archived": False}
         if q.agent_id is not None:
