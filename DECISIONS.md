@@ -4651,3 +4651,259 @@ visible.
 4. **Does the graph need a real layout engine?** The BFS layout is deterministic and readable for the
    nine-node worked example. A blueprint with a wide fan-out may need `dagre`, which is outside the
    locked stack.
+
+# M9 fix round 1
+
+## [M9, fix round 1] The envelope has three shapes, and the second one was unread (ruling R-72)
+**The editor discarded every warning-severity catalogue finding and reported "clean".** The
+mechanism is a seam between two rulings, and neither anticipated it:
+
+- **R-13**: a clean-but-warned document is `ok: true` with warning-severity items in `errors`, for
+  BP-019, DS-007, DS-027 and DS-032.
+- **R-43(b)**: every success payload sits under one named key in `data`.
+
+`blueprint_validate` and `dataset_validate` return an **`ErrorEnvelope`** — `{ok, errors}` with no
+`data` key, on *every* outcome. So a warned-clean reply is `ok: true` *and* has no `data`, which
+R-43(b)'s convention does not describe. `errorsOf` took the truthy-`ok` branch, called `payload()`,
+which called `Object.keys(undefined)` and threw; `DocumentEditor`'s `.catch` swallowed it;
+`findingsOf` returned `[]`; the status line said "shape and catalogue clean". **DS-027 — the rule
+`DatasetDetail.tsx` cites as the mistake that screen exists to catch — was invisible in the
+editor**, and the same exception fired on every clean document's debounce tick.
+
+Measured before fixing, and the model had said so all along: `models/errors.py::ErrorEnvelope`'s
+docstring names the warned-clean case explicitly. The TypeScript side did not.
+
+**The fix, in three parts.**
+
+1. `Envelope` is `SuccessEnvelope | FindingsEnvelope`, discriminated on `"data" in envelope` rather
+   than on `ok`. `findingsIn()` reads `errors` **directly** for both the validate-clean and failure
+   shapes; `payload()` now throws a *named* error for a findings envelope instead of a bare
+   `TypeError`, and the message says which reader to use.
+2. Only **error**-severity findings block save. Ground rule 3 says warnings never block, and the
+   service will store a warned document — so an app that refused to save one would be inventing a
+   gate the service does not have. `blocking()` filters by severity; the status line distinguishes
+   errors, warnings, a rejection and a pending check, and a warned document can no longer read as
+   clean. `describe()` is its own function because it has five outcomes and the nested ternary it
+   replaced had three, one of which was the lie.
+3. The `.catch` no longer *can* be silent. An unexpected envelope shape becomes an `AP-000` finding
+   rather than an empty list. Emptiness on the failure path is what hid this for a milestone, and
+   a boundary that reports nothing when it does not understand a reply is the shape of the bug, not
+   an implementation detail of it.
+
+Documented in `contracts.md` section 1 as R-72 requires, with both consequences a client must handle
+spelled out: `ok: true` does not imply `data`, and a validate reply's warnings are in `errors`
+rather than in `warnings`.
+
+**Cost if wrong.** Reading `errors` directly is strictly more permissive than routing through
+`data`; nothing that worked stops working.
+
+## [M9, fix round 1] A harness that cannot build a reply the service sends manufactures agreement
+R-72's deeper half, and the more valuable one. The bug survived because
+`web/src/test/server.ts` had **one** envelope constructor — `ok(key, value)`, which can only build
+success-with-`data`. So all six clause-1 tests stubbed the validators as `ok("report", {ok, errors})`:
+**a wrapper no validate tool produces.** Six tests agreed with each other about a shape the service
+never sends, and the bug they were written to catch lived in the reader for the shape they never
+constructed.
+
+**Three constructors now, one per documented shape**, named after `contracts.md` section 1's shapes,
+plus `warns()` for a warning-severity finding — its own function rather than a `severity` argument
+on `rule()`, because a default argument is exactly how the warning path went untested: every
+existing case used `rule()` and therefore error severity, so nothing ever called the other branch.
+
+`validated()` **computes** `ok` from the findings rather than taking it. Per R-13 a validate reply is
+`ok: true` exactly when nothing is error-severity, so a test can no longer construct
+`{ok: true, errors: [an error]}`. A harness able to build an *impossible* reply is how this hid; it
+should not be able to build a *contradictory* one either.
+
+**And the assertion R-72 asks for, from two directions**, because either alone is weak:
+
+- `web/src/test/server.test.ts` asserts every shape has a constructor, that each produces exactly
+  one shape, that no envelope matches two predicates, and that the app's three readers survive all
+  three shapes.
+- `tests/unit/test_web_envelope_shapes.py` calls **every tool the web app names** — both validators
+  in all three outcomes each — against a real store, classifies each reply structurally, and asserts
+  that exactly three shapes exist, that all three are **observed**, and that the harness declares a
+  constructor for each **observed** shape.
+
+The Python half is what makes the TypeScript list a measurement rather than a declaration: without
+it, a fourth shape on the service would leave both sides agreeing about three. It is a text read of
+`ENVELOPE_SHAPES` rather than a generated artefact, deliberately — a generated file is a third thing
+to keep in step, and the guard's job is to notice that two independent statements have drifted.
+
+It also carries `test_the_harness_cannot_forge_a_validate_reply_with_a_data_key`, which fails if
+`ok("report", …)` reappears in the web suite. `server.test.ts` is the one exemption, and the
+exemption is **proved**: that file must still construct the fiction, because it constructs it in
+order to assert `findingsIn` refuses it.
+
+**Shown failing.** Removing the `validate-clean` constructor produced three failures naming it,
+including "the service emitted [3 shapes] and the harness can build [2]".
+
+## [M9, fix round 1] A rejected save must not disable the button that clears the rejection
+`blocked` was `all.length > 0`, and `all` folded in `findingsOf(saveError)`. TanStack Query clears
+`mutation.error` only on the next `mutate()` or an explicit `reset()`, and neither screen called
+`reset()`. **So the button that would clear the error was the button the error had disabled.**
+Editing did not help; leaving the editor did not help; only a screen change or a reload recovered.
+
+Reachable on any write-time-only rejection — which `DocumentEditor`'s own docstring explicitly
+designs for — and on the `agent_id: ""` bundle the dataset screen built when no agent was selected.
+
+**Three changes, and the third is the one that made the first safe.**
+
+1. A rejection **renders and does not block**. Pressing save again retries, which is what clears
+   `mutation.error`. A retry that reproduces the same rejection is correct behaviour; a state with no
+   exit is not.
+2. `onDirty` fires on the first edit after a save attempt and the screens wire it to `save.reset()`,
+   so a rejection does not outlive the document it was about. Once per attempt, not per keystroke.
+3. **`policyPending` now blocks.** It did not, so a reviewer could press save inside the 450 ms
+   debounce window, before the catalogue half had answered — and receive a rejection the app already
+   had the means to predict. Fixing (1) without this would have widened that window's consequences.
+
+The `agent_id` for the bundle now comes from the **dataset's own `blueprint.agent_id`** rather than
+from the screen's selection. `agentId ?? ""` was wrong twice: it sent an empty id when nothing was
+selected, and a selection that disagreed with the dataset's blueprint would have produced a bundle
+whose `agent_id` contradicted its contents.
+
+## [M9, fix round 1] A tracked source file must be readable by the tools that review it (ruling R-73)
+`web/src/lib/validation.ts` used a raw **NUL byte** as a dedup separator — chosen because no rule id
+or JSON pointer can contain one, which is true and was the wrong reason. Git's binary heuristic
+classified the file as binary, so the review diff read `Bin 0 -> 6841 bytes` and `git grep`, ripgrep
+and GitHub's diff view all skipped it. **The module implementing clause 1's entire local half was
+never visible to the review.** Not misdescribed, not under-tested — unreadable.
+
+The separator is now `JSON.stringify([rule, pointer])`. A printable separator would have satisfied
+the ruling; a JSON array is unambiguous *by construction*, and that matters because an RFC 6901
+pointer **may** contain a space, so a space-joined key could collide in principle. Reasoning about
+which characters are safe to join on is what produced the NUL.
+
+**`tests/unit/test_tracked_source_is_text.py` is the guard**, and it enumerates the way this build's
+other guards do — `git ls-files`, the **index** rather than the filesystem, because a tracked file is
+exactly what a diff shows and walking the tree would report `node_modules` and every build artefact.
+
+**Two checks per file, and they are not the same check.** No NUL is git's actual heuristic and so
+decides whether a diff is readable; decoding as UTF-8 decides whether `ruff`, `mypy`, `tsc` and
+`eslint` can open it. A file can pass either and fail the other, and a parametrised test proves it:
+latin-1 text has no NUL and does not decode, UTF-16 decodes and is full of NULs. A guard with one
+of the two would miss one of them.
+
+**A third check asks git directly.** `git diff --numstat --cached` reports `-` for both counts on a
+path it calls binary. `is_text()` re-implements git's heuristic, and a guard that only ever checked
+its own re-implementation would pass if the re-implementation were wrong. It is compared against the
+**index**, which is what caught a real intermediate state: with the fix in the working tree but not
+staged, the git check failed and the byte check passed — because the committed blob was still binary,
+which is precisely the thing that matters.
+
+**`docs/` is outside R-73's scope, and `docs/spec-rulings.md` currently contains two NUL bytes** — in
+the passages where R-73 quotes the offending expression. So the ruling forbidding NUL bytes is itself
+one of the files git will not grep. That is recorded rather than fixed:
+`test_the_docs_measurement_is_recorded_rather_than_enforced` takes the measurement without failing
+over it, because the ruling set the scope and an implementer does not widen it silently. Moving
+`docs/` into `GUARDED_PREFIXES` is a one-line change when the owner wants it. **Raised as question 1.**
+
+**Shown failing.** With the NUL planted back and staged, both halves fire: the byte scan names the
+file and the offset, and git independently reports it as binary.
+
+## [M9, fix round 1] Warnings are rendered, and `ToolWarning` had the wrong field names
+`Warnings` was exported and imported by nothing, and `payload()` discarded `envelope.warnings`
+unconditionally — so ground rule 3's **only** channel for a policy problem was unreachable. Wired
+rather than deleted, because the channel is the mechanism: no tool refuses, so anything the service
+wants to say about a request it served anyway arrives there.
+
+**And the component read a field that does not exist.** `ToolWarning` declared
+`{code, message, context}`; `models/errors.py::Warning` is `{code, detail}`. Two of three field
+names wrong, and nothing failed — because nothing rendered a warning. A field name no response
+carries is invisible until something reads it, which is the same lesson as R-72 in miniature. The
+Python guard now asserts the field set **exactly** against a real `dataset_archived` reply.
+
+Two render sites, both reachable and both measured:
+
+- **`dataset_get` warns `dataset_archived`** for a dataset reached by explicit id. An archived
+  dataset is hidden from `dataset_find` and still readable, so a reviewer following a link needs
+  telling it has been withdrawn from discovery. Rendered above the detail view.
+- **The two writes** return warnings, rendered beside the saved message.
+
+`datasetGet`, `datasetSave` and `blueprintSave` return `WithWarnings<T>` rather than the bare value.
+A `Warnings warnings={[]}` placed somewhere it can never fire was written and then removed: an
+unreachable renderer is what this entry is about, and adding a second one while fixing the first
+would have been comic.
+
+## [M9, fix round 1] Blueprint versions are selectable, and the count says what it counts
+Two gaps rather than decisions.
+
+**`blueprint_list` was wired at the query layer and consumed by nothing**, so only the latest
+published version of the selected agent was reachable while `agent_list`'s `versions[]` was fetched
+and never shown. The brief says "browse agents, blueprints and datasets", and a blueprint with three
+versions of which one is visible is not being browsed. The picker reads `blueprint_list` rather than
+`agent_list.versions` because it carries each version's `status` — a reviewer needs to know whether
+what they are reading is a draft or an immutable published version *before* they edit it, and the
+editor's hint now says which.
+
+**The dataset footer printed a page count as a total.** `dataset_find`'s default limit is 50
+(R-42(b)) and this app has no paging, so a store with sixty datasets showed "50 datasets" and no hint
+of the other ten. The limit is now sent **explicitly** — so the app knows the boundary it is
+displaying rather than inferring it from a server default — and the footer reads "N shown · M in this
+agent", with M from `label_vocabulary`'s `dataset_count`, plus a "page limit reached" note when the
+page is full. Paging itself is not built: it is a feature the brief does not ask for, and a count
+that lies is a defect.
+
+## [M9, fix round 1] A successful save clears the draft
+`draft` was never cleared, so after a save the editor **displayed** the refetched document while
+**validating and re-saving** the stale draft until the reviewer typed again. The two panes agreed on
+screen and disagreed in memory, which is the worst arrangement: nothing looks wrong.
+
+Cleared on the `success` transition, so `current` falls back to `loaded`.
+
+## [M9, fix round 1] Both guards over the network boundary, not one and a decoration
+The reviewer's recommendation, taken. The ESLint half restricted the **bare `fetch` global** only —
+one spelling out of six. It said nothing about `window.fetch`, `globalThis.fetch`,
+`new XMLHttpRequest()`, `new WebSocket()`, `new EventSource()`, `navigator.sendBeacon()` or `<form>`,
+every one of which the Python scan catches.
+
+Two guards over one property are worth having when they fail at different moments — ESLint in the
+editor, the Python scan in CI and across the language boundary. Two guards where one covers a sixth
+of the property is one guard and a decoration. So `no-restricted-syntax` now covers the
+`new`-expression forms, the qualified-member forms, `sendBeacon`, `importScripts` and a `<form>`
+JSX element, scoped to app files; verified by running ESLint against a probe containing all six and
+getting eight errors.
+
+`WEB_SUFFIXES` in the Python scan widens from `.ts`/`.tsx` to every dialect that can make a
+request — `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`. A guard whose coverage depends on a file
+extension nobody chose deliberately is a guard with a gap.
+
+## [M9, fix round 1] The `blueprints: []` literal is guarded, because ruling R-70 rests on it
+R-70 accepted `dataset_import` as the dataset-edit path on three facts, the first being that with an
+empty blueprint list it **cannot publish a blueprint as a side effect of saving a dataset**. Nothing
+held that. The clause-5 guard checks tool *names*; the bundle's contents are an *argument*; and the
+Python review-surface test re-implements the bundle rather than deriving it from the app — so both
+sides could have agreed while the app sent something else.
+
+One literal assertion over `tools.ts`, beside the existing `"dataset_import"` check, for
+`blueprints: []` and `publish: false`, each with the reason it is load-bearing recorded next to it.
+Asserted against **comment-stripped** source and separately against the raw source, because
+`tools.ts` discusses `blueprints: []` at length and a scan over prose would pass on the explanation
+alone.
+
+## [M9, fix round 1] The inaccurate comment in `envelope.ts`
+`payload()`'s docstring claimed a key rename "shows up as a type error at the call site". It cannot:
+the return is an unchecked `as T` cast. Corrected to say what is actually true — a rename is a
+*runtime* failure naming the tool and the keys found, rather than a silent `undefined` three
+components away — and to say why it cannot be a compile-time one: the wire is untyped and this is
+the boundary.
+
+Small, and worth an entry: a docstring that overstates a guarantee is the failure mode this build
+has spent nine milestones learning to distrust, and it was in the module that unwraps every response.
+
+## Questions for the owner — M9 fix round 1
+1. **Should R-73's scope include `docs/`?** `docs/spec-rulings.md` currently holds two NUL bytes, in
+   the text of R-73 itself, so the most-read file in this build is one git will not grep. The guard
+   is written so extending it is moving one prefix into `GUARDED_PREFIXES`; it is not done, because
+   the ruling named four directories and `docs/` is the frozen specification.
+2. **Should there be a `dataset_upsert` tool?** Carried forward from M9. R-70 accepted
+   `dataset_import` and named "a second consumer" as the trigger. The bundle-wrapping idiom is now
+   guarded by a literal assertion, which makes the current arrangement safe rather than obvious.
+3. **Should the dataset list page?** It now reports honestly that a page limit was reached, which is
+   the smaller half of the fix. Real paging is an `offset` and two buttons; not built, because the
+   brief does not ask for it and 50 suits the review surface R-42(b) sized it for.
+4. **Is a warning severity ever meant to block a write?** Ground rule 3 says no and the editor now
+   behaves that way, so a DS-027 document is savable. Worth confirming, because it means the web app
+   will happily store a dataset whose intent duplicates its narrative — which PRD 5.7 calls "what a
+   hurried author does". The warning is rendered prominently; nothing stops the author.

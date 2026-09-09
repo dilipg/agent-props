@@ -124,3 +124,23 @@ Two invariants worth knowing before you edit:
 Both render inline, against the same RFC 6901 pointers. Shape findings carry a synthetic `SHAPE`
 rule id so they are visibly not catalogue findings. Neither half writes anything: the validate tools
 store nothing, which is what makes "before save" true.
+
+**Only `error`-severity findings block save.** Ground rule 3: warnings never block, and the service
+will store a warned document — DS-027 (intent identical to narrative) warns, and refusing to save it
+would be this app inventing a gate the service does not have. Warnings render prominently and the
+status line says so.
+
+### The three envelope shapes
+
+The validate tools return `{ok, errors}` with **no `data` key**, on every outcome — including
+`ok: true` with *warning*-severity items for a document that trips only BP-019, DS-007, DS-027 or
+DS-032. That is the third shape in `docs/contracts.md` section 1 and ruling R-72 exists because this
+app read only two: routing a validate reply through the `data` reader threw, the throw was swallowed,
+and the editor announced "clean" over a warned document.
+
+`src/mcp/envelope.ts` discriminates on `"data" in envelope` rather than on `ok`, and
+`src/test/server.ts` has one constructor per shape. Two tests keep them honest:
+`src/test/server.test.ts` asserts the harness can build all three, and
+`tests/unit/test_web_envelope_shapes.py` asserts the **real service** emits exactly those three and
+that the harness declares a constructor for each. A harness that cannot construct a reply the
+service sends does not merely miss a bug; it manufactures agreement.

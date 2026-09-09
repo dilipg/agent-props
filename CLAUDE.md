@@ -88,6 +88,17 @@ nothing from the others and do no I/O. Business logic lives in `service/`; a too
 parses, delegates, shapes the response, and stays under 20 lines. Storage is reached only through the
 `Store` Protocol in `storage/base.py`, never through an adapter directly.
 
+Two web-app invariants beyond the layering rule, both from ruling R-72 and R-73's fix round:
+**the envelope has three shapes, not two** - success-with-`data`, validate-with-`errors` (no
+`data`, and `ok: true` when only warnings fired), and failure-with-`errors` - and
+`tests/unit/test_web_envelope_shapes.py` measures that against the running surface while asserting
+the web test harness can construct every shape it observes. A harness that cannot build a reply the
+service sends manufactures agreement rather than testing anything. And **no tracked file under
+`src/`, `web/src/`, `client/` or `tests/` may contain a NUL byte** (R-73), because git then calls
+it binary and `git grep`, ripgrep and every diff view skip it -
+`tests/unit/test_tracked_source_is_text.py` enforces it, asking git directly as well as scanning
+bytes.
+
 The **web app** has one too, and it is M9's fifth acceptance clause made mechanical: `web/src` may
 reach the network from `src/mcp/transport.ts` and from nowhere else, may call `callTool` from
 `src/mcp/tools.ts` and from nowhere else, and may name only the two writing tools M9 permits
