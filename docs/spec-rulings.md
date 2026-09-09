@@ -2086,6 +2086,86 @@ test's `raises("Unknown resource")` failing, with the docstring naming the bound
 than implying there is none. Ratified: a guard that states its own edge is worth more than one
 that pretends to have none.
 
+### R-81 — three M9.5 round-2 questions, answered
+
+**(a) Editing an append-only file was correct, and the rule the implementer invented is the
+right one.** It restored the truncated evidence *and* the two adjacent sentences deformed by
+the scope I withdrew, on the rule: **edit where the text was deformed by a withdrawn
+constraint, append where it recorded a decision.** It then flagged that R-68's precedent says
+a wrong entry gets a retraction, not an edit.
+
+Ratified, and the distinction is worth keeping. Append-only protects **what was decided** —
+so a decision that turns out wrong gets a retraction, never a quiet rewrite, because the
+reader must see both. A truncation is not a decision. It was compliance with a rule that no
+longer exists, and preserving it would preserve *damage*, not history. Restoring it makes the
+record more faithful, not less.
+
+**(b) `.claude/skills/run-agent-props/SKILL.md` is in scope, and here is the reason it was
+missing.** The implementer placed it by judgement rather than from R-78's list of three, and
+correctly noted that per R-79's corollary a classification is a claim.
+
+It is instructional documentation, so it is compared. And the fact that its reader is **an
+agent rather than a person** makes duplication *more* dangerous there, not less: a person who
+meets two sources that disagree tends to notice; an agent following the nearer one does not.
+R-78's list of three was written before that file existed — my omission, not a judgement call
+the implementer should have had to make alone.
+
+**(c) "This is the guard's first hole, and holes widen." Ratified as stated, with the
+consequence made a rule.** Four assertions stand between the exemption and a scope covering
+nothing: exempt names must be tracked; `README.md`, `CLAUDE.md` and something under `docs/`
+must remain compared; exempt files must actually be skipped. That is the right shape, and
+proving the exemption **load-bearing** — emptying it reports 12 shingles, all restored
+citations — is what distinguishes it from a hole.
+
+The implementer's instinct not to add a second entry without the owner naming it becomes the
+rule: **a second exemption requires a ruling, not judgement.** Its reasoning is the whole
+justification — "one exemption, well reasoned, is how the previous three vacuous guards in
+this build also started."
+
+## Rulings that bind M10 (publish outward)
+
+### R-82 — the evidence bundle carries `outcome_schema`
+
+This settles finding F-17, deferred from the pre-flight scan. M10's gate requires
+`run_evidence` output to be "sufficient for the client's comparison helpers to grade the run
+with no further server calls" — but the documented bundle omits `outcome_schema`, and
+`compare.schema(instance, outcome_schema)` takes it as its second argument. So the bundle as
+specified cannot satisfy the milestone's own criterion for one of the three comparison modes.
+
+**Ruling.** `run_evidence` includes the pinned blueprint's `outcome_schema`. Not a reference
+to it, the schema itself — a reference is another server call, which is what the criterion
+forbids.
+
+The general shape: the bundle must carry **everything the three helpers take as input**.
+`exact` and `subset` need expected and actual; `schema` needs the schema. Read the gate as
+the specification it is, and let the helper signatures enumerate the bundle's contents rather
+than guessing at them.
+
+**Cost if wrong.** A larger payload on one read-only tool. The pinned blueprint version is
+immutable (BP-016), so the embedded schema cannot go stale relative to the run.
+
+### R-83 — Langfuse linkage rides OTLP; do not add a Langfuse dependency
+
+This settles finding F-32. M10's brief requires "Langfuse dataset-run linkage", and the
+locked stack table names `opentelemetry-sdk` plus an OTLP exporter — **no Langfuse SDK.**
+
+**Ruling.** Implement the linkage as OTLP span and resource attributes that Langfuse reads on
+ingestion, not by adding a client library. Langfuse accepts OTLP; the stack already emits it;
+and PRD design principle 7 is "interoperate rather than replace — emit formats other tools
+consume." A vendor SDK would make one consumer a build dependency, which is the opposite of
+that.
+
+**Two constraints, and the second is the point.** Ground rule 4 stands: no vendor client, no
+API key handling in `src/`. And **R-79 applies directly** — if OTLP attributes turn out
+insufficient for the linkage Langfuse actually wants, say so with a **probe against Langfuse's
+documented ingestion contract**, quoted. Do not report "Langfuse cannot do this" without one,
+and do not add the dependency on the strength of an unprobed claim. "I did not find how" is
+the honest form, and it leaves the decision with the owner.
+
+**Cost if wrong.** If the linkage genuinely needs the SDK, that is a stack change and
+therefore an owner decision — which is exactly why it must arrive as a probe rather than as a
+new line in `pyproject.toml`.
+
 ## Owner scope decisions
 
 ### R-76 — M9.5: register the MCP `prompts` and `resources` the server already advertises
