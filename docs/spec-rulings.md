@@ -1317,6 +1317,35 @@ about the fixtures. M8 may add a warning if it proves useful; it must not add a 
 `len(tools) == 16` and the README listing thirteen tools. Ratified, and worth noting as the
 kind of drift a tool-count assertion is *supposed* to catch: it did its job.
 
+### R-55 — `set_run_warnings` joins the Protocol, and the re-read alternative was correctly rejected
+
+M6's fix round added `Store.set_run_warnings`, which replaces that one column and nothing
+else, and amended `contracts.md` section 6.
+
+**Ratified**, for R-33's reason a third time: a Protocol method added after M7 costs three
+signed-off adapters instead of one conformance test.
+
+**The rejected alternative is the part worth recording.** I offered two shapes — re-read the
+run immediately before the merge, or add a narrow store write. The implementer rejected the
+re-read on **R-37's grounds**: it narrows the revert window without closing it, and a
+transaction wrapped around a read and a write is not a lock on the value read. That is
+exactly the reasoning R-37 was written from, applied to a different method without being
+prompted, and it is the better of the two options I gave. Narrowing the write also settles
+the N-round-trip finding for free, since `put_run` no longer re-upserts every step to record
+a warning.
+
+**A note for M8.** Both docstrings state that the finished state is written through
+`put_run` directly *because `run_finish` does not exist yet* — so M8 knows exactly what to
+replace rather than inheriting a silent assumption.
+
+**On R-53's `agent_id` half:** the implementer found it cannot diverge alone. A dataset
+belongs to one agent, so a diverging `agent_id` always also diverges the selector, and the
+test therefore asserts membership rather than equality. My extension of R-53 was subsumed by
+the selector case rather than adding a second one — correct, and better than implementing
+two checks that cannot disagree.
+
+**Cost if wrong.** One Protocol method; the sequential path is unchanged.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
