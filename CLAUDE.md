@@ -15,11 +15,12 @@ Phase 1 is eleven milestones, **M0 to M10**, defined in
 [docs/build-handoff.md](docs/build-handoff.md) section 4. **M11, the TypeScript client, was
 descoped by the owner — do not build it (R-68).** Build one milestone per session, in order.
 Each milestone's acceptance criteria are the gate: do not start one until the previous one's
-criteria pass. **M0 through M8 are built:** the models, the validator, all three storage adapters,
-the MCP surface, the skeleton pipeline, the runtime read path, the containers, the promotion path
-and the Python client. Twenty-five tools, three backends, two packages - the service in
-`src/agentprops/` and `agent-props-client` in `client/python/`, which is separately installable and
-depends on nothing of the service's.
+criteria pass. **M0 through M9 are built:** the models, the validator, all three storage adapters,
+the MCP surface, the skeleton pipeline, the runtime read path, the containers, the promotion path,
+the Python client and the web app. Twenty-five tools, three backends, two packages and one web app -
+the service in `src/agentprops/`, `agent-props-client` in `client/python/`, which is separately
+installable and depends on nothing of the service's, and `web/`, which reaches the service through
+the tool surface and nothing else.
 
 ## Read before writing code
 
@@ -87,6 +88,16 @@ nothing from the others and do no I/O. Business logic lives in `service/`; a too
 parses, delegates, shapes the response, and stays under 20 lines. Storage is reached only through the
 `Store` Protocol in `storage/base.py`, never through an adapter directly.
 
+The **web app** has one too, and it is M9's fifth acceptance clause made mechanical: `web/src` may
+reach the network from `src/mcp/transport.ts` and from nowhere else, may call `callTool` from
+`src/mcp/tools.ts` and from nowhere else, and may name only the two writing tools M9 permits
+(`blueprint_upsert`, `dataset_import`).
+`tests/unit/test_web_writes_through_tools.py` derives all three from real surfaces - the running tool
+registry, an AST walk to the `Store` Protocol's mutators, and a scan of `web/src` - so a new write on
+the service is classified the day it lands. The load-bearing half is not the allowlist: it is that
+**no network primitive appears outside the transport**, because a `fetch('/api/...', {method:'PUT'})`
+names no tool at all.
+
 The client has a layering rule of its own, and it is ground rule 2 made mechanical:
 `compare.py` -> nothing but `jsonschema`; `run.py` -> `envelope.py`; `session.py` -> `run.py` plus
 `mcp`. **`session.py` is the only module that may import a transport**, the package's `__init__`
@@ -106,6 +117,11 @@ Available from M0 onward, once `pyproject.toml` exists.
 - `uv run ruff check` and `uv run mypy` — both must pass before any commit (`mypy` covers `tests/`
   and `client/python/agentprops_client/` as well as `src/`). `ruff format` takes **no path
   argument**: `docs/` holds the frozen specification and `pyproject.toml` excludes it
+- `cd web && npm run dev` — the M9 web app, at `http://localhost:5173`, proxying `/mcp` to the
+  service on 8000. It is served **same-origin** with the service because a browser cannot reach the
+  MCP endpoint cross-origin - `OPTIONS /mcp` is 405 and no response carries a CORS header, measured
+  (`DECISIONS.md` [M9], finding F-16). `npm test`, `npm run lint` and `npm run typecheck` are its
+  own gates and are separate from `uv run pytest`; `web/README.md` has the rest
 - `docker compose --profile local up` — service plus Mongo, for authoring; `--profile shared` for
   Postgres. Alternatives rather than layers; both publish the service on 8000. The databases
   publish **Mongo on 27117 and Postgres on 5442**, not their default ports, and the test URLs

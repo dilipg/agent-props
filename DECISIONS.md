@@ -4345,3 +4345,309 @@ were corrected in `d822a89`, and `docs/prd.md`'s three by the owner.
 None. Fix round 1's three questions are all answered: R-65 amended (question 1),
 `run_already_finished` confined to the read path (question 2), and `AP-007`'s context omission
 ratified and now documented at the code (question 3).
+
+# M9 — the web app
+
+## [M9] Finding F-16 ruled: the browser reaches the tools **same-origin**, and the service is not changed
+**The transport question, measured rather than reasoned about.** F-16 was deferred to M9 as "the web
+app's transport to the service" and the pre-flight scan's suspicion was right: **a browser cannot
+drive `mcp` 2.2.0's streamable-HTTP transport cross-origin.** Three measurements against the running
+service, all reproducible with `curl`:
+
+| Probe | Result |
+|---|---|
+| `OPTIONS /mcp` with `Origin` and `Access-Control-Request-*` | **405 Method Not Allowed**, `allow: GET, POST, DELETE` |
+| `access-control-*` headers on any `/mcp` response | **zero**, for any `Origin` |
+| `access-control-expose-headers` for `mcp-session-id` | absent |
+
+Each of the three is on its own fatal. A POST carrying `content-type: application/json` plus the
+`mcp-session-id` header is not a CORS-simple request, so the preflight is mandatory and it 405s.
+Even a simple request's response could not be read without `access-control-allow-origin`. And even
+with both, JavaScript could not read `mcp-session-id` off the `initialize` response — the header
+every subsequent request has to echo. The cause is in the SDK: `CORSMiddleware` is wired only into
+its OAuth routes (`mcp/server/auth/routes.py`), `streamable_http_app()` takes no CORS parameter, and
+`run_streamable_http_async` builds the app and runs uvicorn with no hook to wrap it.
+
+**Chosen: serve the app same-origin with the service.** Vite's dev server and its preview server
+proxy `/mcp` to `AGENTPROPS_SERVICE_URL` (default `http://127.0.0.1:8000`); a deployment serves the
+built assets behind the same origin as the service. This *removes* CORS from the picture rather than
+working around it, and — the part that decided it — **it needs no change to the service at all.**
+`serve_http` still calls `run_streamable_http_async`, which is M4's deliverable untouched.
+
+The browser speaks **MCP JSON-RPC to `/mcp` and nothing else**. There is no REST API beside the tool
+surface, which is ruling R-17's requirement and what makes clause 5 checkable.
+
+**Alternative rejected: an opt-in `--allow-origin` on the service.** It is about twenty-five lines —
+build the app with `streamable_http_app()`, wrap it in `CORSMiddleware` with explicit origins and
+`expose_headers=["mcp-session-id"]`, run uvicorn directly — and it was rejected on two grounds.
+It is not the *minimum* shape, and phase 1 has **no auth**: a permissive CORS on a service exposing
+`blueprint_upsert` and `dataset_import` would let any page a developer happens to visit drive their
+authoring store. Same-origin has no such hazard because it grants no origin anything.
+
+**The named remedy, if a cross-origin deployment is ever genuinely wanted:** exactly that patch,
+default-off, explicit origins, never `*`, `allow_credentials=False`, taken only when origins are
+configured so the default path stays byte-identical to today's. **Do not build it now.** The trigger
+is a real deployment that cannot put the assets behind the service's origin, and until then it is a
+config surface with no caller. (Same shape as ruling R-39(a)'s recorded-not-built search column.)
+
+**Cost if wrong.** If the owner wants cross-origin, it is the patch above plus a flag. Nothing in
+the app changes: `callTool` posts to a relative path, so it works under any origin that proxies
+`/mcp`, and `tests/unit/test_web_writes_through_tools.py` asserts that the path stays relative —
+an absolute URL would mean the app could be pointed at a second service.
+
+## [M9] The local half of validation is **shape**; the catalogue round-trips, and both run before save
+The second half of F-16. Ajv — which `vanilla-jsoneditor` uses — cannot express BP-005
+(reachability), BP-018 (a cycle not through a loop node), DS-008 (entity drift) or DS-010 (revision
+ordering), because none of them is a property of one document's shape. **That is not a gap, it is
+ruling R-04**, which put constraints in the catalogue and shape in the models on purpose, and
+`schema_export.py` already said the emitted schemas "carry shape only, not policy".
+
+So the split is:
+
+| Half | Who | When | Rule id |
+|---|---|---|---|
+| Shape | Ajv 2020-12 plus `ajv-formats`, in the browser, against `schemas/*.schema.json` | every keystroke, no network | `SHAPE` |
+| Policy | `blueprint_validate` / `dataset_validate` over MCP, debounced 450 ms | before save, stores nothing | the catalogue's own |
+
+**The thing that makes clause 1 work is that the validate tools do not store** (contracts section 4).
+That turns the remote half from a submit into a pre-save check, so "inline errors *before* save" is
+true of the catalogue half as well as the shape half. `test_web_review_surface.py` asserts it
+directly: `dataset_validate` reports DS-026 and the lineage stays at version 1.
+
+Three consequences worth recording:
+
+- **Shape findings carry a synthetic `SHAPE` id, not a `DS-*` one.** Minting a catalogue id for a
+  condition no rule describes is what ruling R-43(a) created the `AP-*` family to avoid. A reviewer
+  seeing `SHAPE` knows the document does not match the emitted schema; seeing `DS-026` knows a rule
+  fired. They render in the same list, in different colours, both against RFC 6901 pointers.
+- **Ajv needs the 2020-12 dialect explicitly.** The emitted schemas declare
+  `$schema: draft/2020-12` and Ajv's default export is draft-07, which throws on an unknown
+  meta-schema. `createAjvValidator`'s `onCreateAjv` hook returns our own `Ajv2020`, configured in
+  one place (`src/lib/validation.ts::newAjv`) — so the editor's inline squiggles and the finding
+  list below it come from the same configuration and cannot disagree.
+- **`ajv-formats` is added deliberately.** Without it Ajv logs "unknown format uuid ignored" and
+  validates *less shape than the schema describes*. `format: uuid` and `format: date-time` are in
+  the emitted schemas because M1's models have those types; honouring them is honouring R-04's
+  division, not extending it.
+
+**Save is disabled while findings stand, and that is a courtesy rather than a safety mechanism.**
+The service is what refuses a broken write, at write time, through the full catalogue (ground rule
+7). A disabled button only declines to waste the reviewer's round trip. When a rejection does come
+back it renders in the same inline list, so a reviewer never has to learn a second place to look.
+
+**Alternative rejected: local-only validation.** Faster and wrong. It would show a perfect document
+that the store then refuses, which is the worst possible order to learn things in.
+
+## [M9] The dataset edit saves through `dataset_import`, because it is the only copy-on-write path
+Ruling R-17 says the web app writes "producing a new dataset version by **copy-on-write**". The tool
+surface has no `dataset_upsert`. Its dataset writes are `dataset_submit` (from a skeleton),
+`dataset_import` (from a bundle), `dataset_expand`, and the two archive flags — so the choice is
+narrower than it looks, and only one of them is an *edit*:
+
+- **`dataset_submit` mints a new lineage.** A skeleton produces a new `dataset_id`, so submitting an
+  edited document creates a *different dataset*, not a new version of this one. That is not
+  copy-on-write; it is the twenty-first dataset PRD 5.7 complains about.
+- **`dataset_import` is copy-on-write.** `put_dataset` allocates `max(version) + 1` for the lineage
+  keyed on the document's own `id` (`storage/sql.py`), so a bundle carrying an edited dataset that
+  keeps its id becomes version *n+1* and every earlier version stays readable by
+  `dataset_get(id, version)`. Verified end to end in `test_web_review_surface.py`: version 2 written,
+  version 1 unchanged, and `dataset_find` still showing **one** row for the lineage (ruling R-38).
+
+It also re-runs the **whole** `DS-*` catalogue against the receiving store and writes nothing unless
+all of it passes, which is exactly the write-time strictness ground rule 7 asks for on an edit.
+
+**`blueprints: []` in the bundle is deliberate.** Import validates against a resolver that answers
+from the receiving store *plus the bundle*, so a dataset whose blueprint is already published here
+satisfies DS-001 without the bundle re-carrying it — and re-sending an immutable published version
+for no reason is worse, not more thorough.
+
+**Blueprint saves use `blueprint_upsert` with `publish: false`, always.** A published version is
+immutable (BP-016), so an editor that published on every save would make the *second* save an error.
+Publishing is a deliberate act on a finished blueprint, not what pressing save in a JSON editor
+should mean.
+
+**Alternative rejected: asking for a `dataset_upsert` tool.** It would be the ergonomic answer and
+it is a new tool on a locked surface for a milestone that has a working path. Recorded as a question
+for the owner instead.
+
+## [M9] Clause 5 is guarded by "one way out", not by an allowlist of tool names
+`tests/unit/test_web_writes_through_tools.py`. The brief asked for clause 5 to be mechanical and
+named `test_runtime_is_read_only.py` and `test_bounded_integers.py` as the patterns — both of which
+**enumerate from a real surface** rather than from a literal list.
+
+Three derivations, no lists:
+
+1. **Which tools exist** — `mcp.list_tools()`, the running registry, as R-50's integer guard reads it.
+2. **Which of them write** — an AST walk from each `@mcp.tool()` function in `server/` through
+   `service/`, asking whether it reaches a method whose name starts with a mutating verb **on the
+   `Store` Protocol**. So a `dataset_upsert` added later is classified as a write the day it lands.
+3. **Which the web app names** — `callTool("<name>")` call sites, plus any registered tool name
+   appearing as a string literal in `web/src`.
+
+**The load-bearing assertion is not the tool-name allowlist.** "No mutation outside the tool surface"
+is not "only these tool names are called": a `fetch('/api/datasets', {method:'PUT'})` names no tool
+at all and would sail past an allowlist. So the guard's real claim is narrower and stronger —
+**the only way out of the app is one function.** No network primitive (`fetch(`,
+`XMLHttpRequest`, `WebSocket(`, `EventSource(`, `sendBeacon(`, `axios`, `<form`) appears anywhere in
+`web/src` outside `src/mcp/transport.ts`; `callTool` is called from one module; every argument to it
+is a **literal** (a computed name would make the scan a lower bound rather than an enumeration); and
+the transport posts to `MCP_PATH` and to no absolute URL. The tool-name checks then constrain what
+goes *through* the one door.
+
+**A comment stripper was necessary, and it is a decision rather than a detail.** The broad tool-name
+scan initially failed on `web/src/mcp/tools.ts` — whose module comment names `dataset_submit`,
+`dataset_expand`, `dataset_archive` and `dataset_restore` in order to say why each is *not* the tool
+an edit uses. That explanation is the most valuable text in the file, and a guard that forced its
+deletion would push the reasoning out of the code to protect a regex. So the scan blanks comment
+bodies first, preserving string literals (a regex stripping `//` to end of line eats the rest of any
+line containing an `https://` URL, so it is a character pass). The stripper has its own three tests,
+and one asserts the concrete case against the real file: those four names present in the raw source,
+absent after stripping.
+
+**Every exclusion is guarded.** Test files are excluded — they stub `fetch` deliberately, which is
+how `DatasetList.test.tsx` counts requests, and they name a deliberately unregistered tool to
+exercise the app's error path. `test_the_app_and_test_partition_is_real` asserts both halves are
+non-empty and disjoint and that together they are the whole tree, so the exclusion cannot quietly
+become "scan nothing".
+
+**Shown failing, against the real tree.** Two mutations planted in `web/src`: a
+`fetch('/api/datasets/…', {method: 'PUT'})` in `DatasetDetail.tsx`, and a
+`callTool("dataset_archive", …)` in `tools.ts`. Both were reported, by name, with the file named —
+transcript in the M9 report. The synthetic falsifiers in the file itself
+(`test_the_network_scan_rejects_a_planted_call` and its siblings) keep that property under CI, and
+one `parametrize` asserts that **every** entry in the primitive list actually trips the scan, because
+a typo in that list would silently stop guarding one of them.
+
+## [M9] The graph layout is a forty-line BFS, not a third graph library
+React Flow needs an `{x, y}` per node and computes none. The usual answers are `dagre` and `elkjs`
+and **neither is in the locked stack**, so `src/graph/topology.ts` is a layered layout instead:
+breadth-first depth from `entry_node` for the row, the blueprint's own `nodes` order for the column.
+
+BFS is the right choice specifically **because the golden blueprint is cyclic.** It reaches
+`check_docs` at depth 2 by the forward path and never re-deepens it when the loop arrives from
+`recheck_store`, so `recheck_store` to `check_docs` draws as a back edge instead of stretching the
+diagram down the page. The edge is marked `isLoopBack`, drawn in a different colour and animated, so
+"renders the loop edge" means the reviewer can see it *is* a loop.
+
+The layout is a **total function of the document** — same blueprint, same drawing, asserted — which
+is the presentation-layer echo of rulings R-35 and R-58 making every service ordering total and
+collation-stable. A layout depending on `Set` iteration order or `Object.keys` would undo that at
+the last step.
+
+**A node unreachable from `entry_node` is drawn, in a final row, marked.** It is a BP-005 error and
+the blueprint will be rejected — but the editor shows invalid documents on purpose, and a view that
+silently hid the node whose absence *is* the error would be the worst possible answer.
+
+**Alternative rejected: `dagre`.** Prettier for a wide graph, and a dependency outside the locked
+stack for one screen. If a blueprint arrives whose graph this layout renders unreadably, that is the
+trigger to revisit — not before.
+
+## [M9] The list gets its whole review surface in **one** fetch, and that is a property of `DatasetSummary`
+Clause 3 — "the list shows enough to judge relevance without a detail fetch" — needed no new shape,
+because contracts 2.2.1 already put title, intent, the complete label set, the author and a
+narrative excerpt on every `dataset_find` row, and said why: "it exists so a reviewer can judge a
+dataset without fetching it". Ruling R-38 made it one row per lineage at its latest version. So the
+list calls `dataset_find` once and `label_vocabulary` once — the latter per *blueprint* and bounded
+by the blueprint (R-42(c)), not per row — and nothing else.
+
+**The intent is rendered in full, deliberately un-truncated.** `narrative_excerpt` is capped at 200
+characters by the contract; `intent` is not, and must not acquire a cap. PRD 5.7 makes it the field a
+reviewer reads to decide relevance, and Priya's is 306 characters — so a list that clipped both
+"for consistency" would look tidy and destroy the thing the screen is for.
+
+**The filters do no client-side work.** Each maps to one `dataset_find` parameter and the app renders
+what comes back. Ruling R-36 pinned `q` as a case-folded substring match on every backend and R-39(a)
+moved the fold into Python so the three agree; a browser that re-filtered the returned rows would be
+answering a different question from the service, and a reviewer would have no way to tell which
+answer they were looking at.
+
+**The label filter shows per-value counts** from `label_vocabulary`, so a reviewer sees that
+`edge_case=timezone-boundary` has no datasets *before* selecting it. That is PRD 5.7's
+"twenty-first dataset" problem caught one screen earlier.
+
+## [M9] What the tests actually assert about the two design clauses, and what they cannot
+Recorded because the brief asked for it plainly, and because "something can pass while proving
+nothing" is this build's most-repeated lesson.
+
+**Clause 3, "enough to judge relevance", is a design claim and no test reaches it.** What the pair of
+tests assert is the two facts underneath it: every field the brief names is present on the
+`dataset_find` row at full length (`test_web_review_surface.py`), and rendering the list makes
+exactly **one** dataset call with zero `dataset_get`s — asserted again at twenty rows, so two rows
+and one call cannot be a coincidence of a small list (`DatasetList.test.tsx`). If the brief's premise
+is wrong and a reviewer needs a fifth field, both tests still pass. That is the limit.
+
+**Clause 4's "full topology including the loop edge" is asserted as an edge *set*, not a snapshot.**
+A rendered snapshot, or a count of nine, would also pass with one edge missing and another
+duplicated. Comparing the produced set with the document's set cannot: drop
+`recheck_store -> check_docs` and the sets differ by that member and the message names it. There is a
+test that plants exactly that deletion and asserts the comparison notices. The loop edge is asserted
+three ways — present in the set, flagged `isLoopBack` and the *only* edge so flagged, and all three
+edges of the cycle drawn.
+
+**The rendered graph is asserted separately and weakly, on purpose.** jsdom reports every element as
+0 by 0, so React Flow paints no edge geometry; `BlueprintGraph.test.tsx` asserts only that the nine
+nodes mount and that no node carries React Flow's `draggable`/`selectable` classes. Asserting on
+edge SVG under jsdom would either fail for a layout reason or pass against a stub, and neither says
+anything about topology — which is why that assertion lives in the pure test, where there is nothing
+to measure.
+
+**Clause 1's editor is stubbed in the component test, and the reason is not convenience.**
+`vanilla-jsoneditor` mounts CodeMirror, which needs layout jsdom does not provide; driving a code
+editor through synthetic keystrokes tests CodeMirror. The stub is a `textarea` calling the same
+`onChange` with the same two arguments, so the component under test is real and only the text input
+is fake. `JsonEditor.tsx` itself is covered by `vite build` (which fails on a wrong import or type)
+and by the live-service walk in the report.
+
+## [M9] The transport is ~150 lines of app code, and that is not a TypeScript client
+Ruling R-68 descoped `client/typescript/` — a published, separately installable client package. The
+web app still needs *some* way to speak to the tools, and `src/mcp/transport.ts` is it: `initialize`,
+the `notifications/initialized` acknowledgement, `tools/call`, and nothing else.
+
+Hand-rolled rather than pulling `@modelcontextprotocol/sdk`, for three reasons. It is genuinely
+small, because the app receives no server-initiated requests and so needs none of the `GET` stream.
+It gives clause 5's guard **one file to point at**, which an SDK's internals would not. And it
+changes nothing about the transport answer either way — the SDK hits the identical CORS wall.
+
+Two details worth recording:
+
+- **`structuredContent` carries the envelope directly**, so nothing re-parses `content[0].text`
+  unless the server omitted it. And both `text/event-stream` and `application/json` bodies are
+  handled, so a service started with `json_response=True` works unchanged.
+- **The session memo is on the promise, not the resolved value.** Memoising the value lets ten
+  components mounting together each open a session, and each of those is server-side state. One
+  decision site, one `initialize`, asserted with two concurrent first calls.
+
+The declared handshake version is `2025-11-25` and every later request echoes **whatever the server
+answered with**, not what was declared — so a server that negotiates down keeps working.
+
+## [M9] No router, and no archive button
+Two things deliberately absent.
+
+**No router.** PRD 10.4 scopes phase 1 to "browse and edit"; the app is three screens with one
+selected agent between them, and a router would be a sixth library in a locked five-library stack.
+Selection lives in component state. A URL scheme is the obvious next addition and nothing here
+blocks it — but a deep-linkable dataset is a feature nobody asked for, and the screens were split
+into `src/screens/` for testability, which is the change that would make routing trivial.
+
+**No `dataset_archive` / `dataset_restore`.** Both are writes M9's brief does not ask for, and the
+smallest write surface that satisfies the milestone is the one worth having. Adding them would widen
+`PERMITTED_WRITES` in the clause-5 guard, which is exactly the moment that decision should be
+visible.
+
+## Questions for the owner — M9
+1. **Should there be a `dataset_upsert` tool?** The web app's dataset edit goes through
+   `dataset_import` with a one-dataset bundle, which is correct copy-on-write and re-validates in
+   full — but it is a promotion tool being used as an edit tool, and a reader of `tools.ts` needs a
+   paragraph to understand why. A `dataset_upsert(dataset)` would be the honest name for what the
+   app does. Not built: it is a new tool on a locked surface and the existing path works.
+2. **Is a cross-origin deployment wanted?** The app is same-origin with the service by design (F-16
+   above). If the assets will ever be served from a different origin, the service needs the
+   default-off `--allow-origin` patch described there. Not built, because no such deployment exists
+   and phase 1 has no auth.
+3. **Should the editor be lazy-loaded?** The bundle is 1.58 MB raw / 482 kB gzipped, almost all of it
+   CodeMirror and React Flow, both behind a click. `React.lazy` on `JsonEditorPane` and
+   `BlueprintGraph` would cut first paint substantially. Not done: it is a performance change with no
+   measured problem on a same-origin internal tool.
+4. **Does the graph need a real layout engine?** The BFS layout is deterministic and readable for the
+   nine-node worked example. A blueprint with a wide fan-out may need `dagre`, which is outside the
+   locked stack.

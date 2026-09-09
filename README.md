@@ -32,13 +32,15 @@ registry and a declarative rejection corpus — the M3 `Store` Protocol and SQLi
 Mongo adapters in `src/agentprops/storage/`, `Dockerfile` and `docker-compose.yml`, and
 `dataset_expand`, `dataset_export` and `dataset_import`, and the M8 Python client in
 `client/python/` — a separately installable `agent-props-client` with the three comparison helpers
-— alongside its two server-side writes, `record_step` and `run_finish`. **Twenty-five tools, three
-backends, two packages.** `export/` is an empty module waiting on M10.
+— alongside its two server-side writes, `record_step` and `run_finish`, and the M9 web app in
+`web/`: a React 18 + Vite + TypeScript app that browses agents, blueprints and datasets, edits
+both documents in `vanilla-jsoneditor` against the emitted JSON Schemas, and draws a blueprint's
+graph read-only with React Flow. **Twenty-five tools, three backends, two packages, one web app.**
+`export/` is an empty module waiting on M10.
 
-Not yet built: the web app (M9) and the evidence bundle (M10), which is where phase 1 ends —
-ruling R-68 descopes M11, the TypeScript client, by owner decision.
-`tests/unit/test_tool_surface.py` lists exactly which documented tools are still deferred, and to
-which milestone.
+Not yet built: the evidence bundle (M10), which is where phase 1 ends — ruling R-68 descopes M11,
+the TypeScript client, by owner decision. `tests/unit/test_tool_surface.py` lists exactly which
+documented tools are still deferred, and to which milestone.
 
 ## Author a dataset
 
@@ -339,6 +341,7 @@ them and still be rejected by the validation catalogue.
 ```
 src/agentprops/   the service: models, validation, storage, service, server, expansion, export
 client/python/    agent-props-client: the run client and the three comparison helpers
+web/              the React browse-and-edit app; every write goes through the tool surface
 schemas/          Blueprint and Dataset JSON Schemas, generated from the models
 tests/            unit/, integration/, and fixtures/ (blueprints, datasets, broken)
 docs/             the specification (PRD, build handoff, contracts, worked example)
@@ -347,4 +350,7 @@ docs/             the specification (PRD, build handoff, contracts, worked examp
 `Dockerfile`, `docker-compose.yml` and `.dockerignore` sit beside them at the repository root.
 `client/python/` is its **own distribution** with its own `pyproject.toml` and no dependency on the
 service; it is on this project's dev dependency group so one `uv run pytest` covers both packages.
-`web/` arrives with M9. There is no `client/typescript`: ruling R-68 descopes M11.
+`web/` is the M9 web app, its own npm project with its own `package.json` — see
+[`web/README.md`](web/README.md), and note that it is served **same-origin** with the service
+because a browser cannot reach the MCP endpoint cross-origin (`DECISIONS.md` [M9], finding F-16).
+There is no `client/typescript`: ruling R-68 descopes M11.

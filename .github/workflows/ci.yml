@@ -33,3 +33,39 @@ jobs:
 
       - name: Test (pytest, SQLite store mode - no service containers)
         run: uv run pytest
+
+  web:
+    # The web app has its own toolchain and its own gates. A separate job rather
+    # than steps appended to the Python one, so a failure names which half broke
+    # and so the two run in parallel.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (eslint)
+        run: npm run lint
+
+      - name: Type check (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Test (vitest)
+        run: npm test
+
+      # The build is a gate in its own right: it is what covers the modules the
+      # jsdom suite cannot mount - `JsonEditor.tsx` mounts CodeMirror, which
+      # needs layout - by failing on a wrong import or a wrong type.
+      - name: Build (vite build)
+        run: npm run build
