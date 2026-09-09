@@ -41,6 +41,21 @@ Success shape:
 
 `data` always carries the payload under **one named key** — `{"blueprint": {...}}`, `{"blueprints": [...]}`, `{"diff": {...}}`. The "Returns" column in section 4 describes that payload, not where in the envelope it sits. The named key is the only convention that works for the tools whose payload is an array, and using it everywhere means a caller never has to ask which tools wrap (added at M4; see `DECISIONS.md`).
 
+Validate shape — **the third shape, and the one that surprises a client** (ruling R-72):
+
+```json
+{ "ok": true, "errors": [ ] }
+```
+
+`blueprint_validate` and `dataset_validate` return **this** shape whatever the outcome: `{"ok": true, "errors": []}` for a clean document, `{"ok": true, "errors": [...]}` with **warning**-severity items for a document that trips only BP-019, DS-007, DS-027 or DS-032 (ruling R-13), and `{"ok": false, "errors": [...]}` when anything is error-severity. There is **no `data` key and no `warnings` key**, on any of the three outcomes.
+
+Two consequences a client must handle, and M9's web app initially handled neither:
+
+- **`ok: true` does not imply `data` exists.** A reader that unwraps `data` on a truthy `ok` throws on every validate call. Read `errors` directly instead.
+- **Warning-severity findings travel in `errors`, not in `warnings`.** The `warnings` array is for the *success* shape's non-blocking conditions (`pool_exhausted`, `dataset_archived`, `blueprint_version_mismatch`, `run_already_finished`); a validate reply's warnings are catalogue findings with `severity: "warning"`, and there is deliberately no second channel for them.
+
+So the envelope has three shapes in total — success-with-`data`, validate-with-`errors`, and failure-with-`errors` — and `models/errors.py` has always said so: `SuccessEnvelope` for the first, `ErrorEnvelope` for the other two, with the latter's docstring naming the warned-clean case explicitly.
+
 `rule` also carries the five **boundary codes** in section 3.5, for the failures a user can cause that no catalogue rule covers.
 
 ## 2. Domain models

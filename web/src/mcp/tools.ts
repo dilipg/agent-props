@@ -37,8 +37,8 @@
  * milestone is the one worth having.
  */
 
-import type { Envelope, RuleError } from "./envelope";
-import { payload } from "./envelope";
+import type { RuleError, ToolWarning } from "./envelope";
+import { findingsIn, payload, warningsIn } from "./envelope";
 import { callTool } from "./transport";
 import type {
   AgentRow,
@@ -101,10 +101,40 @@ export async function datasetFind(filter: DatasetFilter): Promise<readonly Datas
   return payload("dataset_find", await callTool("dataset_find", args));
 }
 
-export async function datasetGet(datasetId: string, version?: number): Promise<DatasetView> {
+/**
+ * A value plus the warnings the response carried.
+ *
+ * Ground rule 3 makes warnings the **only** channel for a policy problem — no
+ * tool refuses, so anything the service wants to say about a request it served
+ * anyway arrives here. A reader that discarded them would be discarding the
+ * whole mechanism, which is what this app did until the R-72 fix round: the
+ * `Warnings` component existed, was exported, and was imported by nothing.
+ */
+export interface WithWarnings<T> {
+  readonly value: T;
+  readonly warnings: readonly ToolWarning[];
+}
+
+/**
+ * One dataset, with its warnings.
+ *
+ * `dataset_get` warns `dataset_archived` when reached by explicit id — an
+ * archived dataset is hidden from `dataset_find` but still readable, so a
+ * reviewer following a link needs telling that what they are looking at has
+ * been withdrawn from discovery. That is a real, reachable warning for this
+ * app, which is why this wrapper exists rather than being written for symmetry.
+ */
+export async function datasetGet(
+  datasetId: string,
+  version?: number,
+): Promise<WithWarnings<DatasetView>> {
   const args =
     version === undefined ? { dataset_id: datasetId } : { dataset_id: datasetId, version };
-  return payload("dataset_get", await callTool("dataset_get", args));
+  const envelope = await callTool("dataset_get", args);
+  return {
+    value: payload<DatasetView>("dataset_get", envelope),
+    warnings: warningsIn(envelope),
+  };
 }
 
 /**
@@ -115,34 +145,30 @@ export async function datasetGet(datasetId: string, version?: number): Promise<D
  * BP-018 (a cycle not through a loop node) and the rest need the graph, so they
  * come from here. `blueprint_validate` does not store, which is what lets this
  * run *before* save rather than as part of it.
+ *
+ * The reply is a **findings envelope** — `{ok, errors}`, no `data` — whatever
+ * the outcome, so `findingsIn` reads `errors` off it directly. Routing it
+ * through `payload()` is what ruling R-72 forbids and what this code did: it
+ * threw on every clean document's debounce tick, the throw was swallowed, and
+ * every **warning**-severity finding was lost while the editor said "clean".
  */
 export async function blueprintValidate(document: JsonDocument): Promise<readonly RuleError[]> {
-  return errorsOf(await callTool("blueprint_validate", { blueprint: document }));
+  return findingsIn(
+    "blueprint_validate",
+    await callTool("blueprint_validate", { blueprint: document }),
+  );
 }
 
 /**
  * The dataset half of the same: DS-008 entity drift, DS-010 revision ordering,
  * DS-024/025/026 provenance, DS-001 blueprint existence. Stores nothing.
+ *
+ * DS-027 — intent identical to narrative — is a **warning**, and it is the rule
+ * `DatasetDetail.tsx` cites as the mistake the detail screen exists to catch.
+ * It arrives here as `{ok: true, errors: [DS-027]}` and must render.
  */
 export async function datasetValidate(document: JsonDocument): Promise<readonly RuleError[]> {
-  return errorsOf(await callTool("dataset_validate", { dataset: document }));
-}
-
-/**
- * `{ok, errors}` from a validate tool, as a finding list.
- *
- * The validate tools answer with the errors as their payload rather than by
- * failing, so a clean document is an empty list and neither case is an
- * exception. A genuinely *broken* call — an unparseable argument, `AP-001` —
- * still arrives as an error envelope, and its findings are the answer too:
- * a reviewer wants to see `AP-001` inline exactly as they want to see DS-026.
- */
-function errorsOf(envelope: Envelope): readonly RuleError[] {
-  if (!envelope.ok) {
-    return envelope.errors;
-  }
-  const report = payload<{ ok: boolean; errors?: readonly RuleError[] }>("validate", envelope);
-  return report.errors ?? [];
+  return findingsIn("dataset_validate", await callTool("dataset_validate", { dataset: document }));
 }
 
 // --------------------------------------------------------------------- writes
@@ -155,11 +181,14 @@ function errorsOf(envelope: Envelope): readonly RuleError[] {
  * act on a finished blueprint and phase 1 has a tool for it; it is not what
  * pressing save in a JSON editor should mean.
  */
-export async function blueprintSave(document: JsonDocument): Promise<BlueprintView> {
-  return payload(
-    "blueprint_upsert",
-    await callTool("blueprint_upsert", { blueprint: document, publish: false }),
-  );
+export async function blueprintSave(
+  document: JsonDocument,
+): Promise<WithWarnings<BlueprintView>> {
+  const envelope = await callTool("blueprint_upsert", { blueprint: document, publish: false });
+  return {
+    value: payload<BlueprintView>("blueprint_upsert", envelope),
+    warnings: warningsIn(envelope),
+  };
 }
 
 /** What `dataset_import` reports: the ids and versions it wrote. */
@@ -174,11 +203,20 @@ export interface ImportedDatasets {
  * Copy-on-write, through the tool surface, re-validated in full on arrival —
  * ruling R-17 and ground rule 7. The document keeps its `id`; the receiving
  * store allocates the version and ignores whatever the document claims.
+ *
+ * **`blueprints: []` is load-bearing, not tidiness.** Ruling R-70 accepted
+ * `dataset_import` as the edit path on exactly three facts, and the first is
+ * that with an empty blueprint list this call *cannot publish a blueprint as a
+ * side effect of saving a dataset*. Import validates against a resolver
+ * answering from the receiving store plus the bundle, so an already-published
+ * blueprint satisfies DS-001 without being re-carried.
+ * `tests/unit/test_web_writes_through_tools.py::test_the_dataset_edit_bundle_carries_no_blueprint`
+ * asserts the literal, because R-70 rests on it and nothing else guarded it.
  */
 export async function datasetSave(
   agentId: string,
   document: JsonDocument,
-): Promise<ImportedDatasets> {
+): Promise<WithWarnings<ImportedDatasets>> {
   const bundle = {
     format: BUNDLE_FORMAT,
     format_version: BUNDLE_FORMAT_VERSION,
@@ -186,5 +224,9 @@ export async function datasetSave(
     blueprints: [],
     datasets: [document],
   };
-  return payload("dataset_import", await callTool("dataset_import", { bundle }));
+  const envelope = await callTool("dataset_import", { bundle });
+  return {
+    value: payload<ImportedDatasets>("dataset_import", envelope),
+    warnings: warningsIn(envelope),
+  };
 }
