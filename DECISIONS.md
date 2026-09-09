@@ -2663,6 +2663,10 @@ reachability. `service/` may import `validation/`, that module is already total 
 nodes that do not exist, and four rules already depend on it agreeing with itself.
 
 ## [M6] Warnings are merged onto the run only when the merge adds something
+**Superseded in fix round 1 — see `[M6, fix round 1] Correction: the warning merge wrote every
+column of the run, not its warnings` below.** The dedupe reasoning here stands (the key changed to
+`(code, node_id, iteration)` under ruling R-54(b)); the *write* did not, and the residue paragraph
+described a narrower blast radius than the code had.
 `_flag` de-duplicates on the whole `(code, detail)` pair and issues `put_run` only if the merged list
 grew. A replayed fetch recomputes an identical warning, finds it recorded, and performs no write at
 all.
@@ -2767,6 +2771,9 @@ when the surface changes without anyone noticing, which is the opposite requirem
    call names a different selector (see the entry above). If a divergent re-start should be an error
    instead, it needs a code — none of `RT-E01..04` or `AP-001..006` fits, and inventing one is a
    product decision rather than an implementation choice.
+   **Closed by ruling R-53 in fix round 1**: it keeps returning the first run and attaches a
+   `run_start_mismatch` warning, which is the option ground rule 3 already named and which neither
+   of the two I weighed was.
 2. **`dataset_selection_ambiguous`** is a new warning code on `run_start`. It is informational and
    R-22 permits it, but it is the second addition to a vocabulary the PRD wrote as three, so it is
    worth a look.
@@ -2776,3 +2783,149 @@ when the surface changes without anyone noticing, which is the opposite requirem
 4. **R-03's open question is still open** (the ruling records it too): nothing stops an agent looping
    indefinitely against a pool. `max_iterations` is a *dataset* constraint (DS-023) and has no runtime
    effect, and `test_the_read_path_never_reads_max_iterations` now enforces that.
+
+## [M6, fix round 1] Correction: the warning merge wrote every column of the run, not its warnings
+The entry above says the merge is "a read-modify-write on a JSON column" whose worst case is a
+duplicated or dropped **advisory warning**. That sentence is true of the warning list and false of
+the code: `_flag` handed `put_run` a `model_copy` of the run snapshot `fetch_step` read at the top,
+and `put_run` writes **every** column from the model it is given — `status`, `outcome`,
+`finished_at`, `external_refs` included.
+So a `fetch_step` that adds a `pool_exhausted` warning concurrently with, or from a stale read
+before, M8's `run_finish` would revert the run to `status: "running"` with `outcome` and
+`finished_at` null. **Nothing today fails, because `run_finish` does not exist yet** — which is
+precisely why it would have cost M8 time rather than M6: the symptom is a run that un-finishes
+itself under load, and the entry a reader would have found describes the accepted residue as a lost
+advisory warning. This is the third round in this build where the defect was a `DECISIONS.md`
+sentence that was more careful than its code; the pattern is worth naming again because it keeps
+arriving in the same disguise — an accurate claim about the *intent* of a write standing in for a
+claim about its *extent*.
+**Fixed by narrowing the write, not by re-reading first.** New `Store.set_run_warnings(run_id,
+warnings)` replaces a run's warning list and touches no other column; `service/runs.py::_flag`
+computes the merge and calls it. The alternative the review offered — re-read the run immediately
+before the merge and copy only `warnings` onto the fresh row — was rejected: it *narrows* the window
+in which a concurrent `run_finish` is reverted and does not close it, and under ruling R-37 a
+transaction around the read and the write would not close it either, because pysqlite defers `BEGIN`
+until the first DML and Postgres under READ COMMITTED behaves the same way. The column bound is a
+guarantee; a narrower window is a smaller version of the same bug.
+That also settles the secondary finding for free: `put_run` re-`upsert_step`s every step it is
+handed, so a flagged fetch on a long run issued N extra round trips. The narrow write issues one
+`UPDATE` and one `SELECT`.
+Where the merge lives is deliberate. The **service** computes the merged list because deduplication
+is policy — R-54(b) fixes the key — and `storage/base.py` says in its own docstring that the
+Protocol validates nothing and decides no policy. The **store** owns the column bound, because that
+is the part no caller can get wrong.
+Cost, stated: this is a Protocol addition at M6, so `contracts.md` section 6 is amended and M7's two
+adapters implement one more method. R-33 made exactly this argument for `set_step_actual` and it is
+the reason to add it now rather than at M8 — a method added after M7 costs three signed-off adapters
+instead of one conformance test.
+Tested on the losing side, twice, and both were verified to fail against the pre-fix write:
+`test_a_stale_fetch_that_flags_a_warning_leaves_the_run_lifecycle_alone` (service, forced with the
+M3 stale-read technique, `assert 'running' == 'finished'` against the old code) and
+`test_set_run_warnings_writes_that_column_and_nothing_else` (conformance, so M7 inherits it). Both
+say in their docstrings that the finished state is written through `put_run` directly because
+`run_finish` does not exist yet, so M8 knows what to replace. Note that a *sequential* version of
+either test cannot fail: a fresh snapshot carries the finished state, so writing every column writes
+it back unchanged. The stale read is the test.
+One test lost its teeth in the move and was rewritten rather than left green:
+`test_a_replayed_warning_writes_nothing_to_the_run` monkeypatched `put_run`, which `_flag` no longer
+calls. It now patches **both** run writes. A test named for a write should name every write that
+could satisfy it.
+
+## [M6, fix round 1] R-54(b): the merge key is `(code, node_id, iteration)`
+`_warning_key` reads the code plus those two detail fields, rather than comparing whole warnings.
+Reason: the ruling asks for it so that losing a duplicate concurrent write is *provably* a no-op.
+Worth recording why nothing was wrong before, since the tests did not change: whole-`detail`
+equality was **incidentally** equivalent for `pool_exhausted`, because `pool_length` and
+`served_index` are functions of the pinned pool and the iteration, so two calls for one key cannot
+produce different details. That equivalence was written nowhere and any added detail field would
+have broken it silently. `test_an_exhausted_pool_flags_the_run_once_per_iteration` asserted the
+property rather than the mechanism, and passed across the change unmodified — which is the argument
+for asserting properties.
+Consequence, deliberate: a code carrying neither field — `dataset_archived`,
+`blueprint_version_mismatch`, `run_start_mismatch` — keys on `(code, None, None)` and is recorded
+**once per run**. A client retrying a diverging `run_start` in a loop therefore cannot grow the run's
+warning list without bound, while every response still carries its own current detail.
+`test_the_divergence_warning_is_recorded_once_however_many_retries` pins it.
+
+## [M6, fix round 1] R-53: a diverging `run_start` warns, on the response and on the run
+`run_start` on an existing run id now resolves the selector again purely to compare it, and attaches
+`run_start_mismatch` when the request does not match the run: a different `agent_id`, a selector
+resolving to a different pin, or a selector resolving to nothing. The run itself is untouched — same
+pin, same `started_at`, same `declared_blueprint_version` — and the reply is still `ok`.
+Reason: ruling R-53. Ground rule 3 decides it without a new principle — "mismatches produce warnings
+attached to the response and to the stored run" — and this is the same shape
+`blueprint_version_mismatch` already handles. My original entry weighed "silently return the first
+run" against "error", found no code that fit the error, and stopped; the third option was the one
+the ground rule already names.
+**On the response and on the stored run**, so it goes through `_flag`'s merge and not through
+`_started`, which passes the *stored* list on a replay. That is why all three of this round's changes
+are in the same function.
+Three decisions inside it:
+- **An unresolvable selector counts as divergence**, and it is the case the ruling actually names
+  ("the one that surprises a caller who mistyped a `dataset_id`"). A mistyped id does not resolve to
+  a different pin, it resolves to nothing, so "cannot compare, say nothing" would have missed the
+  motivating example. `requested.pin` is then null.
+- **The findings from that re-resolution are dropped.** A retry must not become an error because the
+  world changed, so an RT-E04 informs the warning rather than replacing the reply. `_select`'s own
+  warnings (`dataset_archived`, `dataset_selection_ambiguous`) are dropped too, for a different
+  reason: they describe a pinning decision and this call is not making one.
+- **`agent_id` is compared as well as the selector**, which the review found and the ruling was
+  extended to cover: `run_start(same_id, other_agent, …)` silently returned another agent's run.
+  `agent_id` cannot diverge *alone* — a dataset belongs to one agent, so the selector cannot resolve
+  to the same pin under a different one — so both fields are reported and the test asserts
+  membership rather than equality.
+Visible consequence worth naming: editing a dataset makes every later replay warn, because the label
+query now resolves to a newer version than the pin. That is a genuine divergence and the caller
+should hear it — `test_starting_an_existing_run_id_returns_it_unchanged_and_never_re_pins` now
+asserts the warning alongside the unchanged pin, so the two properties are read together.
+Cost: one warning code and one extra store read per replay. The read is not avoidable — divergence
+cannot be detected without resolving the selector.
+
+## [M6, fix round 1] The read-only guard's durability claim is now enforced, not assumed
+`test_every_store_method_is_classifiable` asserts that every public `Store` method starts with a
+mutating **or** a reading prefix, and fails on anything else.
+Reason: the report claimed "a mutator M7 or M9 adds is forbidden the day it appears on the Protocol,
+with no edit to the test". That holds only for the five prefixes in `MUTATING_VERBS`. A future
+`archive_dataset`, `record_outcome` or `bump_version` would write the world and be classified as a
+**read** by mechanisms 1 and 2, leaving only mechanism 3 to notice — and the guard's guard asserted
+non-emptiness plus three memberships, so nothing would have failed. All sixteen methods classify
+correctly today; the claim was stronger than the mechanism.
+Now an unclassifiable name fails, so adding one is a visible decision — put the verb in
+`MUTATING_VERBS` or in `READING_VERBS` — rather than a silent widening of what the runtime may
+reach. `set_run_warnings`, added in this round, classifies as a mutator by its `set_` prefix and is
+allowlisted in `RUN_WRITES` because it writes a run.
+Note the wrapper made the same point by itself and without being asked: adding `set_run_warnings` to
+the Protocol broke `mypy --strict` on `RunOnlyStore` with "missing following Store protocol member",
+which is exactly the property its docstring claims and the reason it is an explicit delegate rather
+than a `__getattr__` proxy.
+
+## [M6, fix round 1] Three smaller closures
+**`resolution.py`'s `len(narrowed) > 1` branch has a test.** Unreachable through the store — BP-014
+rejects a blueprint whose one-hop successors share a `tool_name` — but `resolve` is pure over a
+`Blueprint` model, so a synthetic 1.0.0 with two such successors reaches it in three lines.
+"Unreachable because another layer's rule forbids it" is a claim worth a test rather than a reason to
+leave a branch uncovered, and the test names BP-014 so a reader knows which invariant is load-bearing.
+**`_draw`'s node lookup takes a default.** `next(… )` without one raises `StopIteration` if `resolve`
+ever returns an id the blueprint does not declare. Unreachable by contract, and it sat beside
+`_no_blueprint`/`_no_dataset`/`_no_fixture`, which exist precisely so the read path answers an
+envelope when an invariant one layer down breaks. Now it answers `AP-004` like its three neighbours.
+**`run_start` has a case for an unparseable `dataset_id`.** Safe by construction — the adapter
+returns `None` for an id that is not a well-formed UUID, so it becomes RT-E04 — and `run_find`'s
+equivalent was tested while `run_start`'s was not. Any string can arrive as a `dataset_id`.
+**The prose half of the warning-code drift guard.** The table guard compares §3.4's table to
+`RUNTIME_WARNING_CODES`, which by construction cannot see a tool-local addition; deleting the
+sentence that documents one left every test green. The guard now also asserts each addition appears
+in `contracts.md`, and it caught `run_start_mismatch` as undocumented the moment it was written,
+which is the shortest useful life a guard has had in this build.
+
+## [M6, fix round 1] Noted for M9 and the load-test work: `_by_labels` is an unbounded read
+`_by_labels` calls `find_datasets` with no `limit` and takes `rows[0]`, so assigning one dataset
+materialises every matching lineage's summary — on the path PRD 5.6 point 2 describes for load
+testing, where many runs share one label query.
+Not narrowed, and deliberately not: `matched=len(rows)` in the `dataset_selection_ambiguous` warning
+is accurate *because* the read is unbounded. A `limit=2` would make the count a lie ("matched: 2"
+when fifty match), and a `limit=1` would remove the warning's whole basis. The trade is a real one
+and it is stated rather than resolved: at authoring volumes the scan is free; at load-test volumes
+the remedy is a counting method on the Protocol, or a selection strategy that takes a page rather
+than a row — which is the phase-2 work PRD 5.6 already assigns. `label_vocabulary` made the same
+choice at M4 for the same reason ("a count over the first 50 rows is not a count") and records it.

@@ -68,22 +68,24 @@ assembled document and stores it; a skeleton becomes exactly one dataset (SK-005
 ```python
 started = call(
     "run_start",
-    run_id=str(uuid4()),                      # the client generates it, before the first call
+    run_id=str(uuid4()),  # the client generates it, before the first call
     agent_id="location-onboarding",
-    selector={"labels": {"scenario": "missing-documents"}},   # or {"dataset_id": "..."}
+    selector={"labels": {"scenario": "missing-documents"}},  # or {"dataset_id": "..."}
     declared_blueprint_version="1.0.0",
 )
-pin = started["data"]["start"]["pin"]         # {dataset_id, dataset_version, blueprint_version}
+pin = started["data"]["start"]["pin"]  # {dataset_id, dataset_version, blueprint_version}
 
 call("fetch_step", run_id=run_id, node_id="receive_request")
-call("fetch_step", run_id=run_id, tool_name="delightree.stores.get")   # resolved by position
-call("fetch_step", run_id=run_id, node_id="request_docs", iteration=1) # a pool draw
-call("run_get", run_id=run_id)                # the run, its steps, and its reconstructed path
+call("fetch_step", run_id=run_id, tool_name="delightree.stores.get")  # resolved by position
+call("fetch_step", run_id=run_id, node_id="request_docs", iteration=1)  # a pool draw
+call("run_get", run_id=run_id)  # the run, its steps, and its reconstructed path
 ```
 
 `run_start` pins one dataset version and one blueprint version, and the run reads that pin for its
 whole life. A `declared_blueprint_version` other than the pinned one warns and serves anyway;
-nothing on this path refuses to serve.
+nothing on this path refuses to serve. Calling it again with the same `run_id` returns the same run
+and never re-pins — a retry after a network blip must not create a second run — and warns with
+`run_start_mismatch` if the arguments diverge from the run that exists.
 
 Address a step by `node_id`, or by `tool_name` — a tool name several nodes declare is resolved
 against where the run currently is, and an ambiguity that position cannot settle comes back as
