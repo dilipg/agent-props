@@ -87,25 +87,43 @@ and touches no other column - so it cannot revert the ``warnings`` a concurrent
 counterpart, and until M8 the bug was unreachable only because one of them did
 not exist.
 
-Closing a run, and the two mismatches (rulings R-53, R-54(c))
--------------------------------------------------------------
+Closing a run, and the two repeated writes (ruling R-65)
+--------------------------------------------------------
 
 ``run_finish`` and ``record_step`` are writes, so both meet a condition
-``fetch_step`` never does: the value is **already there**. Both answer it the
-way R-53 answers a diverging ``run_start`` - keep what is stored, return it,
-and attach a warning naming the divergence - because ground rule 3 is
-"mismatches produce warnings attached to the response and to the stored run",
-and because a retried request after a network blip must neither fail nor
-overwrite. So a repeated identical call is a silent no-op success, and a
-differing one is a success carrying ``run_finish_mismatch`` or
-``step_actual_conflict``.
+``fetch_step`` never does: the value is **already there**. Ruling R-65 splits
+that case in two, by whether the value *differs*, because the two halves have
+different truths to report:
 
-Neither refuses, and neither is a policy verdict. R-54(c) settles the third
-case in the same direction: a **finished** run still serves, because nothing
-reads ``Run.status`` at read time and the read path is pin-scoped. M8 takes the
-"may warn" half of that ruling - ``fetch_step`` and ``record_step`` against a
-closed run attach ``run_already_finished`` - and not the refusal, which the
-ruling forbids.
+- **the same value** - an identical re-record, an identical re-finish - is a
+  **no-op success carrying a warning**: ``step_actual_already_recorded`` or
+  ``run_already_finished``. Nothing changed, the caller's intent is already
+  satisfied, "and saying so is honest" - so a retry after a network blip is safe
+  *and* visible, which is the property the client-generated run id exists for.
+  (R-65 cites R-29's byte-identical re-publish for the idempotency; note that
+  R-29's no-op is *silent* where this one speaks, because a re-publish tells a
+  caller nothing it did not know while a second writer on one run step is worth
+  a word.);
+- **a differing value** is a **refused write**: ``ok: false`` with ``AP-007``.
+  The write did not happen, so ``ok: true`` would misreport what the store now
+  holds - the same class of defect as M3's silent success carrying the winner's
+  value. R-33 already makes ``set_step_actual`` *raise* on a differing actual, so
+  a tool answering ``ok: true`` would be reporting a success the storage layer
+  explicitly declined to give.
+
+**This is not gating**, and R-65 says why in terms: ground rule 3's "the service
+never gates" is about refusing to **serve** - the read path must hand over
+fixtures even when something looks wrong - and R-56 already settled that a
+refused *write* is ``ok: false`` and is not gating. M8 first shipped both as
+warnings, arguing R-53; R-65 corrected that, and the correction is one branch
+per tool (:func:`_conflicted` and :func:`_finish_divergence`) rather than a
+structural change.
+
+R-54(c) is the third case and it goes the *other* way, because it is about
+serving: a **finished** run still serves, since nothing reads ``Run.status`` at
+read time and the read path is pin-scoped. So ``fetch_step`` and ``record_step``
+against a closed run attach ``run_already_finished`` and answer normally - the
+"may warn" half of that ruling, never the refusal it forbids.
 """
 
 from __future__ import annotations
@@ -139,6 +157,7 @@ from agentprops.service.envelope import (
     AP_ARGUMENT,
     AP_NOT_FOUND,
     AP_STORE_REFUSED,
+    AP_WRITE_ONCE_CONFLICT,
     Reply,
     boundary,
     failure,
@@ -163,9 +182,8 @@ __all__ = [
     "STATUS_RUNNING",
     "WARNING_DATASET_SELECTION_AMBIGUOUS",
     "WARNING_RUN_ALREADY_FINISHED",
-    "WARNING_RUN_FINISH_MISMATCH",
     "WARNING_RUN_START_MISMATCH",
-    "WARNING_STEP_ACTUAL_CONFLICT",
+    "WARNING_STEP_ACTUAL_ALREADY_RECORDED",
     "fetch_step",
     "find",
     "finish",
@@ -224,22 +242,26 @@ WARNING_DATASET_SELECTION_AMBIGUOUS: Final = "dataset_selection_ambiguous"
 #: run is pinned to another, so serve the pin and report the difference.
 WARNING_RUN_START_MISMATCH: Final = "run_start_mismatch"
 
-#: Attached when ``run_finish`` names a run that is **already closed** with a
-#: different ``status`` or ``outcome``. R-53's shape, one tool along: the run
-#: keeps the outcome it was closed with, because a run's recorded outcome is
-#: evidence and evidence that a second caller can overwrite is worth less than
-#: none. The divergence is reported rather than ignored, and rather than
-#: refused - ground rule 3. A repeated *identical* finish adds no warning at
-#: all, so a retry after a network blip is silent.
-WARNING_RUN_FINISH_MISMATCH: Final = "run_finish_mismatch"
+#: Attached when ``record_step`` reports an ``actual`` for a step that **already
+#: records the same one**. R-65's no-op-success half: the write is idempotent,
+#: nothing changed, "and saying so is honest". Keyed per *step* - the detail
+#: carries ``node_id`` and ``iteration`` - because the fact is about one step,
+#: where ``run_already_finished`` is about the run.
+#:
+#: An identical re-record is the case a retry after a network blip produces, so
+#: it must not be an error; a *differing* one is ``AP-007``, because that write
+#: did not happen.
+WARNING_STEP_ACTUAL_ALREADY_RECORDED: Final = "step_actual_already_recorded"
 
-#: Attached when ``record_step`` reports an ``actual`` for a step that already
-#: records a **different** one. ``set_step_actual`` is write-once per key
-#: (ruling R-33) and refuses at the store; this is how that refusal reaches a
-#: caller, because the service never gates and a step's served fixture and
-#: recorded actual are both evidence. The stored actual is what comes back, so
-#: the caller can see what it is disagreeing with.
-WARNING_STEP_ACTUAL_CONFLICT: Final = "step_actual_conflict"
+#: **There is no ``run_finish_mismatch`` and no ``step_actual_conflict``**, and
+#: their absence is a ruling rather than an omission. M8 shipped both as
+#: warnings on a successful response; **ruling R-65** replaced them with
+#: ``AP-007`` on an ``ok: false`` envelope, because for a *differing* value the
+#: write did not happen and ``ok: true`` would claim a success the store
+#: declined to give. The *identical* half of each - a retry that changes nothing
+#: - is still a silent success, which is the property the run id exists for.
+#: See :data:`~agentprops.service.envelope.AP_WRITE_ONCE_CONFLICT`,
+#: :func:`_step_conflict` and :func:`_finish_conflict`.
 
 #: Attached when ``fetch_step`` or ``record_step`` addresses a run whose
 #: lifecycle is closed. Ruling R-54(c): "a finished run still serves, and that
@@ -396,10 +418,12 @@ def record_step(
       when no step record exists (ruling R-33), because an actual cannot be
       reported for a step that was never fetched. That is ``AP-004``: the step
       key names no record.
-    - **It does not overwrite.** ``set_step_actual`` is write-once per key. An
-      identical re-record is a no-op success - which is what makes a retry after
-      a network blip safe - and a *differing* one keeps the stored value and
-      warns with ``step_actual_conflict``. See :func:`_conflicted`.
+    - **It does not overwrite.** ``set_step_actual`` is write-once per key, and
+      ruling R-65 splits a repeat by whether the value differs: an **identical**
+      re-record is a no-op success carrying
+      ``step_actual_already_recorded``, which is what makes a retry after a
+      network blip safe, and a **differing** one is refused with ``AP-007``
+      because the write did not happen. See :func:`_conflicted`.
     - **It does not refuse a closed run.** Ruling R-54(c) again: the warning,
       not the gate.
     """
@@ -419,13 +443,15 @@ def record_step(
     if resolved is None:
         return failure(findings)
 
+    repeated = _already_recorded(run, resolved, index)
     try:
         step = context.store.set_step_actual(run_id, resolved, index, actual)
     except RecordNotFoundError:
         return failure([_step_not_served(run_id, resolved, index, node_id, tool_name)])
     except StoreError:
         return _conflicted(context, run, resolved, index, actual)
-    return _recorded(context, run, resolved, step, [])
+    repeat = _already_recorded_warning(run, resolved, index, repeated)
+    return _recorded(context, run, resolved, step, repeat)
 
 
 def finish(context: ServiceContext, run_id: str, outcome: dict[str, Any], status: str) -> Reply:
@@ -442,13 +468,18 @@ def finish(context: ServiceContext, run_id: str, outcome: dict[str, Any], status
     here would revert exactly the warning a concurrent exhausted draw had just
     merged in - the M6 finding, in the opposite direction.
 
-    **The first finish wins, and a divergent second one warns.** The
-    compare-and-set decides that once, in the database, and the boolean it
-    returns is the whole of this function's branch. An unconditional write would
-    hand *both* callers a success envelope naming their own outcome while the row
-    held one of them, which is the silent shape ruling R-47 rejected for
-    ``mark_skeleton_submitted``. A repeated *identical* finish adds no warning,
-    so a retry is indistinguishable from the first call.
+    **The first finish wins**, and ruling R-65 splits what happens to the
+    second by whether it agrees. The compare-and-set decides *once*, in the
+    database, and the boolean it returns is the whole of this function's branch.
+    An unconditional write would hand *both* callers a success envelope naming
+    their own outcome while the row held one of them, which is the silent shape
+    ruling R-47 rejected for ``mark_skeleton_submitted``.
+
+    So a repeated **identical** finish is a no-op success carrying
+    ``run_already_finished`` - the same code and the same detail ``fetch_step``
+    attaches for the same condition, because the condition *is* the same: this
+    run is already closed. A **differing** one is ``AP-007`` and writes
+    nothing.
 
     **It does not grade, and it does not validate the outcome.** Ground rule 2:
     ``outcome`` is stored as given, even when it contradicts the blueprint's
@@ -466,7 +497,10 @@ def finish(context: ServiceContext, run_id: str, outcome: dict[str, Any], status
     run = context.store.get_run(run_id)
     if run is None:  # pragma: no cover - no hard delete, so the run cannot vanish
         return failure([_no_run(run_id)])
-    return _finished(context, run, [] if claimed else _finish_divergence(run, status, outcome))
+    diverged = [] if claimed else _finish_divergence(run, status, outcome)
+    if diverged:
+        return failure([_finish_conflict(run, status, diverged)])
+    return _finished(context, run, [] if claimed else _lifecycle(run))
 
 
 def get(context: ServiceContext, run_id: str) -> Reply:
@@ -1061,6 +1095,52 @@ def _lifecycle(run: Run) -> list[Warning]:
     ]
 
 
+def _already_recorded(run: Run, node_id: str, iteration: int) -> bool:
+    """Whether the run's snapshot already shows an ``actual`` for this step key.
+
+    Read **before** the write, because after it the two cases are
+    indistinguishable: ``set_step_actual`` returns a ``StepRecord`` for both a
+    first record and an identical repeat (R-33's replay tolerance) and does not
+    say which it did. R-65 needs them told apart, because the repeat is the case
+    that carries ``step_actual_already_recorded``.
+
+    This is not a second decision site for the write - it decides nothing about
+    *whether* to write, only what to **say** afterwards, which is the same shape
+    ``run_start``'s :func:`_replayed` uses. And it is a snapshot read, so it has
+    one benign residue: a concurrent writer that lands an *equal* actual between
+    the snapshot and the call makes this call look like the first one and report
+    no warning. Write-once means the value is right either way, and a *differing*
+    concurrent write is refused with ``AP-007`` rather than mis-reported.
+    """
+    return any(
+        step.node_id == node_id and step.iteration == iteration and step.actual is not None
+        for step in run.steps
+    )
+
+
+def _already_recorded_warning(
+    run: Run, node_id: str, iteration: int, repeated: bool
+) -> list[Warning]:
+    """``step_actual_already_recorded``, if this record found a value already there.
+
+    R-65's no-op-success half: "the caller's intent is already satisfied,
+    nothing changed, and saying so is honest". Keyed per **step** by
+    :func:`_warning_key`, because the fact is about one step rather than about
+    the run - unlike ``run_already_finished``, which carries no ``node_id`` on
+    purpose.
+    """
+    if not repeated:
+        return []
+    return [
+        warning(
+            WARNING_STEP_ACTUAL_ALREADY_RECORDED,
+            run_id=run.id,
+            node_id=node_id,
+            iteration=iteration,
+        )
+    ]
+
+
 def _recorded(
     context: ServiceContext, run: Run, resolved: str, step: StepRecord, warnings: list[Warning]
 ) -> Reply:
@@ -1070,8 +1150,8 @@ def _recorded(
     itself carries. The named key holds the **stored** step and the resolved
     node id, for ``fetch_step``'s reason: a caller who addressed the step by
     tool name has no other way to learn which node it landed on, and a caller
-    who hit :data:`WARNING_STEP_ACTUAL_CONFLICT` needs to see the actual it is
-    disagreeing with.
+    who addressed it by tool name has no other way to learn which node the key
+    was built from.
 
     The envelope's ``warnings`` is **this call's** list rather than the run's,
     which is ``fetch_step``'s convention: a caller wants to know what happened
@@ -1097,9 +1177,12 @@ def _conflicted(
     need different answers, so this **re-reads the step and classifies** rather
     than assuming the common one:
 
-    - a *different* actual is recorded: the write-once conflict. The stored step
-      comes back with a ``step_actual_conflict`` warning, because ground rule 3
-      makes a mismatch a warning and R-33 makes the stored value the winner;
+    - a *different* actual is recorded: the write-once conflict, and the write
+      **did not happen**. That is ``AP-007`` (ruling R-65). Returning
+      ``ok: true`` here would report a success the storage layer explicitly
+      declined to give, which is M3's silent-success defect said louder - and
+      ground rule 3's "never gates" governs refusing to *serve*, while R-56
+      already settled that a refused **write** is ``ok: false``;
     - no actual is recorded at all: the store exhausted its retry budget under
       contention. That is ``AP-005`` - "the store refused a write through one of
       its programming-error guards" - and it is emphatically not a conflict,
@@ -1109,21 +1192,24 @@ def _conflicted(
     This is not a second decision site for the *write*: the store decided that,
     once, and this classifies the refusal it returned. The comparison is
     ``==`` on the two decoded documents rather than the adapter's canonical
-    form, which is enough to tell the two conditions apart - the losing branch
-    is "no actual at all", not "an equal one".
+    form, which is enough to tell the two conditions apart.
+
+    **The third branch is unreachable by construction**, and it is written out
+    rather than asserted away. An *identical* re-record never arrives here at
+    all - ``set_step_actual`` returns the existing record for it and never
+    raises (R-33's replay tolerance), which is R-65's no-op-success half and is
+    handled a frame up. Reaching this branch would mean a value equal to the
+    caller's appeared between the raise and the re-read, and write-once makes
+    that impossible; if it ever happened, the caller's intent *is* satisfied and
+    a success is the honest answer, so that is what it returns rather than
+    raising a second exception inside an error path.
     """
     stored = _step_of(context, run.id, resolved, iteration)
     if stored is None or stored.actual is None:
         return failure([_store_refused(run.id, resolved, iteration)])
-    conflict = warning(
-        WARNING_STEP_ACTUAL_CONFLICT,
-        run_id=run.id,
-        node_id=resolved,
-        iteration=iteration,
-        recorded_at=None if stored.recorded_at is None else stored.recorded_at.isoformat(),
-        differs=stored.actual != actual,
-    )
-    return _recorded(context, run, resolved, stored, [conflict])
+    if stored.actual != actual:
+        return failure([_step_conflict(run.id, resolved, iteration, stored)])
+    return _recorded(context, run, resolved, stored, [])  # pragma: no cover - see above
 
 
 def _step_of(
@@ -1144,8 +1230,13 @@ def _step_of(
     )
 
 
-def _finished(context: ServiceContext, run: Run, diverged: list[Warning]) -> Reply:
-    """``{run}`` for ``run_finish``, with the merged warnings on both.
+def _finished(context: ServiceContext, run: Run, repeated: list[Warning]) -> Reply:
+    """``{run}`` for ``run_finish``: the stored run, and whether it was already closed.
+
+    Reached on both success paths R-65 recognises - the call that closed the run,
+    which reports nothing, and an **identical** repeat, which reports
+    ``run_already_finished``. A request that *would* have changed something never
+    gets here at all; :func:`finish` refuses it with ``AP-007``.
 
     The run is dumped with the **merged** warning list substituted rather than
     the list it was read with, because contracts section 4 documents this tool's
@@ -1153,52 +1244,34 @@ def _finished(context: ServiceContext, run: Run, diverged: list[Warning]) -> Rep
     otherwise miss the warning this very call attached. ``_started`` leaves that
     to the envelope, which is right for a payload whose named key is ``start``;
     here the named key is the run itself.
-
-    So the two lists here are deliberately different, and each is the useful
-    one: the **payload** run carries every warning the run has ever recorded,
-    and the **envelope** carries what this call found. ``_started``'s replay
-    reports the run's list on the envelope because its payload run is not
-    re-dumped with the merge; this one is. The difference matters for a second
-    diverging finish - ``_flag`` dedupes ``run_finish_mismatch`` by
-    ``(code, None, None)`` so the run records it once, and a caller that read
-    the run's copy would see the *first* divergence's detail rather than its own.
     """
-    merged = _flag(context, run, diverged)
+    merged = _flag(context, run, repeated)
     return success(
-        "run", run.model_copy(update={"warnings": merged}).model_dump(mode="json"), diverged
+        "run", run.model_copy(update={"warnings": merged}).model_dump(mode="json"), repeated
     )
 
 
-def _finish_divergence(run: Run, status: str, outcome: dict[str, Any]) -> list[Warning]:
-    """Ruling R-53's comparison, for a run that was already closed.
+def _finish_divergence(run: Run, status: str, outcome: dict[str, Any]) -> list[str]:
+    """Which of ``status`` and ``outcome`` this request disagrees with. **The branch.**
 
     Called only when the compare-and-set reported that this call did **not**
     close the run, so the stored values are another caller's (or this caller's
-    own retry). A repeated identical finish diverges in nothing and therefore
-    warns about nothing, which is what makes a retry after a network blip
-    silent.
+    own retry). An empty list means the request matches what is stored: a
+    repeated identical finish, which is R-65's no-op success and is silent -
+    that is what makes a retry after a network blip safe. A non-empty list means
+    the write did not happen and ``AP-007`` says so.
+
+    The two fields are tested **independently** rather than as a pair, so the
+    finding names the one that actually diverged. A pair comparison would report
+    both every time and still satisfy a test that only looked for a refusal.
 
     The two documents are compared as they now stand: ``run.outcome`` is the
     stored one, because :func:`finish` re-reads the run after the write.
     """
-    diverged = [
+    return [
         name
         for name, differs in (("status", run.status != status), ("outcome", run.outcome != outcome))
         if differs
-    ]
-    if not diverged:
-        return []
-    return [
-        warning(
-            WARNING_RUN_FINISH_MISMATCH,
-            diverged=diverged,
-            run_id=run.id,
-            recorded={
-                "status": run.status,
-                "finished_at": None if run.finished_at is None else run.finished_at.isoformat(),
-            },
-            requested={"status": status},
-        )
     ]
 
 
@@ -1235,6 +1308,64 @@ def _step_not_served(
         iteration=iteration,
         node_id=node_id,
         tool_name=tool_name,
+    )
+
+
+def _step_conflict(run_id: str, resolved: str, iteration: int, stored: StepRecord) -> RuleError:
+    """``AP-007`` for a ``record_step`` whose step already records a different actual.
+
+    Ruling R-65: the write **did not happen**, so this is ``ok: false``. The
+    pointer addresses ``/actual`` because that is the argument that could not be
+    accepted - the address resolved fine and the run exists, and the only thing
+    wrong with the request is the document it carries.
+
+    The context names the step key and *when* the stored actual was recorded,
+    and deliberately **not** the stored document itself: an ``actual`` is
+    arbitrary agent output with no size bound, and ``run_get`` is where a caller
+    reads it. What the caller needs from the finding is that a value is there,
+    which key it is under, and that it is not theirs.
+    """
+    return boundary(
+        AP_WRITE_ONCE_CONFLICT,
+        field_pointer("actual"),
+        f"step {resolved}/{iteration} of run {run_id!r} already records a different actual; "
+        f"an actual is write-once per step, so nothing was written.",
+        run_id=run_id,
+        resolved_node_id=resolved,
+        iteration=iteration,
+        recorded_at=None if stored.recorded_at is None else stored.recorded_at.isoformat(),
+    )
+
+
+def _finish_conflict(run: Run, status: str, diverged: list[str]) -> RuleError:
+    """``AP-007`` for a ``run_finish`` on a run already closed with other values.
+
+    Ruling R-65 again, and the same reasoning: the compare-and-set reported that
+    this call did not close the run, and the values differ, so nothing was
+    written.
+
+    The pointer addresses the **first** diverged field in a fixed order, so a
+    status-only divergence points at ``/status`` and an outcome-only one at
+    ``/outcome``, deterministically. ``diverged`` in the context names every
+    field, which is what a caller reads when both did - a pointer can only
+    address one, and picking by a rule beats picking by whichever comparison
+    happened to run first.
+
+    ``recorded`` and ``requested`` carry the *statuses* and the recorded
+    ``finished_at``, and not the outcome documents, for :func:`_step_conflict`'s
+    reason: an outcome is unbounded and ``run_get`` is where it lives.
+    """
+    return boundary(
+        AP_WRITE_ONCE_CONFLICT,
+        field_pointer(diverged[0]),
+        f"run {run.id!r} is already {run.status}; a run is closed once, so nothing was written.",
+        run_id=run.id,
+        diverged=diverged,
+        recorded={
+            "status": run.status,
+            "finished_at": None if run.finished_at is None else run.finished_at.isoformat(),
+        },
+        requested={"status": status},
     )
 
 

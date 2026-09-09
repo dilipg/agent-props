@@ -610,8 +610,10 @@ def test_a_whole_runtime_walk_makes_no_world_write(guarded: ServiceContext) -> N
     **Plus M8's two writes**, which is the half that matters now that the module
     has write entry points: a ``record_step`` against a served step, a
     re-``record_step`` of the same actual, a ``run_finish``, a diverging
-    re-``run_finish``, and a ``fetch_step`` *after* the run is closed - so the
-    R-54(c) path that keeps serving a finished run is inside the wrapper too.
+    re-``run_finish`` (refused with ``AP-007`` per ruling R-65, and the refusal
+    path is walked here precisely because a refusal still runs code), and a
+    ``fetch_step`` *after* the run is closed - so the R-54(c) path that keeps
+    serving a finished run is inside the wrapper too.
     None of them may write anything but the run.
     """
     assert runs.start(guarded, RUN_ID, AGENT, {"labels": {"scenario": "missing-documents"}}).ok, (
@@ -638,7 +640,7 @@ def test_a_whole_runtime_walk_makes_no_world_write(guarded: ServiceContext) -> N
     assert runs.record_step(guarded, RUN_ID, produced, node_id=POOL_NODE, iteration=0).ok
     assert runs.record_step(guarded, RUN_ID, produced, node_id="escalate").ok is False
     assert runs.finish(guarded, RUN_ID, {"onboarding_status": "complete"}, "finished").ok
-    assert runs.finish(guarded, RUN_ID, {"onboarding_status": "escalated"}, "abandoned").ok
+    assert runs.finish(guarded, RUN_ID, {"onboarding_status": "escalated"}, "abandoned").ok is False
     step(node_id="receive_request")
 
     runs.get(guarded, RUN_ID)

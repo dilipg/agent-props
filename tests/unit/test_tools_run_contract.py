@@ -370,3 +370,94 @@ async def test_an_unknown_finish_status_is_ap_001_naming_the_vocabulary(
         assert (await invoke(client, "run_get", run_id=RUN_ID))["data"]["run"][
             "status"
         ] == "running", "a refused status wrote nothing"
+
+
+async def test_a_repeated_write_answers_by_whether_the_value_differs(
+    seeded: ServiceContext,
+) -> None:
+    """Ruling R-65 over the wire, **both ends**, for both writes.
+
+    The two halves have two different envelopes and this asserts each against
+    the other, in one session, so neither can be read as the general case:
+
+    - the **identical** repeat is a success carrying
+      ``step_actual_already_recorded`` or ``run_already_finished`` - R-65's
+      "no-op success with a warning": a retry must be safe *and* visible. The
+      *first* call of each pair is asserted silent in the same breath, so a
+      warning attached unconditionally would not pass;
+    - the **differing** one is ``ok: false`` with ``AP-007``, and the stored
+      value is unchanged afterwards, which is the assertion that makes it a
+      refused *write* rather than a rejected argument.
+
+    Over a real MCP round trip because that is where ``ok`` becomes a JSON
+    boolean a caller branches on, and because the client's typed methods raise
+    on ``ok: false`` - so a client author reading only the service tests would
+    not see which of these two throws.
+    """
+    async with connected(seeded) as client:
+        await invoke(
+            client, "run_start", run_id=RUN_ID, agent_id=AGENT, selector={"dataset_id": PRIYA}
+        )
+        await invoke(client, "fetch_step", run_id=RUN_ID, node_id=POOL_NODE, iteration=0)
+        first = {"requested": ["fssai"], "received": []}
+
+        landed = await invoke(
+            client, "record_step", run_id=RUN_ID, actual=first, node_id=POOL_NODE, iteration=0
+        )
+        assert landed["ok"] is True and codes(landed) == []
+
+        repeated = await invoke(
+            client, "record_step", run_id=RUN_ID, actual=first, node_id=POOL_NODE, iteration=0
+        )
+        assert repeated["ok"] is True, "an identical re-record is a no-op success (ruling R-65)"
+        assert codes(repeated) == ["step_actual_already_recorded"], "and it says so"
+        assert repeated["data"]["record"]["step"]["actual"] == first
+
+        refused = await invoke(
+            client,
+            "record_step",
+            run_id=RUN_ID,
+            actual={"requested": ["pan"], "received": []},
+            node_id=POOL_NODE,
+            iteration=0,
+        )
+        assert refused["ok"] is False, "a differing re-record is a refused write (ruling R-65)"
+        assert rules(refused) == ["AP-007"]
+        assert refused["errors"][0]["pointer"] == "/actual"
+        assert refused["errors"][0]["context"]["resolved_node_id"] == POOL_NODE
+
+        outcome = {"onboarding_status": "complete", "outstanding_tasks": 0}
+        closed = await invoke(
+            client, "run_finish", run_id=RUN_ID, outcome=outcome, status="finished"
+        )
+        assert closed["ok"] is True and codes(closed) == []
+
+        again = await invoke(
+            client, "run_finish", run_id=RUN_ID, outcome=outcome, status="finished"
+        )
+        assert again["ok"] is True, "an identical re-finish is a no-op success"
+        assert codes(again) == ["run_already_finished"], "the code fetch_step already uses"
+        assert again["data"]["run"]["status"] == closed["data"]["run"]["status"]
+        assert again["data"]["run"]["outcome"] == closed["data"]["run"]["outcome"]
+        assert again["data"]["run"]["finished_at"] == closed["data"]["run"]["finished_at"]
+
+        diverging = await invoke(
+            client,
+            "run_finish",
+            run_id=RUN_ID,
+            outcome={"onboarding_status": "escalated"},
+            status="abandoned",
+        )
+        assert diverging["ok"] is False, "a differing re-finish is a refused write"
+        assert rules(diverging) == ["AP-007"]
+        assert diverging["errors"][0]["pointer"] == "/status"
+        assert sorted(diverging["errors"][0]["context"]["diverged"]) == ["outcome", "status"]
+
+        stored = await invoke(client, "run_get", run_id=RUN_ID)
+        assert stored["data"]["run"]["status"] == "finished", "the refused finish wrote anyway"
+        assert stored["data"]["run"]["outcome"] == outcome
+        assert stored["data"]["run"]["steps"][0]["actual"] == first
+        assert sorted(item["code"] for item in stored["data"]["run"]["warnings"]) == [
+            "run_already_finished",
+            "step_actual_already_recorded",
+        ], "the run records the two no-ops and nothing from the two refusals"

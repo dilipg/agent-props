@@ -1,4 +1,4 @@
-"""Envelope construction, and the five boundary codes that are not rules.
+"""Envelope construction, and the seven boundary codes that are not rules.
 
 `docs/contracts.md` section 1 defines two shapes and CLAUDE.md's style rule says
 every tool answers with one of them: **structured errors, never exceptions, for
@@ -50,6 +50,12 @@ variant of it: ``AP-001`` means an argument is malformed, and this means every
 argument is well formed and the request still cannot be served. Collapsing the
 two would tell a caller to fix a value that is already correct.
 
+A seventh, added at M8's fix round by ruling R-65, covers a **write-once** value
+that is already recorded and **differs** from the one supplied: the write did not
+happen, and ``ok: true`` would claim a success the store declined to give. An
+*identical* re-write is not this - it is a no-op success, because the caller's
+intent is already satisfied.
+
 ``AP-*`` ids are **not catalogue rules** and must never be registered as ones.
 ``tests/unit/test_service_envelope.py::test_boundary_codes_are_not_catalogue_rules``
 asserts they are disjoint from ``RULE_REGISTRY`` and from the documented
@@ -81,6 +87,7 @@ __all__ = [
     "AP_MALFORMED_JSON",
     "AP_NOT_FOUND",
     "AP_STORE_REFUSED",
+    "AP_WRITE_ONCE_CONFLICT",
     "BOUNDARY_CODES",
     "Reply",
     "blocking",
@@ -120,6 +127,26 @@ AP_STORE_REFUSED: Final = "AP-005"
 #: caller to fix a value that is already correct is worse than saying nothing.
 AP_ID_SPACE_EXHAUSTED: Final = "AP-006"
 
+#: A **write-once** value is already recorded and differs from the one supplied,
+#: so the write did not happen (ruling R-65). Added at M8's fix round for
+#: ``record_step`` and ``run_finish``.
+#:
+#: The distinction R-65 draws is between the two halves of a repeated write, not
+#: between serving and refusing: an **identical** re-write is a no-op success,
+#: because the caller's intent is already satisfied and a retry after a network
+#: blip must be safe, while a **differing** one is refused, because returning
+#: ``ok: true`` would report a success the storage layer explicitly declined to
+#: give - which is M3's silent-success defect said louder. Ground rule 3's
+#: "never gates" governs refusing to *serve*; R-56 already settled that a
+#: refused **write** is ``ok: false`` and is not gating.
+#:
+#: Distinct from :data:`AP_STORE_REFUSED`, and the distinction is the whole
+#: reason both exist: this means "a value is there and it is not yours", and
+#: ``AP-005`` means the store refused with **nothing** recorded. Telling a
+#: caller its evidence lost to a value that does not exist is the error M8's
+#: classification was written to avoid.
+AP_WRITE_ONCE_CONFLICT: Final = "AP-007"
+
 BOUNDARY_CODES: Final[frozenset[str]] = frozenset(
     {
         AP_ARGUMENT,
@@ -128,6 +155,7 @@ BOUNDARY_CODES: Final[frozenset[str]] = frozenset(
         AP_NOT_FOUND,
         AP_STORE_REFUSED,
         AP_ID_SPACE_EXHAUSTED,
+        AP_WRITE_ONCE_CONFLICT,
     }
 )
 

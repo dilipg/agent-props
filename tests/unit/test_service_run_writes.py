@@ -3,13 +3,28 @@
 `test_service_runs.py` owns the read path. This file owns the two writes, and
 the properties it exists to hold are the ones a write has and a read does not:
 
-**The value may already be there.** Both tools can meet a recorded value, and
-both answer the way ruling R-53 answers a diverging ``run_start`` - keep what is
-stored, return it, warn. So every write here is tested three times: the first
-call, the identical repeat (which must be a *silent* no-op, or a retry after a
-network blip is not safe), and the divergent repeat (which must warn and must
-**not** overwrite). The middle case is the one a naive implementation gets right
-by accident and the third is the one it gets wrong.
+**The value may already be there**, and **ruling R-65 splits that case in two.**
+So every write here is tested three times: the first call, the identical repeat,
+and the divergent repeat - and the three have three different answers:
+
+- the first call succeeds;
+- the identical repeat is a **no-op success that says so** -
+  ``step_actual_already_recorded`` or ``run_already_finished`` - because R-65
+  asks for "no-op success **with a warning**": nothing changed, and saying so is
+  honest. A retry after a network blip must be safe, and it is also worth a
+  word. Both tests assert the *first* call is silent as well, or a warning
+  attached unconditionally would satisfy them;
+- the divergent repeat is **``ok: false`` with ``AP-007``**, and **nothing is
+  written**. M8 first shipped it as a warning on a success envelope; R-65
+  corrected that, because ``ok: true`` for a refused write is the same class of
+  defect as M3's silent success carrying the winner's value - and R-33 already
+  makes the store *raise*, so a tool reporting success would be claiming one the
+  storage layer declined to give.
+
+Both refusal tests therefore assert the stored value is **unchanged** as well as
+the code, which is what makes them write-once tests rather than error-code
+tests. And both assert the run's warning list is untouched: a refusal is not a
+warning, so it must not be merged onto the run.
 
 **Neither may grade** (ground rule 2).
 :func:`test_record_step_stores_an_actual_the_schema_would_reject` and
@@ -19,11 +34,14 @@ schema rejects and assert it is stored verbatim. A service that validated here
 would be holding the comparison the client owns, and would turn a finding
 *about the agent* into a refusal to record what the agent did.
 
-**Neither may gate** (ground rule 3, ruling R-54(c)). A finished run still
-serves, and :func:`test_a_finished_run_still_serves_and_says_so` asserts both
-halves: the fixture comes back byte-identical to the one served before the run
-was closed, *and* the response carries ``run_already_finished``. A test that
-only checked the warning would pass against a ``fetch_step`` that refused.
+**Neither may refuse to *serve*** (ground rule 3, ruling R-54(c)) - which is a
+different claim from the refused *write* above, and R-65 draws the line: ground
+rule 3 governs the read path, and R-56 already settled that a refused write is
+``ok: false``. A finished run still serves, and
+:func:`test_a_finished_run_still_serves_and_says_so` asserts both halves: the
+fixture comes back byte-identical to the one served before the run was closed,
+*and* the response carries ``run_already_finished``. A test that only checked
+the warning would pass against a ``fetch_step`` that refused.
 
 **The lifecycle write may not touch the warnings column.** That is the M6
 finding in the opposite direction, and
@@ -42,12 +60,12 @@ import pytest
 
 from agentprops.models import WARNING_POOL_EXHAUSTED, Dataset, StepRecord
 from agentprops.service import ServiceContext, blueprints, runs
+from agentprops.service.envelope import AP_WRITE_ONCE_CONFLICT
 from agentprops.service.runs import (
     STATUS_ABANDONED,
     STATUS_FINISHED,
     WARNING_RUN_ALREADY_FINISHED,
-    WARNING_RUN_FINISH_MISMATCH,
-    WARNING_STEP_ACTUAL_CONFLICT,
+    WARNING_STEP_ACTUAL_ALREADY_RECORDED,
 )
 from agentprops.storage import StoreError
 from conftest import FROZEN_NOW, load_document
@@ -148,12 +166,22 @@ def test_the_record_key_is_the_resolved_one(started: ServiceContext) -> None:
     }
 
 
-def test_recording_the_same_actual_twice_is_a_silent_no_op(started: ServiceContext) -> None:
-    """The retry case. Identical means identical - no warning, no second write.
+def test_recording_the_same_actual_twice_is_a_no_op_that_says_so(
+    started: ServiceContext,
+) -> None:
+    """The retry case, and R-65's other half: a success, and it **speaks**.
+
+    "The caller's intent is already satisfied, nothing changed, and saying so is
+    honest" - so the identical repeat is ``ok: true`` with
+    ``step_actual_already_recorded``, where the *first* call says nothing. Both
+    halves are asserted here, because a warning attached unconditionally would
+    satisfy the second alone.
 
     ``recorded_at`` is compared as well as ``actual``: a second write that
     happened to store the same document would still move the timestamp, and the
-    timestamp is the evidence that says when the agent answered.
+    timestamp is the evidence that says when the agent answered. So the step
+    coming back identical is what makes this a *no-op* rather than a benign
+    rewrite.
     """
     fetch(started, node_id=POOL_NODE, iteration=0)
     actual = {"requested": ["fssai"], "received": []}
@@ -161,18 +189,32 @@ def test_recording_the_same_actual_twice_is_a_silent_no_op(started: ServiceConte
     first = record(started, actual, node_id=POOL_NODE, iteration=0)
     second = record(started, actual, node_id=POOL_NODE, iteration=0)
 
-    assert codes(first) == [] and codes(second) == []
-    assert data(first)["record"]["step"] == data(second)["record"]["step"]
-    assert stored_run(started)["warnings"] == [], "a retry flagged the run"
+    assert first.ok and second.ok, "an identical re-record is a success (ruling R-65)"
+    assert codes(first) == [], "the first record has nothing to report"
+    assert codes(second) == [WARNING_STEP_ACTUAL_ALREADY_RECORDED]
+    assert data(first)["record"]["step"] == data(second)["record"]["step"], (
+        "the repeat moved recorded_at, so it was not a no-op"
+    )
+
+    detail = warnings_of(second)[0].detail
+    assert detail["node_id"] == POOL_NODE and detail["iteration"] == 0
+    assert [item["code"] for item in stored_run(started)["warnings"]] == [
+        WARNING_STEP_ACTUAL_ALREADY_RECORDED
+    ], "contracts 3.4: a warning is attached to the response and to the stored run"
 
 
-def test_a_differing_actual_keeps_the_first_and_warns(started: ServiceContext) -> None:
-    """Write-once, and the refusal reaches the caller as a warning (ground rule 3).
+def test_a_differing_actual_is_refused_and_writes_nothing(started: ServiceContext) -> None:
+    """Ruling R-65: a differing re-record is ``AP-007``, and the write did not happen.
 
-    Three claims, and the second is the one that makes this a *write-once* test
-    rather than a warning test: the response carries the **stored** actual, not
-    the one just sent. So a caller that ignored the warning still cannot mistake
-    its own document for the recorded one.
+    M8 first shipped this as a warning on a successful response, arguing ground
+    rule 3. R-65 corrected it: ``ok: true`` for a refused write "misrepresents
+    the outcome, and that is the same class of defect as M3's silent success
+    carrying the winner's value". ``set_step_actual`` *raises* on a differing
+    actual (R-33), so a tool answering ``ok: true`` would report a success the
+    storage layer explicitly declined to give.
+
+    Four claims, and the third is the one that makes this a *write-once* test
+    rather than an error-code test: the stored actual is still the first one.
     """
     fetch(started, node_id=POOL_NODE, iteration=1)
     first = {"requested": ["fssai"], "received": ["fssai"]}
@@ -180,36 +222,42 @@ def test_a_differing_actual_keeps_the_first_and_warns(started: ServiceContext) -
     record(started, first, node_id=POOL_NODE, iteration=1)
 
     reply = record(started, second, node_id=POOL_NODE, iteration=1)
-    assert reply.ok, "a conflicting record is not a refusal (ground rule 3)"
-    assert codes(reply) == [WARNING_STEP_ACTUAL_CONFLICT]
-    assert data(reply)["record"]["step"]["actual"] == first, "the response carries the stored value"
+    assert reply.ok is False, "a refused write must not report ok: true (ruling R-65)"
+    assert rules(reply) == [AP_WRITE_ONCE_CONFLICT]
     assert stored_step(started, POOL_NODE, 1)["actual"] == first, "the stored actual was rewritten"
 
-    detail = warnings_of(reply)[0].detail
-    assert detail["node_id"] == POOL_NODE and detail["iteration"] == 1
-    assert detail["differs"] is True
-    assert [item["code"] for item in stored_run(started)["warnings"]] == [
-        WARNING_STEP_ACTUAL_CONFLICT
-    ], "contracts 3.4: a warning is attached to the response and to the stored run"
+    finding = findings(reply)[0]
+    assert finding.pointer == "/actual", "the argument that could not be accepted"
+    assert finding.context["resolved_node_id"] == POOL_NODE
+    assert finding.context["iteration"] == 1
+    assert finding.context["recorded_at"] is not None, "when the stored actual was recorded"
+    assert stored_run(started)["warnings"] == [], (
+        "a refused write is not a warning, so it must not be merged onto the run"
+    )
 
 
-def test_the_conflict_warning_is_keyed_per_step(started: ServiceContext) -> None:
-    """Ruling R-54(b)'s merge key, applied to M8's warning.
+def test_a_refused_record_leaves_every_other_step_alone(started: ServiceContext) -> None:
+    """The blast radius of a refusal: one step key, and nothing else on the run.
 
-    Two conflicts on two different steps are two entries; a third conflict on a
-    step already flagged adds nothing. The key carries ``node_id`` and
-    ``iteration`` precisely so this is per-step rather than per-run.
+    Replaces the per-step warning-key test the warning made necessary. With the
+    conflict now an ``ok: false``, what is worth asserting is that a refusal on
+    one step does not touch the actual recorded on another, does not accumulate
+    anything on the run, and does not stop the *next* legitimate record from
+    landing.
     """
     for iteration in (0, 1):
         fetch(started, node_id=POOL_NODE, iteration=iteration)
-        record(started, {"received": []}, node_id=POOL_NODE, iteration=iteration)
-    record(started, {"received": ["fssai"]}, node_id=POOL_NODE, iteration=0)
-    record(started, {"received": ["fssai"]}, node_id=POOL_NODE, iteration=1)
-    record(started, {"received": ["pan"]}, node_id=POOL_NODE, iteration=0)
+    record(started, {"received": []}, node_id=POOL_NODE, iteration=0)
 
-    flagged = stored_run(started)["warnings"]
-    assert [item["code"] for item in flagged] == [WARNING_STEP_ACTUAL_CONFLICT] * 2
-    assert [item["detail"]["iteration"] for item in flagged] == [0, 1]
+    refused = record(started, {"received": ["fssai"]}, node_id=POOL_NODE, iteration=0)
+    assert rules(refused) == [AP_WRITE_ONCE_CONFLICT]
+
+    landed = record(started, {"received": ["fssai"]}, node_id=POOL_NODE, iteration=1)
+    assert landed.ok, "a refusal on one step blocked a first record on another"
+
+    assert stored_step(started, POOL_NODE, 0)["actual"] == {"received": []}
+    assert stored_step(started, POOL_NODE, 1)["actual"] == {"received": ["fssai"]}
+    assert stored_run(started)["warnings"] == []
 
 
 def test_an_actual_for_an_unserved_step_is_ap_004_and_writes_nothing(
@@ -295,10 +343,15 @@ def test_a_store_refusal_with_nothing_recorded_is_ap_005(
 
     ``set_step_actual`` raises for two conditions: a *different* actual is
     already recorded, and its retry budget ran out with nothing recorded at all.
-    Reporting the second as ``step_actual_conflict`` would tell a caller its
-    evidence lost to a value that does not exist, so :func:`runs._conflicted`
-    re-reads and classifies. This forces the contention branch, which no
-    sequential test can reach.
+    Reporting the second as ``AP-007`` would tell a caller its evidence lost to
+    a value that does not exist - and would name a *write-once conflict* where
+    there is nothing to conflict with - so :func:`runs._conflicted` re-reads and
+    classifies. This forces the contention branch, which no sequential test can
+    reach.
+
+    Both codes mean "the store refused", and the difference between them is the
+    whole reason the classification exists: ``AP-007`` says a value is there and
+    it is not yours, ``AP-005`` says the store refused with nothing recorded.
     """
     fetch(started, node_id="receive_request")
 
@@ -334,46 +387,75 @@ def test_run_finish_closes_the_run(started: ServiceContext) -> None:
     assert stored["finished_at"] == run["finished_at"]
 
 
-def test_finishing_twice_with_the_same_values_is_a_silent_no_op(started: ServiceContext) -> None:
-    """The retry case again. A repeated identical finish must not warn."""
+def test_finishing_twice_with_the_same_values_is_a_no_op_that_says_so(
+    started: ServiceContext,
+) -> None:
+    """The retry case again, and it reuses the code ``fetch_step`` already has.
+
+    An identical re-finish reports ``run_already_finished`` - the same code and
+    the same detail a ``fetch_step`` against a closed run attaches, because the
+    condition *is* the same: this run is already closed. No new code was needed
+    for R-65's no-op half here, which is the argument for reusing it.
+
+    The lifecycle fields are compared rather than the whole run, because the
+    second call's payload legitimately carries the warning the first one had
+    nothing to report.
+    """
     first = runs.finish(started, RUN_ID, EXPECTED_FINAL, STATUS_FINISHED)
     second = runs.finish(started, RUN_ID, EXPECTED_FINAL, STATUS_FINISHED)
-    assert codes(first) == [] and codes(second) == []
-    assert data(first)["run"] == data(second)["run"]
-    assert stored_run(started)["warnings"] == []
+
+    assert first.ok and second.ok
+    assert codes(first) == [], "the call that closed the run has nothing to report"
+    assert codes(second) == [WARNING_RUN_ALREADY_FINISHED]
+
+    closed = data(first)["run"]
+    again = data(second)["run"]
+    for field in ("status", "outcome", "finished_at", "started_at", "steps"):
+        assert again[field] == closed[field], f"the repeat changed {field}"
+    assert [item["code"] for item in again["warnings"]] == [WARNING_RUN_ALREADY_FINISHED], (
+        "the returned run carries the warning this call attached"
+    )
+    assert [item["code"] for item in stored_run(started)["warnings"]] == [
+        WARNING_RUN_ALREADY_FINISHED
+    ]
 
 
-def test_a_diverging_second_finish_keeps_the_first_and_warns(started: ServiceContext) -> None:
-    """Ruling R-53's shape, one tool along: the first close wins and the second is told.
+def test_a_diverging_second_finish_is_refused_and_writes_nothing(
+    started: ServiceContext,
+) -> None:
+    """Ruling R-65: a differing re-finish is ``AP-007``, and the write did not happen.
 
-    The stored outcome is evidence about what the agent produced, so a second
-    caller may not overwrite it - and may not be refused either, because the
-    service never gates. The warning names which fields diverged, the response
-    carries the **recorded** run, and the run itself carries the warning.
+    A run's recorded outcome is evidence about what the agent produced, so a
+    second caller may not overwrite it - and may not be told it succeeded
+    either. M8 shipped this as a warning; R-65 corrected it for the reason the
+    ``record_step`` case is corrected: the compare-and-set reported that this
+    call did not close the run, so ``ok: true`` would misreport what the store
+    now holds.
+
+    The finding names *which* fields diverged and what is recorded, and the run
+    is left exactly as the first close left it - including its warning list,
+    which a refusal must not touch.
     """
     runs.finish(started, RUN_ID, EXPECTED_FINAL, STATUS_FINISHED)
     other = {"onboarding_status": "escalated", "outstanding_tasks": 1}
 
     reply = runs.finish(started, RUN_ID, other, STATUS_ABANDONED)
-    assert reply.ok, "a diverging finish is not a refusal"
-    assert codes(reply) == [WARNING_RUN_FINISH_MISMATCH]
-    detail = warnings_of(reply)[0].detail
-    assert sorted(detail["diverged"]) == ["outcome", "status"]
-    assert detail["recorded"]["status"] == STATUS_FINISHED
-    assert detail["requested"]["status"] == STATUS_ABANDONED
+    assert reply.ok is False, "a refused write must not report ok: true (ruling R-65)"
+    assert rules(reply) == [AP_WRITE_ONCE_CONFLICT]
 
-    run = data(reply)["run"]
-    assert run["status"] == STATUS_FINISHED, "the second finish overwrote the first"
-    assert run["outcome"] == EXPECTED_FINAL
-    assert [item["code"] for item in run["warnings"]] == [WARNING_RUN_FINISH_MISMATCH], (
-        "the returned run carries the warning this call attached"
-    )
-    assert [item["code"] for item in stored_run(started)["warnings"]] == [
-        WARNING_RUN_FINISH_MISMATCH
-    ]
+    finding = findings(reply)[0]
+    assert sorted(finding.context["diverged"]) == ["outcome", "status"]
+    assert finding.context["recorded"]["status"] == STATUS_FINISHED
+    assert finding.context["recorded"]["finished_at"] == FROZEN_NOW.isoformat()
+    assert finding.context["requested"]["status"] == STATUS_ABANDONED
+
+    stored = stored_run(started)
+    assert stored["status"] == STATUS_FINISHED, "the second finish overwrote the first"
+    assert stored["outcome"] == EXPECTED_FINAL
+    assert stored["warnings"] == [], "a refused write is not a warning and must not be merged"
 
 
-def test_a_second_finish_that_diverges_in_one_field_names_that_field(
+def test_a_second_finish_that_diverges_in_one_field_names_and_points_at_it(
     started: ServiceContext,
 ) -> None:
     """Both halves of the comparison, independently, so neither is decoration.
@@ -381,15 +463,21 @@ def test_a_second_finish_that_diverges_in_one_field_names_that_field(
     A same-status finish with a different outcome names ``outcome`` alone, and a
     same-outcome finish with a different status names ``status`` alone. A
     divergence check that compared the pair as a unit would report both every
-    time and still pass a test that only looked for a warning.
+    time and still pass a test that only looked for the refusal.
+
+    The **pointer** follows the same rule, which is what makes the finding
+    actionable: it addresses the first diverged field in a fixed order, so a
+    caller is pointed at an argument it actually sent.
     """
     runs.finish(started, RUN_ID, EXPECTED_FINAL, STATUS_FINISHED)
 
     outcome_only = runs.finish(started, RUN_ID, {"onboarding_status": "complete"}, STATUS_FINISHED)
-    assert warnings_of(outcome_only)[0].detail["diverged"] == ["outcome"]
+    assert findings(outcome_only)[0].context["diverged"] == ["outcome"]
+    assert findings(outcome_only)[0].pointer == "/outcome"
 
     status_only = runs.finish(started, RUN_ID, EXPECTED_FINAL, STATUS_ABANDONED)
-    assert warnings_of(status_only)[0].detail["diverged"] == ["status"]
+    assert findings(status_only)[0].context["diverged"] == ["status"]
+    assert findings(status_only)[0].pointer == "/status"
 
 
 def test_an_unknown_finish_status_writes_nothing(started: ServiceContext) -> None:
@@ -425,13 +513,21 @@ def test_an_abandoned_run_is_closed_too(started: ServiceContext) -> None:
     Which is why ``mark_run_finished``'s compare-and-set keys on
     ``finished_at IS NULL`` rather than on ``status``: one predicate covers both
     terminal statuses, and the Protocol holds no opinion about the vocabulary.
+
+    The second call proves it *closed*: a run still open would let a ``finished``
+    finish through, and instead it is refused with ``AP-007`` naming ``status``
+    as the divergence. So the refusal is the assertion here rather than an
+    inconvenience - if ``abandoned`` did not close the run, this would succeed.
     """
     reply = runs.finish(started, RUN_ID, {}, STATUS_ABANDONED)
     run = data(reply)["run"]
     assert run["status"] == STATUS_ABANDONED
     assert run["finished_at"] is not None
-    assert runs.finish(started, RUN_ID, {}, STATUS_FINISHED).ok
-    assert stored_run(started)["status"] == STATUS_ABANDONED, "abandoned did not close the run"
+
+    reopened = runs.finish(started, RUN_ID, {}, STATUS_FINISHED)
+    assert rules(reopened) == [AP_WRITE_ONCE_CONFLICT], "abandoned did not close the run"
+    assert findings(reopened)[0].context["diverged"] == ["status"], "the outcome matched"
+    assert stored_run(started)["status"] == STATUS_ABANDONED
 
 
 def test_a_stale_finish_cannot_revert_the_runs_warnings(

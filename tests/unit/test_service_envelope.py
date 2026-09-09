@@ -172,8 +172,15 @@ def test_boundary_codes_are_disjoint_from_the_catalogue() -> None:
 
 
 def test_the_boundary_codes_are_all_distinct_and_all_used() -> None:
-    """Five constants, five values, and the set is the whole of them."""
-    assert len(BOUNDARY_CODES) == 6
+    """One constant per value, and the set is the whole of them.
+
+    Seven from M8's fix round: M4's five, M5's ``AP-006`` (ruling R-49(b)) and
+    M8's ``AP-007`` (ruling R-65). The count is asserted rather than derived so
+    that adding a code is a visible edit here as well as in `contracts.md`,
+    which is what :func:`test_the_boundary_codes_match_the_documented_table`
+    then compares.
+    """
+    assert len(BOUNDARY_CODES) == 7
     assert all(code.startswith("AP-") for code in BOUNDARY_CODES)
 
 

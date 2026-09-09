@@ -14,11 +14,13 @@ so ground rule 1 is untouched; the read-only guard's call graph covers them
 alongside the other four. ``run_evidence`` and ``run_export`` are M10's and stay
 in `tests/unit/test_tool_surface.py`'s ``DEFERRED`` until then.
 
-Neither of M8's two tools grades anything (ground rule 2) and neither refuses:
-a re-record with a different actual and a re-finish with a different outcome
-both keep the stored value and come back with a warning, which is ruling R-53's
-answer to a diverging ``run_start`` applied to the two writes that can meet an
-already-recorded value.
+Neither of M8's two tools grades anything (ground rule 2). Both split a repeated
+write by whether the value differs, per ruling R-65: an **identical** re-record
+or re-finish is a silent no-op success, and a **differing** one is ``AP-007`` on
+an ``ok: false`` envelope, because the write did not happen and ``ok: true``
+would claim a success the store declined to give. That is not gating - ground
+rule 3 governs refusing to *serve*, and R-56 already settled that a refused
+write is ``ok: false``.
 
 One deviation from the contract's parameter *order*, and none from its
 parameter *set*: contracts section 4 lists ``run_start`` as ``run_id, agent_id,
@@ -137,10 +139,10 @@ def record_step(
     step fetched by tool name can be recorded by node id.
 
     The step must already have been fetched: an actual for a step that was never
-    served is `AP-004`. Recording is write-once per step. Sending the identical
-    `actual` again is a no-op success, so a retry is safe; sending a *different*
-    one keeps the recorded value, returns it, and warns with
-    `step_actual_conflict`.
+    served is `AP-004`. Recording is **write-once** per step. Sending the
+    identical `actual` again is a no-op success, so a retry after a network blip
+    is safe; sending a *different* one is `AP-007` and **nothing is written** -
+    the recorded actual stays what it was, and `run_get` is where you read it.
 
     Nothing here grades. `actual` is stored verbatim and is never compared with
     `expected.final` or checked against the node's `output_schema` - the three
@@ -169,9 +171,10 @@ def run_finish(run_id: TextArg, outcome: ObjectArg, status: TextArg) -> dict[str
     producing - stored as given, never validated against the blueprint's
     `outcome_schema` and never graded, because grading is the client's job.
 
-    The first finish wins. Calling this again with the same `status` and
-    `outcome` is a no-op success; calling it with different ones keeps the
-    recorded outcome, returns it, and warns with `run_finish_mismatch`.
+    The **first finish wins.** Calling this again with the same `status` and
+    `outcome` is a no-op success, so a retry is safe; calling it with different
+    ones is `AP-007` and **nothing is written** - the recorded outcome stays
+    what it was.
 
     A finished run still serves `fetch_step` - the fixtures are pinned and
     immutable, so nothing here refuses. A fetch against a closed run warns with
