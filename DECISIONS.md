@@ -3583,3 +3583,123 @@ replaced.
    `latest: true` flag maintained by `put_dataset` — one more write per version, and an invariant to
    keep. Not built: R-39(a) and M6 both accepted the same trade for the same reason, and a measured
    problem is the trigger.
+
+---
+
+## [M7, fix round 2] Ruling R-60: the published host ports and the test defaults move off 27017 and 5432
+`docker-compose.yml` publishes Mongo on **27117** and Postgres on **5442**, and
+`tests/conftest.py`'s default test URLs dial exactly those. Container-internal the ports are still
+27017 and 5432; only what the host publishes and what the test defaults reach have changed.
+
+Reason, and it is a count rather than an argument: **the wrong-server hazard fired three times.**
+M7's first `--store mongo` run passed against an unrelated host MongoDB. It recurred while I
+measured the containerless figure. And the third was the reviewer's own gate run, which returned
+`1384 passed / 17 skipped` against my `1400/1` (servers up) and `1370/31` (URLs at dead ports) — a
+difference of exactly **14**, the same 14 Mongo tests, the same foreign server.
+
+R-59(b)'s mitigation was overridable ports plus skip messages naming the URL. That made the hazard
+*diagnosable*, which is how the third occurrence was found, and it did nothing about the hazard
+itself: neither an override nor a message changes what the **default** reaches. A default that can
+connect to a foreign server is the defect.
+
+**The damage was never the stray database.** It was three different test counts for one commit,
+which makes the number evidence of very little. The count is the thing this project sells — PRD
+design principle 2 is "hold the environment byte-identical" — so a suite whose own count depends on
+what happened to be listening is failing at its own thesis.
+
+**Structural rather than a probe.** Rejected: a sentinel "is this our schema?" check. It adds a
+round trip and a failure mode, it needs explaining, and it still has to connect to the wrong server
+to discover the server is wrong. Choosing a port nobody else uses ends the question instead of
+detecting it. R-50 set the precedent that two occurrences is a pattern and three is a policy
+failure; this is the third, and the answer is the same shape — remove the reachability rather than
+document the risk.
+
+Updated everywhere the ports are named: the compose file (with the reasoning, both failure shapes),
+the test defaults, `CLAUDE.md`'s commands block, the README, and the compose drift guard. The skip
+messages interpolate the URL and therefore came along for free — and they stay, because they are
+what made the third occurrence diagnosable.
+
+**Two guards, in opposite directions, and both were verified to fail.**
+`test_the_published_host_port_is_not_the_one_a_foreign_server_sits_on` fails if either port drifts
+back to 27017 or 5432 — the hazard returning. `test_the_published_host_port_is_the_one_the_test_urls_dial`
+fails if `docker-compose.yml` and `tests/conftest.py` drift apart, which is the **silent** direction:
+the suite would dial a port nothing publishes, every backend test would skip, the run would be green,
+and the skip message would name a URL that looks perfectly reasonable. That is the same class of
+failure R-60 is about, so it gets the same kind of guard.
+The parser earned a note of its own: `str(mapping).split(":")[-2]` on
+`"${AGENTPROPS_MONGO_PORT:-27117}:27017"` returns `-27117}`, which `int()` reads as a **negative**
+port — so the guard failed, correctly, for the wrong reason. It now matches the interpolated form
+with a regex and raises rather than returning a number it could not parse.
+
+**Three sites the first pass missed, and how.** Grepping for the *number* rather than for the files
+I remembered editing - fix round 1's lesson - turned up `server/__main__.py`'s usage block telling a
+developer to run `--store mongodb://localhost:27017/agentprops`, and two `storage/mongo.py` URL
+examples on `:27017`. Only the first is a copyable instruction; the other two illustrate path
+parsing, where the port is incidental. All three moved anyway, so that a grep for `27017` under
+`src/` returns nothing but the R-60 explanations. An invariant is cheaper to hold than a judgement
+about which examples somebody might copy.
+
+The Mongo test database name stays a constant in the fixture and is still never taken from the
+URL's path. The port move removes the *reach*; the constant removes the *blast radius*, and an
+override can still point the suite anywhere.
+
+## [M7, fix round 2] Ruling R-61: the `alembic check` residue is stated beside the evidence, not fixtured away
+Ratified as diagnosed. The requirement is on the *report* rather than the code: the acceptance
+evidence — "`alembic upgrade head` then `alembic check` clean against real Postgres" — is only
+reproducible **from a clean database**, and the report now says so with the reset step pasted above
+the output.
+
+**Explicitly not fixed by stamping `alembic_version` in the fixture.** That would make `alembic
+check` pass by fabricating the state it exists to verify, which is the same defect class as a
+vacuous test — and this build has now caught four of those. The residue is correct behaviour for a
+fixture that owns its schema with `create_all` and for a test that exercises `downgrade base`.
+`test_the_migrated_schema_matches_sql_py[postgres]` runs the same comparison `alembic check` runs,
+against a database it migrated itself, and is the assertion that actually holds the line — the CLI
+invocation is evidence for a human, not the guard.
+
+## [M7, fix round 2] The reproducible test count, and what a backend number means without its URL
+Three figures were reported for one commit during M7. After R-60 there is one per configuration and
+both containerless spellings agree, which is the property that makes the number worth quoting:
+
+| configuration | count |
+|---|---|
+| nothing running, nothing set — **the CI shape** | 1374 passed / 31 skipped |
+| both test URLs forced at dead ports | 1374 passed / 31 skipped |
+| both containers up on 27117 / 5442, nothing set | 1404 passed / 1 skipped |
+
+1405 either way, which is the arithmetic that says no test was lost. The 30 skips are the three
+suites that need a *second* store by definition: `test_promotion_crossing.py` (16),
+`test_migrations.py`'s Postgres dialect parameter (8) and `test_mongo_allocation_races.py` (6).
+
+**And the general rule R-60 asks be recorded: a backend count without its URL is not a claim.** A
+passing `--store mongo` proves the adapter works against *something*; only the URL in the connect or
+skip message says what. Every backend figure in the M7 report now carries the server version and the
+port it was measured against.
+
+## [M7, fix round 2] Every backend figure was measured with one pytest process, because the reset is destructive
+Found while measuring this round, and it belongs beside R-60 because it is the same shape: **a
+number that depends on what else was running.**
+
+To save wall clock I started a second `pytest -m integration --store mongo` while the gate's own
+Mongo leg was running. Both share one MongoDB and one database name, and the `store` fixture
+**drops that database before every test**, so the two runs deleted each other's rows: `14 failed,
+118 passed` on one and `5 failed, 263 passed, 9 errors` on the overlapped triple-store leg. Every
+failure was a row count or a latest-version assertion - exactly the signature of a foreign
+`drop_database` mid-test - and `263 + 5 + 9 == 277`, the total the leg passes alone. Re-run
+sequentially, both are green: 133 and 277.
+
+The fixture is not wrong. Per-test isolation *within* a run is what it promises and it delivers
+that; isolation *between* concurrent runs is not something a constant database name and a
+destructive reset can provide. So the constraint is recorded rather than coded around: **one pytest
+process at a time against a shared server**, which now sits in the reproduction recipe next to
+R-61's "from a clean database" and R-60's URL.
+
+Deliberately **not** fixed here by suffixing the database name per session. That edits the fixture
+that owns the destructive reset, in a round whose instruction was narrow, and the round's own lesson
+is that a fix can defang the thing that guarded it. Left as a reported concern. Whatever the suffix
+ends up being, the blast-radius rule survives it: the name stays a constant *of ours* plus a
+session suffix, and is never a value read from the URL.
+
+Worth writing down mainly because of how close it came to being reported as a result. A 14-failure
+Mongo run, in the round that exists because a number was not reproducible, would have been the same
+mistake in a new costume.
