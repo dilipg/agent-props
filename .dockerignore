@@ -1,0 +1,30 @@
+# Everything the image does not need, so the build context is small and a
+# stale local artefact cannot end up inside it.
+#
+# `.venv/` is the one that matters: it is a Windows or macOS virtualenv on most
+# developer machines, and copying it into a Linux image produces an
+# interpreter that cannot start. The build resolves dependencies from
+# `uv.lock` instead.
+.venv/
+.git/
+.github/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.superpowers/
+__pycache__/
+*.pyc
+
+# Not needed at runtime, and `tests/` in particular pulls in the dev
+# dependency group's expectations. The image installs `--no-dev`.
+tests/
+docs/
+schemas/
+client/
+web/
+*.db
+*.md
+!README.md
+Dockerfile
+docker-compose.yml
+.dockerignore

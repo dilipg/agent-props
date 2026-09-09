@@ -1,0 +1,138 @@
+# Two profiles, and they are alternatives rather than layers.
+#
+#   docker compose --profile local up      service + Mongo. What a developer
+#                                          authoring a new agent runs.
+#   docker compose --profile shared up     service + Postgres. The shared
+#                                          instance a team points at.
+#
+# Both publish the service on 8000, because a caller should not have to know
+# which backend is behind it. Run one at a time.
+#
+# There is a third mode and it has no compose file: `--store ./agentprops.db`
+# runs the service against a SQLite file with no container at all, and that is
+# what CI uses (`docs/build-handoff.md` section 2).
+#
+# The two databases publish their native ports, so the conformance suite can be
+# run from the host against a container started here:
+#
+#   docker compose --profile local up -d mongo
+#   uv run pytest -m integration --store mongo
+#
+#   docker compose --profile shared up -d postgres
+#   uv run pytest -m integration --store postgres
+#
+# `tests/conftest.py`'s default URLs match the credentials and ports below, so
+# neither command needs any environment set.
+#
+# The three published host ports are overridable, because a developer with a
+# Postgres or a Mongo already running is the normal case and not an edge one:
+# on Windows a host Postgres bound to 0.0.0.0:5432 wins the race for IPv4 over
+# Docker's port proxy, so the container is reachable, listening, healthy - and
+# every connection lands on the other server, which answers "password
+# authentication failed" for a role it has never heard of. Set
+# AGENTPROPS_POSTGRES_PORT=5433 (and AGENTPROPS_TEST_POSTGRES_URL to match) and
+# the ambiguity is gone. Found by hitting it.
+#
+#   AGENTPROPS_POSTGRES_PORT=5433 docker compose --profile shared up -d postgres
+#   AGENTPROPS_TEST_POSTGRES_URL=postgresql://agentprops:agentprops@localhost:5433/agentprops
+#   uv run pytest -m integration --store postgres
+
+name: agent-props
+
+# The service is defined once and used twice. The only difference between the
+# two profiles is the store URL, so an anchor is what keeps that literally
+# true - a copied-and-edited block is where two deployments quietly diverge.
+x-service: &service
+  build:
+    context: .
+  restart: unless-stopped
+  ports:
+    - "${AGENTPROPS_SERVICE_PORT:-8000}:8000"
+  environment:
+    AGENTPROPS_HTTP_HOST: 0.0.0.0
+    AGENTPROPS_HTTP_PORT: 8000
+
+services:
+  # ------------------------------------------------------------------ local
+  service:
+    <<: *service
+    profiles: ["local"]
+    environment:
+      AGENTPROPS_HTTP_HOST: 0.0.0.0
+      AGENTPROPS_HTTP_PORT: 8000
+      # Mongo needs no migration: contracts section 8 declares collections and
+      # indexes, not DDL, and `MongoStore.create_schema()` declares the indexes
+      # idempotently on startup. So this profile is genuinely one command.
+      AGENTPROPS_STORE: mongodb://mongo:27017/agentprops
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  mongo:
+    profiles: ["local"]
+    image: mongo:8
+    restart: unless-stopped
+    ports:
+      - "${AGENTPROPS_MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # `depends_on: service_healthy` is what makes `up` a single command
+      # rather than a race the service loses on a cold start. `mongosh --eval`
+      # ships in the image; a TCP check would pass before the server accepts
+      # queries.
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # ----------------------------------------------------------------- shared
+  service-shared:
+    <<: *service
+    profiles: ["shared"]
+    environment:
+      AGENTPROPS_HTTP_HOST: 0.0.0.0
+      AGENTPROPS_HTTP_PORT: 8000
+      AGENTPROPS_STORE: postgresql://agentprops:agentprops@postgres:5432/agentprops
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # A Postgres database is **migrated, never created by the adapter**, which
+    # is why this profile has a command and the local one does not:
+    # `python -m agentprops.server` deliberately refuses to run `create_schema`
+    # against a SQL URL, so that a real database is only ever changed by a
+    # reviewed revision. `alembic upgrade head` is idempotent, so a restart
+    # costs one `SELECT` against `alembic_version`.
+    command:
+      - sh
+      - -c
+      - >-
+        alembic -x url="$${AGENTPROPS_STORE}" upgrade head
+        && exec python -m agentprops.server --transport http
+
+  postgres:
+    profiles: ["shared"]
+    image: postgres:17
+    restart: unless-stopped
+    ports:
+      - "${AGENTPROPS_POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: agentprops
+      POSTGRES_PASSWORD: agentprops
+      POSTGRES_DB: agentprops
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `-U agentprops -d agentprops` and not the bare command: `pg_isready`
+      # with no arguments answers for the *default* database, which reports
+      # ready while the init scripts that create this one are still running.
+      test: ["CMD-SHELL", "pg_isready -U agentprops -d agentprops"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  mongo-data:
+  postgres-data:
