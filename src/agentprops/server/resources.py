@@ -19,21 +19,30 @@ Why the static set is fixed rather than one entry per stored document
 ---------------------------------------------------------------------
 
 R-76 reads as though ``resources/list`` should enumerate one entry per published
-blueprint. On `mcp` 2.2.0 that is not reachable through the public API, and the
-two ways to fake it are both worse than the index:
+blueprint. It is reachable, and it costs more than the read it saves. Three
+routes, measured against the installed `mcp` 2.2.0:
 
-- ``MCPServer`` serves ``resources/list`` from a registry populated at *import*
-  time. There is no listing callback, and ``Extension.methods()`` refuses to
-  replace an already-registered handler ("extension methods are additive and
-  cannot replace another handler"), so the only override is
-  ``mcp._lowlevel_server.add_request_handler`` - a private attribute, which is
-  exactly the kind of dependency ruling R-16 was written after.
+- ``MCPServer`` serves ``resources/list`` from ``ResourceManager
+  ._resources`` - a dict populated at *import* time - and there is no listing
+  callback. ``Extension.methods()`` refuses to replace an already-registered
+  handler ("extension methods are additive and cannot replace another handler").
+- **Subclassing works, and is public.** ``_handle_list_resources`` delegates to
+  the public coroutine ``self.list_resources()``, so overriding that method on a
+  subclass of ``MCPServer`` would serve a live list without touching one private
+  attribute. Ruling R-77(a) first recorded this as impossible; that was wrong and
+  the ruling is corrected. The decision is unchanged and the honest reason is
+  **coupling**: it would make this surface depend on the shape of an SDK
+  method's contract for the sake of saving one ``resources/read``, and ruling
+  R-16 already cost this build a fix round over an SDK detail that moved.
 - ``mcp.add_resource(...)`` is public and can be called from :func:`bind`. It
   would freeze the list at bind time, so a blueprint published mid-session
   never appears; and because ``binding()`` nests and restores in tests while
   the resource registry does not, one test's store would leak resources into
   the next. A stale list that is also cross-contaminating is not an improvement
   on an index.
+
+Revisit if the SDK grows a listing callback, which is the cheap version of the
+first route.
 
 So the *set* of resources is a property of the server and only the *bodies* are
 store-derived. Every body carries ``available`` and a ``note`` whether or not

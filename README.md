@@ -108,11 +108,11 @@ nowhere a caller can reach over MCP. The text lives in
 against your store, so the example it tells Claude to imitate is one you actually have — and
 when you have none it says so instead of naming an id that does not resolve.
 
-Insist on the validate loop the prompt asks for. The `BP-*` rules catch an unreachable node, a
-cycle with no loop node, a `var` path no output schema declares, and — the important one —
-**BP-014**: two nodes sharing a `tool_name` where position cannot disambiguate them. That is
-the mistake that makes an agent untestable, because `fetch_step` then cannot tell which step
-you mean, and it is far cheaper to hear now than at the first run.
+Insist on the validate loop the prompt asks for, and on reading every rule id it reports
+rather than the first. The `BP-*` catalogue is what turns "this blueprint looks right" into
+"this blueprint is coherent", and the prompt singles out the one rule worth knowing before
+you start — the step ambiguity that makes an agent untestable at all — because hearing it
+from `blueprint_validate` costs minutes and hearing it from the first run costs a rewrite.
 
 ### 3. Have Claude fill datasets
 
@@ -129,10 +129,9 @@ The section scoping is what makes filling cheap: a rejection names the one secti
 **`cover-the-label-space`** is the prompt that could not have been a README paragraph. Given
 `agent_id` and an optional `version` it reads `label_vocabulary` against *your* store and names
 every declared label value that carries **no** dataset, plus the label combinations already
-present and how many datasets carry each. Ask for the label space to be **covered** rather than
-for a dataset count — the PRD's exit criterion is twenty datasets spanning the declared labels,
-not one per combination, and the prompt states the cross-product's size rather than enumerating
-a list nobody could finish.
+present and how many datasets carry each. Ask for the label space to be **covered** rather
+than for a dataset count: the prompt quotes the bar PRD 6 sets and reports the cross-product's
+size, rather than handing you a list nobody could finish.
 
 ### 4. Point your agent at the fixtures
 
@@ -156,12 +155,11 @@ is `None` in a consumer project, which is the separation ground rule 2 requires.
 Start the service over HTTP (`--transport http --port 8000`), then run the registered prompt
 **`wire-an-agent`**. It takes an optional `agent_id` and an optional `url`, and it is mostly
 about *where the seam goes* — one injected client or one module-level indirection, rather than
-conditionals scattered through the agent's logic. It carries the `agentprops_client` call
-sequence, the three things that will bite otherwise (`AP-004` for a `record_step` on an
-unserved step, warnings as typed objects so `w.code` and not `w["code"]`, and the
-client-generated run id), and grading in the **test** rather than in the agent. The
-`run_start` selector it shows is a real dataset's own label set read out of your store, so the
-snippet you paste pins something that exists.
+conditionals scattered through the agent's logic. It also carries the `agentprops_client` call
+order, the three mistakes that cost the most time on the way in, and where grading belongs.
+The `run_start` selector it shows is a real dataset's own label set read out of your store, so
+the snippet you paste pins something that exists — which the hard-coded selector this section
+used to print did not, in any store without the demo fixtures.
 
 Then it looks like this — the example below ran against the worked example:
 
@@ -268,8 +266,10 @@ matter, where the seam goes.
 - **`resources/list` is a fixed set of three, not one entry per stored document.**
   `agentprops://catalogue` is the index that names the rest; the per-agent URIs are resource
   *templates* and appear under `resources/templates/list`. The SDK serves `resources/list` from
-  a registry built at import time, so a live per-document list is not reachable through its
-  public API — `src/agentprops/server/resources.py` records what was tried.
+  a registry built at import time; a live per-document list *is* reachable, by subclassing
+  `MCPServer` and overriding its public `list_resources()`, and was not built because that
+  couples this surface to an SDK method's contract to save one `resources/read` —
+  `src/agentprops/server/resources.py` records all three routes.
 - **One store, one process at a time** for SQLite. Point the service and Claude Code at the
   same `--store` file, not two copies.
 

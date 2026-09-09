@@ -5253,3 +5253,224 @@ prompt bodies are gone".
 5. **`fill-a-dataset` and `cover-the-label-space` require `agent_id` and default `version` to the
    latest published.** Consistent with every tool on the surface. Worth confirming, because R-76's
    scope line names `version` among the arguments and a reader could take that as "required".
+
+## [M9.5, fix round 1] Correction: `grep -c '^> '` was a proxy, and the duplication it hid
+The M9.5 report's evidence that the README had been de-duplicated was
+`grep -c '^> ' README.md == 0`. That count is 0. **It measures blockquote formatting**, and the
+property it was offered as evidence for is content overlap. Ruling R-78 rules on it; the reviewer
+measured the property and found 34 shared shingles in three fragments, one ~25 consecutive words
+verbatim.
+
+The shape of the miss is the part worth keeping. M9.5 *did* ship a duplication guard - against
+`dataset_skeleton`'s `instructions`, diffing the prompt against the live text - which was the right
+instinct pointed at the wrong target. The one duplication R-76 actually names is the README, and
+that had no guard at all. Having built the mechanism and not aimed it at the named risk is worse
+than not having thought about duplication, because it produced confidence.
+
+R-78's general form is R-73's again in a new costume: `grep -c '^> '` stands to "no duplication"
+exactly as `git grep -Il ''` stood to "no NUL byte". Both plausible, both answering a different
+question, both wrong in the direction that looks like success.
+
+## [M9.5, fix round 1] The shingle guard: rendered text, not source literals, and shown failing first
+`tests/unit/test_served_text_duplication.py`. Nine-word shingles - R-78's window - over every
+registered prompt and resource against every tracked `.md`.
+
+**Rendered over the wire rather than AST-scanned.** The reviewer measured `service/prompts.py`'s
+non-docstring string literals, which found the defect. This guard fetches each prompt through
+`prompts/get` and each resource through `resources/read` instead, for three reasons: it is the
+property a caller experiences; a literal split across two helpers is invisible to a source scan;
+and it enumerates from the **registered surface**, so a fifth prompt is covered the moment it is
+registered. That last one is the durability property whose absence let this ship - a guard listing
+today's prompts would have needed remembering.
+
+**`git ls-files '*.md'` rather than a glob.** The gitignored `.superpowers/` build reports quote
+prompt output at length and legitimately; a document that is not in the repository cannot drift
+with it.
+
+**Store content is removed, and removed as a token run.** Measured without that, the two example
+resources shared 478 and 464 shingles with `docs/worked-example.md`, 73 and 22 with `contracts.md`
+and 13 with `prd.md` - every one of them a golden fixture appearing in the document it was authored
+in, which is not a second place to drift and is already guarded by ruling R-44's fixture drift test.
+The documents are read back **from the store** rather than named as fixture files, so seeding
+different fixtures changes nothing about this guard.
+
+Two implementation details each cost a measurement. Serialising the subtraction with `json.dumps`
+removed only a fifth of them (478 → 420), because `resources/read` serialises with
+`pydantic_core.to_json(..., indent=2)` and the separator placement differs; matching the SDK's
+serialiser took it to 1. That last one was a shingle *straddling* the boundary between a wrapped
+fixture and the `note` key after it - `'must never be called } validated_at 2026-09-08t10:14:22z }
+note'` - so set subtraction of shingles became removal of the token **run**, which makes the
+wrapper's own tokens adjacent, as they would be if the body carried no document.
+
+**Shown failing before the fix**, which is ruling R-77(e) and the reason it exists. Against the
+un-de-duplicated README, with fixture content already removed:
+
+```text
+prompt author-a-blueprint shares 21 9-word shingle(s) with README.md
+    'nodes sharing a tool_name where position cannot …' (line 113)                [x3]
+prompt wire-an-agent shares 8 9-word shingle(s) with README.md
+    'python from agentprops_client import compare connect with …'                 [x3 shown]
+prompt cover-the-label-space shares 5 9-word shingle(s) with README.md
+    'exit criterion is twenty datasets spanning the …' (line 133)                  [x3]
+prompt cover-the-label-space shares 1 9-word shingle(s) with DECISIONS.md
+    'exit criterion is twenty datasets spanning the …'
+```
+
+Each quoted shingle is **truncated to eight words**, one below the window, and the full untruncated
+output is in `.superpowers/sdd/build-handoff/task-M9.5-report.md`, which is gitignored and so
+outside the comparison. That is not tidiness: `DECISIONS.md` is a tracked `.md` the guard reads, and
+the first draft of this entry quoted the output verbatim - which re-introduced the duplication it was
+recording. The guard caught it, which is the guard working on its own author.
+
+All three of the reviewer's fragments, plus a fourth against `DECISIONS.md` that only a guard over
+*every* tracked `.md` would have found. `REPORTED = 3` shingles per offence rather than one: the
+first version printed only the longest, and reading that output sent me looking at one of three
+fragments. "There is duplication somewhere" is not actionable and being actionable is this guard's
+whole job.
+
+**`EXEMPT` is empty.** R-78 allows exempting a shared technical phrase; nothing needed it once the
+README was de-duplicated and two prompt sentences were reworded, which is the order R-78 puts them
+in. An entry there has to carry the reason it is not duplication.
+
+Two controls of its own, because a shingle guard that normalised everything to nothing would pass
+for ever: `test_the_shingler_finds_a_planted_copy` asserts a verbatim nine-word run collides **and**
+a paraphrase of the same idea does not; `test_the_subtraction_finds_the_stored_documents` bounds the
+removal at both ends - it finds the seeded documents, and it does not touch prompt prose.
+
+## [M9.5, fix round 1] What was reworded, on which side, and why that side
+**README, three places.** The BP-014 sentence, the exit-criterion sentence and the step-4
+parenthetical listing the three client gotchas. Each is now a sentence about *why* the prompt exists
+or what insisting on it buys, with the content left in the prompt - which is the division R-76
+asked for and the README had been carrying both halves of.
+
+**Prompt, three places, and these were less obvious.** The right side to change is the one whose
+text is not load-bearing:
+
+- `cover-the-label-space`'s exit-criterion sentence. `DECISIONS.md` is append-only and its `[M9.5]`
+  entry quotes the PRD's criterion while explaining why the prompt states it, so the README fix
+  alone would have left the `DECISIONS.md` collision with nothing to do about it. The prompt now
+  states the same fact - PRD 6's twenty-dataset bar - in different words, which is what a shingle
+  guard asks for and all it asks for. Rewording the prompt was cheaper than exempting the shingle,
+  and an exemption would have stopped the guard noticing a *future* README that restated it.
+- `wire-an-agent`'s code block. It opened with the same two lines as the README's step-4 worked
+  example (`from agentprops_client import compare, connect` and `with connect(...) as props:`). The
+  README's block is a demonstration with real output and stays; the prompt's is instruction, so it
+  now shows a flat call sequence starting at `props = connect(...)` with a following line saying
+  `connect` is a context manager. Better as instruction anyway - less to copy, more explicit.
+- `_CLIENT_GOTCHAS`. Its sentence about where grading happens was verbatim in the README's
+  worked-example commentary, which is also staying, so the prompt's version was rephrased. The
+  gotchas are also named in the README's "Rough edges" list, which the brief says to leave intact -
+  so the guard is now what holds those two apart, and the constant carries a comment saying so.
+
+## [M9.5, fix round 1] The "whatever its status" bug had a second site, and the two prompts must word a miss differently
+`Store.get_blueprint` returns an exact version **whatever its status**. M9.5 fixed that in
+`service/examples.py` and left it at `service/prompts.py::fill_a_dataset`, which called the store
+raw - so an explicit draft version resolved and the prompt said "Author agent-props datasets for
+`X` at `2.0.0` … call `dataset_skeleton` with a complete label set". `dataset_skeleton` refuses that
+version (it resolves through `get_published_blueprint`) and DS-001 rejects the dataset regardless,
+since it requires "an existing *published* blueprint at that exact version".
+
+The tell was inside the same function: the not-found branch already said "no **published**
+blueprint". Two branches of one call contradicting each other about what the prompt is about is the
+docstring/behaviour gap that caught the first instance, one line lower.
+
+**`fill-a-dataset` now resolves through `examples.published_blueprint`.** That function is new, and
+splitting it out of `example_blueprint` was the point rather than a tidy-up: `example_blueprint`
+fills in an agent when given none, which is right for "the example" and wrong here. Routing
+`fill-a-dataset` through the sentinel would have made an empty `agent_id` silently answer about the
+store's example agent - a plausible answer to a question nobody asked, which is the class of defect
+this whole milestone is about. So the status check has one site and the sentinel has one caller, and
+`test_fill_a_dataset_substitutes_no_agent_when_given_none` plus
+`test_published_blueprint_substitutes_no_agent_and_no_status` assert both.
+
+**`cover-the-label-space` keeps the raw lookup**, per the review, because there it *matches the tool
+it mirrors*: `admin.label_vocabulary` reports a draft version's vocabulary quite correctly - it is a
+read with a real answer. Two things changed instead of the call:
+
+- the shared miss wording is now parameterised. `_no_such_blueprint(..., published=)` picks one
+  word, and it has to be picked rather than fixed: `fill-a-dataset`'s miss really is "no *published*
+  version", and claiming that on a path where a draft is a hit contradicts the branch beside it.
+- a **draft caveat** was added to the body. Reporting a draft's vocabulary is correct; telling a
+  caller to add datasets to it without saying that DS-001 will refuse every one is repeating a trap
+  rather than mirroring a tool. `_draft_caveat` names the blocker and the `blueprint_upsert(publish:
+  true)` that clears it, and the coverage list still follows.
+
+Neither prompt had a draft test before this round. Both do now, on both sides of the wording split.
+
+## [M9.5, fix round 1] Three guard weaknesses the review found, each closed with a measurement
+**`test_no_prompt_message_is_an_envelope` asserted nothing.** It `continue`d on a `json.loads`
+failure, and all four prompts serve prose, so its body never executed - it read as coverage and was
+a dormant tripwire. Split in two: a **positive** test that every prompt serves prose rather than a
+JSON object, which is the property today; and the tripwire, whose docstring now says it is dormant
+and what would wake it. This is the fourth vacuous guard in this build and the first found by review
+rather than by running it, which is worse - R-77(e)'s rule would have caught the others too.
+
+**The template coverage guard could be ridden.** A future template broad enough to match a URI
+another test already reads - `agentprops://{a}/{b}` matching `agentprops://examples/blueprint` -
+would have been credited without a test of its own: the mirror image of the prefix hazard the
+per-agent template's segment order was chosen to avoid. The crediting rule is now one function,
+`credits(uri, template, templates)`, and it rejects a URI a **static** resource claims (the manager
+checks concrete resources first and would never route it there) and a URI **more than one** template
+matches (the manager routes it to whichever registered first, leaving the other untested). Unit-
+tested against a hypothetical template passed in as an argument rather than registered on the
+module-level `mcp` instance, which would leak into every other test in the process - with a fourth
+assertion that the rule still credits *something*, since a `credits` that always returned `False`
+would pass the first three and fail every template forever.
+
+Writing that control found a real boundary: `agentprops://catalogue/no-such-thing`, the URI the
+miss test reads, is two segments and routed nowhere, so an over-broad template *would* be credited
+by it. That case is caught by the miss test failing instead - its `pytest.raises(..., "Unknown
+resource")` would stop raising - and the guard's docstring now names the boundary rather than
+implying there is none. Two guards over one property, failing at different moments.
+
+**`test_no_resource_body_is_an_envelope` covered static URIs only.** The template bodies come from
+the same two functions, so the property held by construction - and "by construction" is the kind of
+reasoning this build has repeatedly found to be one refactor out of date. One parametrised assertion.
+
+**One missing case:** `cover-the-label-space` was asserted at zero datasets and at two, never at
+one. The singular path through `_present_tuples` now has a test, asserting the exact tuple line
+rather than a count of bullets - the first version counted `"\n- \`persona="` and matched the empty-
+values list too, which would have passed for the wrong reason.
+
+## [M9.5, fix round 1] Correction: the SDK claim about `resources/list` was overstated
+`server/resources.py` and the README said a live per-document `resources/list` was "not reachable
+through the public API", the only override being `mcp._lowlevel_server`. **That is wrong**, and
+ruling R-77(a) has been corrected too: `MCPServer._handle_list_resources` delegates to the public
+coroutine `self.list_resources()`, so subclassing `MCPServer` and overriding that method serves a
+live list without touching one private attribute. Verified against the installed package rather than
+taken from the ruling.
+
+The decision does not change - index plus templates, no private attribute - but the honest reason is
+**coupling**: it would tie this surface to the shape of an SDK method's contract to save one
+`resources/read`, and ruling R-16 already cost this build a fix round over an SDK detail that moved.
+Both places now record all three routes and say which one is real.
+
+Worth noting the pattern rather than just the correction: this is the second claim in this milestone
+of the form "the library cannot do X" that turned out to be "I did not find how". The first was the
+draft blueprint, where a docstring asserted a status check the code did not make. In both cases the
+claim was about something *outside* the diff, and neither was tested.
+
+## [M9.5, fix round 1] `catalogue()`'s per-agent dataset count is a full read, and stays
+`dataset_count` reads full `DatasetSummary` rows per agent only to `len()` them. The `Store` Protocol
+offers no per-agent count and widening it is a storage-contract change ruling R-76 puts out of scope.
+`service/admin.py::agents` pays exactly the same cost for exactly the same reason, so this is the
+surface's existing shape rather than a new one; the remedy, if it ever matters, is a counting method
+on the Protocol rather than a page size in the catalogue. Recorded in the function's docstring.
+
+## Questions for the owner — M9.5 fix round 1
+1. **Should the shingle guard cover `DECISIONS.md`?** It does, and that found a real fourth
+   collision - and then caught *this entry* quoting its own failure output, which had to be
+   truncated below the window. `DECISIONS.md` is append-only and its job is to quote what was
+   decided, so it will keep generating collisions fixable only on the *prompt* side or by
+   truncating the record. That is the right pressure once and could become perverse if it recurs.
+   The alternatives are exempting that one file, or exempting `.md` files under a recorded prefix;
+   I did neither, because R-78 says "every tracked `.md`" and because both fixes cost one sentence
+   this time. Flagging it because the next fix round may pay it again.
+2. **Is `_draft_caveat` the right answer for `cover-the-label-space`, or should it refuse?** The
+   review ruled "fix the wording, not the call", and it now reports a draft's vocabulary with a line
+   saying DS-001 will refuse the datasets. Refusing outright would diverge from `label_vocabulary`,
+   which the prompt mirrors; reporting without the caveat would hand out unactionable advice. The
+   caveat is the third option and it is mine, not the review's.
+3. **Carried forward, unchanged:** should `resources/list` enumerate one entry per document (now
+   that subclassing is known to be a public route)? Should `contracts.md` document either surface?
+   Should `cover-the-label-space` name missing tuples rather than per-value gaps?
