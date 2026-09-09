@@ -56,14 +56,7 @@ from typing import Final
 
 from agentprops.service.clock import Clock, SystemClock
 from agentprops.service.resolver import StoreResolver
-from agentprops.storage import (
-    MongoStore,
-    SqlStore,
-    Store,
-    create_schema,
-    postgres_url,
-    sqlite_url,
-)
+from agentprops.storage import MongoStore, SqlStore, Store, create_schema, sqlite_url
 from agentprops.validation import Resolver
 
 __all__ = [
@@ -80,9 +73,11 @@ __all__ = [
 _MONGO_PREFIXES: Final = ("mongodb://", "mongodb+srv://")
 
 #: URL prefixes that name a Postgres database. ``postgresql+`` catches an
-#: explicit driver - ``postgresql+psycopg://`` - which
-#: :func:`~agentprops.storage.postgres_url` produces and a caller may also
-#: write by hand.
+#: explicit driver - ``postgresql+psycopg://`` - which a caller may write by
+#: hand. Naming the driver is **not** this function's job:
+#: :func:`~agentprops.storage.create_engine_for` normalises it, because that is
+#: the one place a SQL URL becomes an engine and a second normalisation here is
+#: a second place to forget.
 _POSTGRES_PREFIXES: Final = ("postgresql://", "postgres://", "postgresql+")
 
 #: URL prefixes that name a SQLite database, as opposed to a bare filesystem
@@ -119,7 +114,7 @@ def context_for(target: str, *, clock: Clock | None = None) -> ServiceContext:
     if target.startswith(_MONGO_PREFIXES):
         return mongo_context(target, clock=clock)
     if target.startswith(_POSTGRES_PREFIXES):
-        return context_from_url(postgres_url(target), clock=clock)
+        return context_from_url(target, clock=clock)
     if target.startswith(_SQLITE_PREFIXES):
         return _with_sql_schema(context_from_url(target, clock=clock))
     return sqlite_context(target, clock=clock)

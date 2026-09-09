@@ -13,8 +13,10 @@ the acceptance criterion the ``Store`` Protocol was being tested against.
 How the two container-backed backends behave when there is no container
 -----------------------------------------------------------------------
 
-They **skip, with the reason and the URL in the message**, and they only ever
-run when ``--store`` names them: :data:`conftest.DEFAULT_STORE_BACKENDS` is
+They **skip, with the reason and the URL in the message**, once - the reason is
+remembered in :data:`_UNREACHABLE`, because a session-scoped fixture that skips
+is not cached and an unreachable Postgres otherwise costs one connect attempt
+per test. They only ever run when ``--store`` names them: :data:`conftest.DEFAULT_STORE_BACKENDS` is
 SQLite alone, which is the containerless mode CI uses. A skip that says
 "connect to postgresql://... failed" is a different thing from a silent absence,
 and :mod:`integration.test_backend_selection` is the guard that a selected
@@ -54,7 +56,6 @@ from agentprops.storage import (
     Store,
     create_engine_for,
     create_schema,
-    postgres_url,
     sqlite_url,
 )
 from conftest import (
@@ -73,6 +74,21 @@ __all__ = ["FROZEN_NOW"]
 #: to keep and loses it: the name is **not** taken from the URL's path.
 MONGO_TEST_DATABASE = "agentprops_conformance"
 
+#: The skip reason for a server that has already been shown to be unreachable,
+#: remembered so it is *shown* to be unreachable exactly once per run.
+#:
+#: A session-scoped fixture that calls ``pytest.skip`` is **not** cached -
+#: pytest re-runs it for every test that requests it - so an unreachable
+#: Postgres cost one connect attempt per skipped test. Measured before this
+#: existed: ``--store postgres`` against a dead port took **4 minutes 32
+#: seconds** to report 80 skips, which is close enough to "the suite hung" that
+#: a developer would stop believing the skip. With the reason remembered it is
+#: four seconds.
+#:
+#: A plain module-level dict rather than a fixture, because a fixture cannot
+#: outlive the thing it is caching the failure of.
+_UNREACHABLE: dict[str, str] = {}
+
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     """Parameterise every ``store``-taking test over the selected backends."""
@@ -85,6 +101,22 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         )
 
 
+#: How long the Postgres probe waits before deciding there is no server.
+#:
+#: Passed as a URL parameter, which psycopg honours, because
+#: :func:`~agentprops.storage.create_engine_for` deliberately takes no options -
+#: a store is opened by a URL and nothing else. Five seconds, because the OS
+#: default is not a timeout at all: measured on Windows, a connect to a
+#: *black-holed* localhost port (SYN dropped rather than refused) took **260
+#: seconds** to fail, which turns "there is no Postgres" into "the suite hung".
+#: A refused port answers instantly either way.
+_CONNECT_TIMEOUT_S = 5
+
+
+def _with_connect_timeout(url: str) -> str:
+    return url + ("&" if "?" in url else "?") + f"connect_timeout={_CONNECT_TIMEOUT_S}"
+
+
 @pytest.fixture(scope="session")
 def postgres_engine() -> Iterator[Engine]:
     """One engine for the whole session, or a skip naming the URL that failed.
@@ -95,18 +127,21 @@ def postgres_engine() -> Iterator[Engine]:
     server produces one clear skip reason on every test instead of a
     ``ConnectionRefusedError`` inside whichever assertion happened to run first.
     """
-    url = postgres_url(postgres_test_url())
+    if "postgres" in _UNREACHABLE:
+        pytest.skip(_UNREACHABLE["postgres"])
+    url = _with_connect_timeout(postgres_test_url())
     engine = create_engine_for(url)
     try:
         with engine.connect() as connection:
             connection.exec_driver_sql("SELECT 1")
     except SQLAlchemyError as exc:
         engine.dispose()
-        pytest.skip(
+        _UNREACHABLE["postgres"] = (
             f"no Postgres at {url}: {type(exc).__name__}. Start one with "
             f"`docker compose --profile shared up -d postgres`, or set "
             f"AGENTPROPS_TEST_POSTGRES_URL."
         )
+        pytest.skip(_UNREACHABLE["postgres"])
     try:
         yield engine
     finally:
@@ -116,6 +151,8 @@ def postgres_engine() -> Iterator[Engine]:
 @pytest.fixture(scope="session")
 def mongo_client() -> Iterator[MongoClient[dict[str, Any]]]:
     """One client for the whole session, or a skip naming the URL that failed."""
+    if "mongo" in _UNREACHABLE:
+        pytest.skip(_UNREACHABLE["mongo"])
     url = mongo_test_url()
     client: MongoClient[dict[str, Any]] = MongoClient(
         url, tz_aware=True, uuidRepresentation="standard", serverSelectionTimeoutMS=3000
@@ -124,11 +161,12 @@ def mongo_client() -> Iterator[MongoClient[dict[str, Any]]]:
         client.admin.command("ping")
     except PyMongoError as exc:
         client.close()
-        pytest.skip(
+        _UNREACHABLE["mongo"] = (
             f"no MongoDB at {url}: {type(exc).__name__}. Start one with "
             f"`docker compose --profile local up -d mongo`, or set "
             f"AGENTPROPS_TEST_MONGO_URL."
         )
+        pytest.skip(_UNREACHABLE["mongo"])
     try:
         yield client
     finally:

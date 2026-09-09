@@ -50,6 +50,7 @@ from agentprops.storage import (
     sqlite_url,
 )
 from agentprops.storage.sql import include_object
+from conftest import postgres_test_url
 from integration.conftest import make_run
 
 pytestmark = pytest.mark.integration
@@ -102,7 +103,10 @@ def migrated(request: pytest.FixtureRequest, tmp_path: Path) -> str:
         return url
 
     engine = request.getfixturevalue("postgres_engine")
-    url = str(engine.url.render_as_string(hide_password=False))
+    # The **plain** URL, with no driver named, which is what a compose file and
+    # an environment variable carry - so this exercises the normalisation in
+    # `create_engine_for` that `docker compose --profile shared up` needs.
+    url = postgres_test_url()
     with engine.begin() as connection:
         connection.execute(text("DROP SCHEMA public CASCADE"))
         connection.execute(text("CREATE SCHEMA public"))
@@ -349,3 +353,44 @@ def test_the_migration_is_reversible(migrated: str) -> None:
     finally:
         engine.dispose()
     assert remaining == {"alembic_version"}
+
+
+def test_a_plain_postgres_url_names_the_installed_driver() -> None:
+    """The bug ``docker compose --profile shared up`` found, as a unit-sized test.
+
+    A plain ``postgresql://`` URL selects SQLAlchemy's *default* Postgres
+    driver, which is psycopg2 - not a dependency of this project. The
+    ``shared`` profile hands ``AGENTPROPS_STORE`` straight to
+    ``alembic -x url=...``, so before ``create_engine_for`` normalised the URL,
+    the container started, ran the migration and died on
+    ``ModuleNotFoundError: No module named 'psycopg2'`` - while the service half
+    of the very same URL worked, because ``context_for`` normalised and
+    `migrations/env.py` did not.
+
+    Fixed at the seam rather than at the second caller: ``create_engine_for`` is
+    the one place a SQL URL becomes an engine, so it is the one place that can
+    be the answer for every caller. This asserts it for both spellings, and that
+    an explicitly named driver is left alone - because silently rewriting
+    ``postgresql+asyncpg://`` would be a different bug of the same shape.
+
+    No server needed: ``create_engine`` resolves and imports the DBAPI without
+    connecting, which is exactly the step that was failing.
+    """
+    for plain in ("postgresql://u:p@h/db", "postgres://u:p@h/db"):
+        engine = create_engine_for(plain)
+        try:
+            assert engine.dialect.driver == "psycopg", plain
+        finally:
+            engine.dispose()
+
+    named = create_engine_for("postgresql+psycopg://u:p@h/db")
+    try:
+        assert named.dialect.driver == "psycopg"
+    finally:
+        named.dispose()
+
+    sqlite = create_engine_for(sqlite_url())
+    try:
+        assert sqlite.dialect.name == "sqlite", "a SQLite URL was rewritten"
+    finally:
+        sqlite.dispose()

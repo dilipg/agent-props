@@ -472,7 +472,18 @@ intermittently wrong tool-name resolution with no visible cause.
 
 
 def create_engine_for(url: str) -> Engine:
-    """An engine for ``url``, with SQLite taught to enforce foreign keys.
+    """An engine for ``url``, driver named and SQLite taught to enforce foreign keys.
+
+    **The URL is normalised through :func:`postgres_url` here**, which is the
+    one place a SQL URL becomes an engine - and therefore the one place that
+    fix belongs. It was not, at first: ``context_for`` normalised and
+    `migrations/env.py` did not, so ``docker compose --profile shared up``
+    started, ran ``alembic -x url="postgresql://..."`` and died on
+    ``ModuleNotFoundError: No module named 'psycopg2'`` while the service half
+    of the same URL would have worked. Found by running the compose profile
+    rather than by reasoning about it, and fixed at the seam instead of at the
+    second caller, because the third caller is the one that would have repeated
+    it.
 
     SQLite parses ``REFERENCES`` clauses but ignores them unless
     ``PRAGMA foreign_keys`` is on, per connection. Turning it on is what makes
@@ -485,7 +496,7 @@ def create_engine_for(url: str) -> Engine:
     blueprint before a dataset because that is the honest order, not because
     SQLite forces it.
     """
-    engine = create_engine(url)
+    engine = create_engine(postgres_url(url))
     if engine.dialect.name == "sqlite":
 
         @event.listens_for(engine, "connect")
