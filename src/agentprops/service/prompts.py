@@ -96,10 +96,11 @@ from collections.abc import Mapping
 from math import prod
 from typing import Final
 
-from agentprops.models import DatasetQuery, DatasetSummary
+from agentprops.models import Blueprint, DatasetQuery, DatasetSummary
 from agentprops.service import examples
 from agentprops.service.admin import value_counts
 from agentprops.service.context import ServiceContext
+from agentprops.storage import STATUS_PUBLISHED
 from agentprops.validation import RULE_REGISTRY
 
 __all__ = [
@@ -201,10 +202,22 @@ def fill_a_dataset(
 
     Short by design: ``dataset_skeleton``'s ``instructions`` field carries the
     mechanics, so this carries intent. See the module docstring.
+
+    Resolved through :func:`~agentprops.service.examples.published_blueprint`
+    rather than through ``Store.get_blueprint``, and that is a fix rather than a
+    preference. ``get_blueprint`` returns an exact version "whatever its status",
+    so an explicit **draft** version resolved and this prompt told a caller to
+    author datasets against it - which ``dataset_skeleton`` refuses (it goes
+    through ``get_published_blueprint``) and DS-001 rejects regardless, since it
+    requires "an existing *published* blueprint at that exact version". Worse,
+    the not-found branch of the same call already said "no **published**
+    blueprint", so the two branches contradicted each other about what the
+    prompt was even about. One call site, and the status check lives where the
+    resource surface already made it.
     """
-    blueprint = context.store.get_blueprint(agent_id, version or None)
+    blueprint = examples.published_blueprint(context, agent_id, version)
     if blueprint is None:
-        return _no_such_blueprint(agent_id, version)
+        return _no_such_blueprint(agent_id, version, published=True)
     listed = "\n".join(
         f"{index}. {scenario}" for index, scenario in enumerate(_scenarios(scenarios), start=1)
     )
@@ -229,10 +242,19 @@ def cover_the_label_space(context: ServiceContext, agent_id: str, version: str =
     The one prompt that could not be written as a README paragraph: the values
     with no dataset and the tuples already present are both facts about this
     store at this moment.
+
+    The raw ``get_blueprint`` here is deliberate and is **not** the bug
+    :func:`fill_a_dataset` had. This prompt mirrors ``label_vocabulary``
+    (`service/admin.py`), which reports a *draft* version's vocabulary quite
+    correctly - it is a read, and there is a real answer. What a draft cannot do
+    is receive a dataset (DS-001 needs a published version at that exact
+    version), so the coverage advice would be unactionable without saying why:
+    :func:`_draft_caveat` says it, and the not-found branch no longer claims
+    "published" on a path that does not require it.
     """
     blueprint = context.store.get_blueprint(agent_id, version or None)
     if blueprint is None:
-        return _no_such_blueprint(agent_id, version)
+        return _no_such_blueprint(agent_id, version, published=False)
     dimensions = blueprint.label_schema.dimensions
     rows = context.store.find_datasets(
         DatasetQuery(agent_id=blueprint.agent_id, blueprint_version=blueprint.version)
@@ -240,12 +262,13 @@ def cover_the_label_space(context: ServiceContext, agent_id: str, version: str =
     return (
         f"Add agent-props datasets for `{blueprint.agent_id}` at `{blueprint.version}` until "
         "its declared label space is covered.\n\n"
+        f"{_draft_caveat(blueprint)}"
         f"This store holds {len(rows)} dataset(s) for that version.\n\n"
         f"{_empty_values(dimensions, rows)}\n\n"
         f"{_present_tuples(dimensions, rows)}\n\n"
-        f"{_space_size(dimensions)} The exit criterion is twenty datasets *spanning* the "
-        "declared labels, not one per combination, so prefer a dataset that closes an empty "
-        "value above and whose whole label tuple is not already present.\n\n"
+        f"{_space_size(dimensions)} Twenty datasets that span the declared labels is the bar "
+        "PRD 6 sets, not one dataset per combination - so prefer a dataset that closes an "
+        "empty value above and whose whole label tuple is not already present.\n\n"
         "For each one, follow the `fill-a-dataset` prompt for this agent and version. Report "
         "the labels you chose per dataset, and which of the empty values above are still empty "
         "when you stop."
@@ -305,15 +328,16 @@ def _client_sequence(context: ServiceContext, agent_id: str, endpoint: str) -> s
         )
     labels = ", ".join(f'"{name}": "{value}"' for name, value in dataset.labels.items())
     return (
-        f"Use `agentprops_client`, pointed at `{endpoint}`:\n\n"
+        f"Use `agentprops_client`, pointed at `{endpoint}`. The call order, once per run:\n\n"
         "```python\n"
-        "from agentprops_client import compare, connect\n\n"
-        f'with connect("{endpoint}", agent_id="{dataset.blueprint.agent_id}") as props:\n'
-        f'    start = props.run_start({{"labels": {{{labels}}}}})\n'
-        "    served = props.fetch_step(node_id=...)   # or tool_name=..., iteration=N\n"
-        "    props.record_step(actual, node_id=...)\n"
-        "    props.run_finish(outcome)\n"
+        f'props = connect("{endpoint}", agent_id="{dataset.blueprint.agent_id}")\n'
+        f'start = props.run_start({{"labels": {{{labels}}}}})\n'
+        "served = props.fetch_step(node_id=...)   # or tool_name=..., iteration=N\n"
+        "props.record_step(actual, node_id=...)\n"
+        "props.run_finish(outcome)\n"
         "```\n\n"
+        "`connect` is also a context manager, so a real test should hold it in a `with` block "
+        "rather than leaking the session.\n\n"
         f"Those labels are a real dataset in this store - `{dataset.provenance.title}` - so the "
         "selector pins something rather than reporting no match. A subset of them also selects: "
         "several matches assign the first row and warn."
@@ -323,15 +347,19 @@ def _client_sequence(context: ServiceContext, agent_id: str, endpoint: str) -> s
 #: The three things step 4 said would bite otherwise, plus where grading lives.
 #: Each one is a fact about the client's contract that no tool description
 #: carries, which is why this is a prompt rather than a docstring somewhere.
+#:
+#: Worded so it does **not** share a nine-word run with `README.md` - the
+#: gotchas are named in the "Rough edges" list there too, and ruling R-78's
+#: guard is what now holds the two apart.
 _CLIENT_GOTCHAS = """\
-Three things that will bite otherwise: you must `fetch_step` a node before `record_step`
-can report an actual for it, or you get `AP-004`; warnings on a reply are typed objects,
-so `w.code` and not `w["code"]`; and the run id is generated by the client, so do not
-invent one.
+Three mistakes cost the most time on the way in. A `record_step` for a step you never
+served is `AP-004`, so fetch first. A reply's warnings are objects rather than dicts,
+so reach for `w.code`. And the run id belongs to the client, which generates one at
+construction - do not mint your own.
 
-Then grade in the **test**, not in the agent: `compare.grade(mode, expected, actual)`,
-where `mode` is the dataset's own `expected.comparison`. The service stores the
-expectation and hands back evidence; it never compares.
+Grade in the **test**, never in the agent: `compare.grade(mode, expected, actual)`, with
+`mode` taken from the dataset's own `expected.comparison`. This service holds the
+expectation and returns evidence; the comparison is yours.
 
 Report the seam you introduced, the environment variable that switches it on, and any
 tool call you could not route through `fetch_step`."""
@@ -413,16 +441,45 @@ def _space_size(dimensions: Mapping[str, list[str]]) -> str:
     )
 
 
-def _no_such_blueprint(agent_id: str, version: str) -> str:
+def _draft_caveat(blueprint: Blueprint) -> str:
+    """One line when the resolved version is a draft, and nothing when it is not.
+
+    ``cover-the-label-space`` reports a draft version's vocabulary because
+    ``label_vocabulary`` does, and that is a real answer. But DS-001 requires a
+    dataset to name "an existing *published* blueprint at that exact version",
+    so a caller who acted on the coverage list would get every submit rejected.
+    Naming that is the difference between mirroring the tool and repeating a
+    trap.
+    """
+    if blueprint.status == STATUS_PUBLISHED:
+        return ""
+    return (
+        f"**`{blueprint.version}` is a draft.** `dataset_skeleton` serves published versions "
+        "only and DS-001 requires a published version at that exact version, so publish it "
+        "with `blueprint_upsert(publish: true)` before authoring against it - the coverage "
+        "list below is still the right one to close.\n\n"
+    )
+
+
+def _no_such_blueprint(agent_id: str, version: str, *, published: bool) -> str:
     """What to say when the thing the prompt is about does not exist.
 
     A prompt has no error envelope to return - ``prompts/get`` answers with
     messages - so the honest answer is text that names the miss and the next
     call, rather than a template interpolating an id nothing resolves.
+
+    ``published`` picks one word, and it has to be picked rather than fixed. The
+    two callers resolve differently on purpose: ``fill-a-dataset`` goes through
+    ``examples.published_blueprint``, so its miss really is "no *published*
+    version"; ``cover-the-label-space`` mirrors ``label_vocabulary``'s raw
+    lookup, so a draft is a hit there and claiming "published" would contradict
+    the branch beside it. One sentence saying two different true things was the
+    defect this parameter removes.
     """
     at = f" at version `{version}`" if version else " (no version given, so the latest published)"
+    qualifier = "published " if published else ""
     return (
-        f"There is no published agent-props blueprint for `{agent_id}`{at} in this store, so "
+        f"There is no {qualifier}agent-props blueprint for `{agent_id}`{at} in this store, so "
         "there is nothing to author datasets against yet.\n\n"
         "Call `agent_list` to see which agents and versions this store holds, or run the "
         "`author-a-blueprint` prompt to add one. `resources/list` shows the same thing as "

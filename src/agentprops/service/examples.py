@@ -89,6 +89,7 @@ __all__ = [
     "example_dataset",
     "published",
     "published_agent_ids",
+    "published_blueprint",
 ]
 
 #: The index. Every other URI this store serves is reachable from its body, so
@@ -162,29 +163,42 @@ def example_agent_id(context: ServiceContext) -> str:
     return agents[0] if agents else ""
 
 
-def example_blueprint(context: ServiceContext, agent_id: str, version: str) -> Blueprint | None:
-    """One **published** blueprint, or ``None``.
+def published_blueprint(context: ServiceContext, agent_id: str, version: str) -> Blueprint | None:
+    """The **published** blueprint at that version, or ``None``. No sentinel.
 
-    ``agent_id`` empty means :func:`example_agent_id`; ``version`` empty means
-    the latest published version, which is what ``get_blueprint(agent_id,
-    None)`` already resolves.
+    The one place the status check lives, and it is not redundant - a test
+    caught it being absent. ``Store.get_blueprint`` documents itself as "with
+    ``version``, that exact version **whatever its status**", so a draft at a
+    named version comes back, and two surfaces were handing it out: a resource
+    served it as a canonical example, and ``fill-a-dataset`` told a caller to
+    author datasets against it. Neither is answerable - ``blueprint_get`` is the
+    surface that returns a draft, and DS-001 requires "an existing *published*
+    blueprint at that exact version" before a dataset can name one.
 
-    The explicit ``status`` check is not redundant, and a test caught it being
-    absent. ``Store.get_blueprint`` documents itself as "with ``version``, that
-    exact version **whatever its status**", so a draft at a named version came
-    back and was served as a canonical example. A draft is not a known-good
-    document; ``blueprint_get`` is the surface that returns one, and
-    `test_prompts_contract.py::test_a_draft_version_is_not_served_as_a_resource`
-    asserts both halves so the difference stays a decision rather than becoming
-    an accident again.
+    An empty ``agent_id`` is a miss rather than a substitution. Only
+    :func:`example_blueprint` fills one in, and only because "the example" is
+    what it was asked for; a prompt that was given no agent must not be answered
+    about somebody else's.
+
+    ``version`` empty means the latest published version, which is what
+    ``get_blueprint(agent_id, None)`` already resolves.
     """
-    wanted = agent_id or example_agent_id(context)
-    if not wanted:
+    if not agent_id:
         return None
-    blueprint = context.store.get_blueprint(wanted, version or None)
+    blueprint = context.store.get_blueprint(agent_id, version or None)
     if blueprint is None or blueprint.status != STATUS_PUBLISHED:
         return None
     return blueprint
+
+
+def example_blueprint(context: ServiceContext, agent_id: str, version: str) -> Blueprint | None:
+    """One published blueprint to imitate, or ``None``.
+
+    :func:`published_blueprint` plus the one sentinel this surface needs: an
+    empty ``agent_id`` means :func:`example_agent_id`, because a caller asking
+    for "the example" has asked to be told which one.
+    """
+    return published_blueprint(context, agent_id or example_agent_id(context), version)
 
 
 def example_dataset(context: ServiceContext, agent_id: str) -> Dataset | None:
@@ -267,6 +281,15 @@ def catalogue(context: ServiceContext) -> dict[str, Any]:
     Deliberately does **not** repeat ``store_status``: a backend name and three
     row counts are that tool's answer, and a second copy here would be a second
     place to drift, one layer in. This says only what is addressable.
+
+    **Known cost, accepted.** ``dataset_count`` reads full ``DatasetSummary``
+    rows per agent only to ``len()`` them. The ``Store`` Protocol offers no
+    per-agent count, and widening it is a storage-contract change that ruling
+    R-76 puts out of scope ("no change to a rule, an envelope, or the storage
+    contract"). ``service/admin.py::agents`` pays exactly the same cost for
+    exactly the same reason, so this is the surface's existing shape rather than
+    a new one; the remedy, if it ever matters, is a counting method on the
+    Protocol rather than a page size here.
     """
     agents = [
         {
