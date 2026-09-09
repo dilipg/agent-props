@@ -5881,3 +5881,60 @@ asked. Same move `service/documents.py`'s dumpers made at M9.5, for the same rea
    which is configuration this service does not hold and, for the key half, must not. Add the
    `braintrust.*` attribute overlay anyway and leave the header to `OTEL_EXPORTER_OTLP_HEADERS`, or
    leave the target out?
+
+## [M10, fix round 1] The strict read-only clause the docstrings already promised
+`service/evidence.py`, `server/tools_run.py` and `contracts.md`'s `run_evidence` row all stated
+that the read-only guard asserts the evidence path "reaches no store mutator at all, not even the
+five run writes". **It did not.** The guard intersected the call-graph closure with `WORLD_WRITES`
+(`STORE_MUTATORS - RUN_WRITES`), so `put_run` on `evidence.py` would have passed in silence — and
+`put_run(run.model_copy(update={"external_refs": ...}))` is the cheapest way to do the exact thing
+that module's docstring names as the temptation.
+I wrote the clause during the build and dropped it when trimming scope, without removing the three
+claims that depended on it. The fix is to add the guard, not to soften the text: the claim was
+right and shipped behaviour was always correct — `evidence.py` calls only `get_run`, `get_dataset`
+and `get_blueprint` — but a contract that promises resistance and provides none is worse than one
+that promises nothing, because the next person to want `external_refs` reads the promise.
+Three tests: the strict clause against `STORE_MUTATORS`; a non-vacuity clause naming the three
+reads, since deleting every store call would otherwise satisfy the first; and a transitive control
+that plants `put_run` behind a helper and asserts **both** that the strict set catches it and that
+`WORLD_WRITES` does not. That second assertion is what makes the new clause more than a copy of the
+old one, and it is the finding reproduced as a test.
+**The general lesson, and it is not a new one in this build:** a claim in a docstring is worth
+nothing next to a test of the losing side — and this is that rule turned around. The docstring was
+*true of the code* and false about the guard, which is the harder version to notice, because
+nothing was broken and nothing failed. R-79's corollary applies inside the diff too: a claim about
+a test is a claim no test checks.
+
+## [M10, fix round 1] The R-60 port guard moves out from behind the reachability skip
+`test_the_collector_is_the_one_this_suite_thinks_it_is` asserted `DEFAULT_OTLP_PORT == "4418"` and
+that the URL is not `:4318` — behind `skipif(not REACHABLE)`. So the one gate that always runs, the
+containerless one CI uses, executed neither. An edit putting 4318 back would have passed CI and then
+let clause 1 pass against whatever collector happened to be listening, which is the precise failure
+R-60 exists for.
+Split in two: `test_the_default_port_is_not_otlps_default` needs no collector and is not skipped;
+`test_the_collector_answering_is_the_one_the_export_reaches` keeps the skip and asserts the health
+and traces URLs name one host, which is the half that genuinely requires one.
+Reason worth stating generally: **a guard that only runs when the thing it guards is already
+present is not a guard.** The reachability skip is right for the assertions about a running
+collector and wrong for the assertions about a constant — and putting both behind one marker made
+the second inherit the first's condition silently.
+
+## [M10, fix round 1] `contracts.md` 2.3 no longer advertises an `external_refs` shape nobody serves
+The section 2.3 example showed `{"otel_trace_id": null, "langfuse_run_id": null}`; `run_get` returns
+`{}`. The "stays empty in phase 1" note existed, but on the `run_export` row and in section 4's
+prose — not where the field's shape is documented and not on the row a client reads it from.
+Now `{ }`, with a paragraph beneath saying it is an **open map that is empty today** rather than two
+nullable keys, that `external_refs.get("otel_trace_id")` is the only safe access and the key is
+*absent* rather than null, and why nothing writes it. The `run_get` row says it too.
+This is the same class as M9's envelope finding: a documented example is read as a **type**, and a
+client written against two nullable keys is a client that breaks on the first real value.
+
+## [M10, fix round 1] The report credited the wrong guard for its own best catch
+The main report said the dropped-attribute guard caught the draft's
+`agentprops.path.matches_expected`. It could not have: a `bool` is a legal OTel attribute type and
+would never have been dropped. `test_no_attribute_names_a_verdict` caught it, which is what this
+file said in the first place.
+Corrected in the report, with the commit message on `c506178` noted as carrying the same error.
+Recording it because the attribution *matters*: one of those two guards holds ground rule 2 on the
+wire and the other holds the attribute encoding, and a reader who believed the wrong one could
+delete the one that works.
