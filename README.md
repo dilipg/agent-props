@@ -112,11 +112,11 @@ call("run_finish", run_id=run_id, outcome={"onboarding_status": "complete"}, sta
 
 `record_step` addresses a step exactly as `fetch_step` does and keys on the resolved node, so a
 step fetched by tool name can be recorded by node id. It is **write-once** per step, and a repeat
-splits by whether the value differs (ruling R-65): the identical `actual` again is a no-op success
-carrying `step_actual_already_recorded`, so a retry after a network blip is safe and visible, while
-a *different* one is `AP-007` and **nothing is written**. An actual for a step that was never
-fetched is `AP-004`. `run_finish` is the same shape — the first close wins, an identical repeat
-warns with `run_already_finished`, a divergent one is `AP-007`.
+splits by whether the value differs (ruling R-65): the identical `actual` again is a **silent** no-op
+success, so a retry after a network blip is safe and reports nothing, while a *different* one is
+`AP-007` and **nothing is written**. An actual for a step that was never fetched is `AP-004`.
+`run_finish` is the same shape — the first close wins, an identical repeat is silent, a divergent
+one is `AP-007`.
 
 A refused **write** is `ok: false`; refusing to **serve** is what ground rule 3 forbids, and a
 closed run still serves `fetch_step` (with `run_already_finished`) because the fixtures are pinned

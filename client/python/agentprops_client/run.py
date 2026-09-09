@@ -181,8 +181,8 @@ class Recorded:
     sent: a ``record_step`` that met a *differing* recorded value never produces
     a :class:`Recorded` at all - it is ``AP-007`` and raises
     :class:`~agentprops_client.envelope.ToolError` (ruling R-65). An
-    **identical** repeat does produce one, with
-    ``step_actual_already_recorded`` on :attr:`warnings`.
+    **identical** repeat does produce one, silently, because a retry is meant to
+    be indistinguishable from the call it retries.
     """
 
     step: Mapping[str, Any]
@@ -364,10 +364,9 @@ class RunClient:
     ) -> Recorded:
         """What the agent produced at one step. Write-once per resolved key.
 
-        An identical re-record returns normally with
-        ``step_actual_already_recorded`` on the result; a *differing* one raises
-        ``ToolError`` carrying ``AP-007``, because that write did not happen
-        (ruling R-65).
+        An identical re-record returns normally and reports nothing; a *differing*
+        one raises ``ToolError`` carrying ``AP-007``, because that write did not
+        happen (ruling R-65).
         """
         return _Responses.record(
             self.call(
@@ -381,9 +380,8 @@ class RunClient:
     ) -> Mapping[str, Any]:
         """Close the run with the outcome the agent produced. The first close wins.
 
-        An identical re-finish returns the stored run with
-        ``run_already_finished`` on the envelope; a *differing* one raises
-        ``ToolError`` carrying ``AP-007`` (ruling R-65).
+        An identical re-finish returns the stored run and reports nothing; a
+        *differing* one raises ``ToolError`` carrying ``AP-007`` (ruling R-65).
         """
         return _Responses.finish(
             self.call("run_finish", **_Requests.finish(self.run_id, outcome, status))
@@ -454,10 +452,9 @@ class AsyncRunClient:
     ) -> Recorded:
         """What the agent produced at one step. Write-once per resolved key.
 
-        An identical re-record returns normally with
-        ``step_actual_already_recorded`` on the result; a *differing* one raises
-        ``ToolError`` carrying ``AP-007``, because that write did not happen
-        (ruling R-65).
+        An identical re-record returns normally and reports nothing; a *differing*
+        one raises ``ToolError`` carrying ``AP-007``, because that write did not
+        happen (ruling R-65).
         """
         return _Responses.record(
             await self.call(
@@ -471,9 +468,8 @@ class AsyncRunClient:
     ) -> Mapping[str, Any]:
         """Close the run with the outcome the agent produced. The first close wins.
 
-        An identical re-finish returns the stored run with
-        ``run_already_finished`` on the envelope; a *differing* one raises
-        ``ToolError`` carrying ``AP-007`` (ruling R-65).
+        An identical re-finish returns the stored run and reports nothing; a
+        *differing* one raises ``ToolError`` carrying ``AP-007`` (ruling R-65).
         """
         return _Responses.finish(
             await self.call("run_finish", **_Requests.finish(self.run_id, outcome, status))

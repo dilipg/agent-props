@@ -67,10 +67,10 @@ successful result, because the service never gates on the read path and neither 
 
 A **write** is different, and the difference is worth knowing before you write a retry loop.
 `record_step` and `run_finish` are write-once, so a repeat splits two ways: sending the *same*
-value again returns normally with `step_actual_already_recorded` or `run_already_finished` on the
-result, and sending a *different* one raises `ToolError` carrying `AP-007` — nothing was written,
-and the recorded value is still the first one. So a retry is always safe; only a genuine
-disagreement is an error.
+value again returns normally and reports nothing — a retry is meant to be indistinguishable from
+the call it retries — and sending a *different* one raises `ToolError` carrying `AP-007`, with
+nothing written and the recorded value still the first one. So a retry is always safe; only a
+genuine disagreement is an error.
 
 `client.call("dataset_submit", skeleton_id=...)` reaches any tool and returns the parsed envelope
 without raising, which is how you inspect a rejection as data.
