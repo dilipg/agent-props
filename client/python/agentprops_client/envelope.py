@@ -145,15 +145,27 @@ class ToolError(Exception):
 
 
 def read_envelope(payload: Mapping[str, Any] | None) -> Envelope:
-    """Parse one tool response. Tolerant of the fields it does not need.
+    """Parse one tool response. Strict about the envelope, tolerant inside it.
 
-    Deliberately structural rather than strict: contracts section 1 fixes the
-    two shapes, and a client that rejected an envelope carrying a *new* optional
-    field would break on a server one version ahead of it. What it does insist
-    on is that ``ok`` is a boolean and that the response is one of the two
-    shapes - anything else means the transport handed back something that is not
-    an agent-props response at all, and saying so immediately is better than a
-    ``KeyError`` three frames later.
+    **The tolerance is real only *inside* ``data``, ``warnings`` and
+    ``errors``**, and that distinction matters enough to state precisely,
+    because the looser claim would be false: a finding carrying a field this
+    client has never heard of is read for the fields it knows and the rest is
+    dropped, and a payload under a named key is handed over whole. But an
+    unknown **top-level** key is rejected, and
+    `tests/unit/test_client_run.py::test_a_protocol_level_error_is_not_mistaken_for_a_failure_envelope`
+    pins that.
+
+    Which is the right way round. contracts section 1 fixes the envelope at two
+    shapes and every tool in this product answers one of them, so a third
+    top-level key means the transport handed back something that is not an
+    agent-props response - and saying so immediately beats a ``KeyError`` three
+    frames later. The *contents* are where a server one version ahead of this
+    client legitimately adds a field, so that is where nothing is rejected.
+
+    The cost, stated: a future envelope-level addition needs this client
+    updated, rather than being ignored. That is a deliberate trade and not an
+    oversight - the alternative accepts a response from anything.
     """
     if payload is None:
         raise ValueError("the tool returned no structured content")

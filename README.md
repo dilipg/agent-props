@@ -110,12 +110,16 @@ call("run_finish", run_id=run_id, outcome={"onboarding_status": "complete"}, sta
 ```
 
 `record_step` addresses a step exactly as `fetch_step` does and keys on the resolved node, so a
-step fetched by tool name can be recorded by node id. It is write-once per step: the identical
-`actual` again is a no-op, a *different* one keeps the recorded value and warns with
-`step_actual_conflict`, and an actual for a step that was never fetched is `AP-004`. `run_finish`
-is the same shape — the first close wins, a divergent second one warns with `run_finish_mismatch`
-— and a closed run **still serves** `fetch_step`, with a `run_already_finished` warning, because
-the fixtures are pinned and immutable and nothing here refuses.
+step fetched by tool name can be recorded by node id. It is **write-once** per step, and a repeat
+splits by whether the value differs (ruling R-65): the identical `actual` again is a no-op success
+carrying `step_actual_already_recorded`, so a retry after a network blip is safe and visible, while
+a *different* one is `AP-007` and **nothing is written**. An actual for a step that was never
+fetched is `AP-004`. `run_finish` is the same shape — the first close wins, an identical repeat
+warns with `run_already_finished`, a divergent one is `AP-007`.
+
+A refused **write** is `ok: false`; refusing to **serve** is what ground rule 3 forbids, and a
+closed run still serves `fetch_step` (with `run_already_finished`) because the fixtures are pinned
+and immutable.
 
 Neither of them grades. `actual` and `outcome` are stored verbatim, checked against neither
 `expected.final` nor any schema, because comparison lives in the client.

@@ -63,7 +63,14 @@ with connect("http://localhost:8000/mcp", agent_id="location-onboarding") as cli
 A tool that answers `{"ok": false, "errors": [...]}` becomes a `ToolError` carrying every
 finding — read `rule` and `pointer`, never `message`. **Warnings never raise**: a `pool_exhausted`
 draw, an archived dataset, a version mismatch and a closed run all arrive as `warnings` on a
-successful result, because the service never gates and neither does this client.
+successful result, because the service never gates on the read path and neither does this client.
+
+A **write** is different, and the difference is worth knowing before you write a retry loop.
+`record_step` and `run_finish` are write-once, so a repeat splits two ways: sending the *same*
+value again returns normally with `step_actual_already_recorded` or `run_already_finished` on the
+result, and sending a *different* one raises `ToolError` carrying `AP-007` — nothing was written,
+and the recorded value is still the first one. So a retry is always safe; only a genuine
+disagreement is an error.
 
 `client.call("dataset_submit", skeleton_id=...)` reaches any tool and returns the parsed envelope
 without raising, which is how you inspect a rejection as data.

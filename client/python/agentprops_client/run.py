@@ -177,9 +177,12 @@ class Step:
 class Recorded:
     """The stored step after ``record_step``, and which node it landed on.
 
-    ``step["actual"]`` is the **stored** actual, which on a conflict is the one
-    recorded first rather than the one just sent - see
-    ``step_actual_conflict`` in contracts 3.4.
+    ``step["actual"]`` is the **stored** actual, and it is the one this call
+    sent: a ``record_step`` that met a *differing* recorded value never produces
+    a :class:`Recorded` at all - it is ``AP-007`` and raises
+    :class:`~agentprops_client.envelope.ToolError` (ruling R-65). An
+    **identical** repeat does produce one, with
+    ``step_actual_already_recorded`` on :attr:`warnings`.
     """
 
     step: Mapping[str, Any]
@@ -359,7 +362,13 @@ class RunClient:
         tool_name: str | None = None,
         iteration: int | None = None,
     ) -> Recorded:
-        """What the agent produced at one step. Write-once per resolved key."""
+        """What the agent produced at one step. Write-once per resolved key.
+
+        An identical re-record returns normally with
+        ``step_actual_already_recorded`` on the result; a *differing* one raises
+        ``ToolError`` carrying ``AP-007``, because that write did not happen
+        (ruling R-65).
+        """
         return _Responses.record(
             self.call(
                 "record_step",
@@ -370,7 +379,12 @@ class RunClient:
     def run_finish(
         self, outcome: Mapping[str, Any], *, status: str = STATUS_FINISHED
     ) -> Mapping[str, Any]:
-        """Close the run with the outcome the agent produced. The first close wins."""
+        """Close the run with the outcome the agent produced. The first close wins.
+
+        An identical re-finish returns the stored run with
+        ``run_already_finished`` on the envelope; a *differing* one raises
+        ``ToolError`` carrying ``AP-007`` (ruling R-65).
+        """
         return _Responses.finish(
             self.call("run_finish", **_Requests.finish(self.run_id, outcome, status))
         )
@@ -438,7 +452,13 @@ class AsyncRunClient:
         tool_name: str | None = None,
         iteration: int | None = None,
     ) -> Recorded:
-        """What the agent produced at one step. Write-once per resolved key."""
+        """What the agent produced at one step. Write-once per resolved key.
+
+        An identical re-record returns normally with
+        ``step_actual_already_recorded`` on the result; a *differing* one raises
+        ``ToolError`` carrying ``AP-007``, because that write did not happen
+        (ruling R-65).
+        """
         return _Responses.record(
             await self.call(
                 "record_step",
@@ -449,7 +469,12 @@ class AsyncRunClient:
     async def run_finish(
         self, outcome: Mapping[str, Any], *, status: str = STATUS_FINISHED
     ) -> Mapping[str, Any]:
-        """Close the run with the outcome the agent produced. The first close wins."""
+        """Close the run with the outcome the agent produced. The first close wins.
+
+        An identical re-finish returns the stored run with
+        ``run_already_finished`` on the envelope; a *differing* one raises
+        ``ToolError`` carrying ``AP-007`` (ruling R-65).
+        """
         return _Responses.finish(
             await self.call("run_finish", **_Requests.finish(self.run_id, outcome, status))
         )

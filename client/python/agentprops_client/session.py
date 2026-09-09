@@ -92,8 +92,14 @@ def connect(target: Any, *, agent_id: str, run_id: str | None = None) -> Iterato
     """A :class:`RunClient` over an MCP session held open on a worker thread.
 
     One session for the whole block, not one per call - see the module docstring
-    for why the portal is what makes that safe. The portal and the session are
-    closed on the way out, in that order, by the same task that opened them.
+    for why the portal is what makes that safe.
+
+    The ``with`` below closes them in the order that matters: the **session
+    first**, then the portal. The session's ``__aexit__`` has to run *on* the
+    portal's loop and in the task that entered it, so a portal already stopped
+    would have nowhere to run it - which is exactly the failure this whole
+    arrangement exists to avoid, and why the two are one ``with`` rather than
+    two.
     """
     with (
         start_blocking_portal() as portal,
