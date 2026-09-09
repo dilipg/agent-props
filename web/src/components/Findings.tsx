@@ -32,15 +32,10 @@ export function Findings({
           data-testid="finding"
           data-rule={finding.rule}
           data-pointer={finding.pointer}
+          data-severity={finding.severity}
           className="flex gap-3 px-3 py-2 text-xs"
         >
-          <code
-            className={
-              finding.rule === SHAPE_RULE
-                ? "shrink-0 rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-900"
-                : "shrink-0 rounded bg-red-100 px-1.5 py-0.5 font-semibold text-red-900"
-            }
-          >
+          <code className={`shrink-0 rounded px-1.5 py-0.5 font-semibold ${chip(finding)}`}>
             {finding.rule}
           </code>
           <span className="min-w-0 flex-1">
@@ -56,7 +51,34 @@ export function Findings({
   );
 }
 
-/** Warnings on a successful response. They never block anything. */
+/**
+ * Three chip colours, because severity is the thing a reviewer must not
+ * misread: a `warning` is savable and an `error` is not.
+ *
+ * `SHAPE` is distinguished from a catalogue id as well, so a reviewer can tell
+ * "this does not match the emitted schema" from "a rule fired" at a glance.
+ */
+function chip(finding: RuleError): string {
+  if (finding.severity === "warning") {
+    return "bg-amber-100 text-amber-900";
+  }
+  return finding.rule === SHAPE_RULE ? "bg-orange-100 text-orange-900" : "bg-red-100 text-red-900";
+}
+
+/**
+ * Warnings on a successful response. They never block anything.
+ *
+ * The shape is `{code, detail}`, matching `models/errors.py::Warning`. It is
+ * not `{code, message}`: this component read a `message` that no response
+ * carries until the R-72 fix round, and nothing failed — because nothing
+ * imported it. Ground rule 3 makes warnings the only channel for a policy
+ * problem, so an unreachable renderer for them was the mechanism going
+ * unrendered, not a spare part.
+ *
+ * `detail` is rendered as JSON rather than prose because it has no fixed keys —
+ * `dataset_archived` carries `{dataset_id, version}`, and a future code will
+ * carry something else.
+ */
 export function Warnings({
   warnings,
 }: {
@@ -70,13 +92,16 @@ export function Warnings({
       {warnings.map((warning, index) => (
         <li
           key={`${warning.code}:${String(index)}`}
+          data-testid="warning"
           data-warning={warning.code}
           className="flex gap-3 px-3 py-2 text-xs"
         >
           <code className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-amber-900">
             {warning.code}
           </code>
-          <span className="text-slate-700">{warning.message}</span>
+          <span className="font-mono text-[11px] text-slate-500">
+            {JSON.stringify(warning.detail)}
+          </span>
         </li>
       ))}
     </ul>
