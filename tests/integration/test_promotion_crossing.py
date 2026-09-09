@@ -37,13 +37,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 import pytest
 from pymongo import MongoClient
 from sqlalchemy import Engine
 
 from agentprops.models import Blueprint, Dataset, DatasetQuery
-from agentprops.service import FrozenClock, ServiceContext, promotion, sqlite_context
+from agentprops.service import FrozenClock, ServiceContext, expansion, promotion, sqlite_context
 from agentprops.service.promotion import BUNDLE_FORMAT, BUNDLE_FORMAT_VERSION
 from agentprops.storage import METADATA, MongoStore, SqlStore, Store
 from integration.conftest import MONGO_TEST_DATABASE
@@ -51,6 +52,9 @@ from integration.conftest import MONGO_TEST_DATABASE
 pytestmark = pytest.mark.integration
 
 AGENT = "location-onboarding"
+
+#: `priya-missing-docs`, whose pool node has room for exactly one more entry.
+PRIYA_ID = UUID("3f8c1a20-0000-4000-8000-000000000001")
 
 #: The two backends `docker-compose.yml` calls "shared" or "local" - which is
 #: to say, everything that is not the SQLite file the export came from.
@@ -190,10 +194,11 @@ def test_a_re_export_from_the_shared_store_is_the_same_bundle(
     (``created_at``, ``id``), the blueprint ordering (semver), and the bundle
     key order. Any one of them varying per backend shows up here as a diff.
 
-    It also pins the one thing that *could* legitimately have differed and does
-    not: the version numbers. ``put_dataset`` allocates them, so an import into
-    an empty store re-derives ``version: 1`` - the same value the export
-    carried.
+    The version numbers come back the same here, and that is a **property of
+    this setup rather than of the bundle**: both golden datasets are at version
+    1, so an import into an empty store re-derives 1.
+    :func:`test_a_version_number_does_not_travel_but_created_at_does` is the
+    other side of that boundary, and it is the general rule.
     """
     bundle = _bundle(local)
     assert promotion.import_bundle(shared, bundle).ok
@@ -270,3 +275,45 @@ def test_a_refused_import_publishes_no_blueprint(
     assert shared.store.get_blueprint(AGENT, "1.0.0") is None, (
         "a refused import published a blueprint version, which BP-016 makes permanent"
     )
+
+
+def test_a_version_number_does_not_travel_but_created_at_does(
+    local: ServiceContext, shared: ServiceContext
+) -> None:
+    """The other end of the boundary the byte-identical re-export sits on.
+
+    A version number is a store's own bookkeeping about its own edit history and
+    **cannot** travel: the receiving store may already hold versions of the same
+    lineage, and ``put_dataset`` allocates. So a dataset exported at version 2
+    arrives at version 1 in an empty store, and this asserts that rather than
+    leaving it as a sentence in a docstring - which is where it was until a
+    container run produced ``[2] -> [1]`` and made the point.
+
+    ``created_at`` is the opposite and that asymmetry is the whole of ruling
+    R-09: it comes from ``provenance.created_at``, it is authored content, and
+    it survives - which is why ``datasets.created_at`` has no ``DEFAULT now()``
+    and why ``dataset_find``'s ordering is identical on both sides of the
+    crossing.
+    """
+    expanded = expansion.expand(local, str(PRIYA_ID), "request_docs", 1)
+    assert expanded.ok, expanded
+    document = expanded.model_dump(mode="json")["data"]["dataset"]
+    assert document["version"] == 2
+
+    bundle = _bundle(local)
+    exported = next(item for item in bundle["datasets"] if item["id"] == str(PRIYA_ID))
+    assert exported["version"] == 2, "the export did not carry the latest version"
+
+    assert promotion.import_bundle(shared, bundle).ok
+    arrived = shared.store.get_dataset(str(PRIYA_ID), None)
+    assert arrived is not None
+    assert arrived.version == 1, "a version number travelled"
+    assert arrived.provenance.created_at == document_created_at(exported), (
+        "created_at did not survive the crossing, which is what ruling R-09 is for"
+    )
+    assert len(arrived.pools["request_docs"]) == 3, "the expanded pool did not travel"
+
+
+def document_created_at(document: dict[str, Any]) -> datetime:
+    """``provenance.created_at`` off a raw document, parsed."""
+    return datetime.fromisoformat(document["provenance"]["created_at"])
