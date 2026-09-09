@@ -1514,6 +1514,59 @@ pass by fabricating the state it exists to verify.
 
 **Cost if wrong.** A documented reset step before running the check.
 
+### R-62 — `build-handoff.md` line 290 names the subject, not a cap
+
+The handoff says property-based testing "is worth it in exactly one place: the seeded
+expansion". M7's report claimed conformance with that by asserting five property tests in
+`test_seeded.py`; the tree has eight across three files, the extras being two in
+`test_mongo_key_codec.py`. The report contradicted itself from the day it was written —
+section 2 said one place, section 4 described the codec's property tests.
+
+**Ruling.** The sentence **names the subject that most needs property testing**; it is not a
+ceiling on the technique. Its evident purpose is "do not sprinkle `hypothesis` everywhere —
+the place it really pays is seeded expansion", which is advice about where the value is
+concentrated, not a prohibition.
+
+The Mongo key codec's property tests are **ratified and are exactly what the technique is
+for**: round-trip *and injectivity* over an alphabet built from the escape characters
+themselves. An escaping scheme is a function that must be reversible and collision-free over
+an infinite input space — no table of examples establishes that, and the codec is what stands
+between a dotted section id and a silently mangled `Skeleton.parts`.
+
+Correct the report's section 2 to match its own section 4 rather than deleting the tests.
+
+**Cost if wrong.** Two test files' worth of property tests to remove; the guarantees they
+establish would then rest on examples.
+
+### R-63 — the test database gets a per-session name
+
+M7 found that two concurrent suite runs against one shared server destroy each other: the
+`store` fixture drops the database per test and has no between-run isolation. The implementer
+hit it while measuring and, in its own words, **"nearly reported a 14-failure Mongo run as
+real"**.
+
+**Ruling.** Fix it structurally with a per-session unique database name, rather than
+documenting "one pytest process at a time".
+
+This is R-60's lesson applied the same day it was ruled. R-60 exists because a *documented*
+convention about which server to talk to was violated three times — twice by the implementer,
+once by me. F2.4 is the identical shape one layer in: a documented convention about how many
+processes may run, whose violation produces **a plausible-looking failure count rather than
+an obvious error**. That is worse than the wrong-server case, which at least produced
+suspiciously *passing* results.
+
+Three reproduction preconditions were about to be left documented-but-unenforced — clean
+database (R-61), one process (F2.4), the URL beside any backend count (R-60). R-60 already
+converted one into structure. Convert this one too; R-61's is inherent to a fixture that owns
+its schema and stays documented.
+
+Yes, this edits the fixture that owns the destructive reset. That fixture is exactly the
+thing whose blast radius is currently unbounded, so it is the right place to bound it.
+
+**Cost if wrong.** A session-scoped suffix leaves stray databases if a run is killed
+mid-suite; a dropped-on-session-exit cleanup plus a documented sweep covers it, and a stray
+*named* database is far easier to reason about than two runs racing in one.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
