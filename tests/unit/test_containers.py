@@ -146,7 +146,11 @@ def test_each_profile_points_at_the_backend_it_is_for(
     dispatch's own prefix tuples, so a change to either side has to be a change
     to both.
     """
-    url = service_for(profile)["environment"][STORE_ENV_VAR]
+    environment = service_for(profile)["environment"]
+    assert STORE_ENV_VAR in environment, (
+        f"the {profile} service sets no {STORE_ENV_VAR}; it has {sorted(environment)}"
+    )
+    url = environment[STORE_ENV_VAR]
     assert url.startswith(prefixes), f"the {profile} store URL {url!r} dispatches elsewhere"
 
 
