@@ -35,12 +35,20 @@ Mongo adapters in `src/agentprops/storage/`, `Dockerfile` and `docker-compose.ym
 — alongside its two server-side writes, `record_step` and `run_finish`, and the M9 web app in
 `web/`: a React 18 + Vite + TypeScript app that browses agents, blueprints and datasets, edits
 both documents in `vanilla-jsoneditor` against the emitted JSON Schemas, and draws a blueprint's
-graph read-only with React Flow. **Twenty-five tools, three backends, two packages, one web app.**
-`export/` is an empty module waiting on M10.
+graph read-only with React Flow, and the M9.5 prompt and resource surfaces — four registered
+MCP prompts in `src/agentprops/server/prompts.py`, composed against the store in
+`src/agentprops/service/prompts.py`, plus the canonical examples read *from the store* in
+`src/agentprops/service/examples.py`. **Twenty-five tools, four prompts, five resources, three
+backends, two packages, one web app.** `export/` is an empty module waiting on M10.
+
+M9.5 is an additive milestone between M9 and M10, approved by the owner and recorded as ruling
+R-76: the server advertised the `prompts` and `resources` capabilities from M4 and registered
+neither, so the workflow instructions lived only in this README.
 
 Not yet built: the evidence bundle (M10), which is where phase 1 ends — ruling R-68 descopes M11,
 the TypeScript client, by owner decision. `tests/unit/test_tool_surface.py` lists exactly which
-documented tools are still deferred, and to which milestone.
+documented tools are still deferred, and to which milestone;
+`tests/unit/test_prompt_and_resource_surface.py` does the equivalent for the other two surfaces.
 
 ## Use it against your own agent repo
 
@@ -86,88 +94,45 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 
 ### 2. Have Claude author the blueprint
 
-Restart Claude Code in your agent repo so it picks up the server. This step needs the
-longest prompt, because — unlike dataset filling — **nothing in the tool surface tells
-Claude the blueprint shape up front.** There is no `blueprint_skeleton`. Paste this:
+Restart Claude Code in your agent repo so it picks up the server, then run the registered
+prompt **`author-a-blueprint`**. It appears in `prompts/list`, which Claude Code surfaces as a
+slash command under the server's name; it takes an optional `agent_id` — a published blueprint
+to imitate — and picks one out of your store when you omit it.
 
-> Read this repository's agent and author an agent-props blueprint for it, using the
-> `agent-props` MCP tools.
->
-> First orient yourself on a known-good example rather than guessing the shape: call
-> `agent_list`, then `blueprint_get` for `location-onboarding` at `1.0.0`. Copy its
-> structure, not its content.
->
-> Then model *this* repo's agent:
->
-> - **One node per step the agent actually takes.** Set `tool_name` to the tool it really
->   calls, verbatim. Set `kind` to `tool_call`, `decision`, `loop` or `terminal`.
-> - **`entry_node`** is the step that starts a run, and it must have no inbound edges.
-> - **Edges** carry a JSONLogic `condition` for every branch out of a `decision`. Every
->   `{"var": "..."}` path must name a property the source node's `output_schema` actually
->   declares — that is checked, and it is the rule most blueprints fail first.
-> - **Retry loops** get `kind: loop`, an integer `max_iterations`, and `pool: true`. Every
->   cycle in the graph must pass through a loop node.
-> - **At least one `kind: terminal` node**, with no outbound edges.
-> - **`entities`**: one per domain noun that persists across steps — the thing the agent
->   reads at step 2 and reads again at step 5. Give each a Draft 2020-12 JSON Schema, and
->   reference them from node schemas as `{"$ref": "entity:<id>"}`.
-> - **`input_schema` and `output_schema`** per node, Draft 2020-12.
-> - **`outcome_schema`**: the shape of a finished run's result.
-> - **`label_schema`**: the dimensions I would filter datasets by — persona, scenario,
->   tier, outcome, plus an `edge_case` dimension whose vocabulary includes `none`. Every
->   dimension needs at least one value, and a dataset must later carry a value for *every*
->   dimension — so keep the set small and give each an explicit not-applicable value.
-> - **`notes`** on each node: what the step does and what a realistic fixture looks like.
->   Absent notes are a warning, and they make generated data worse.
->
-> Then loop: call `blueprint_validate` and fix **every** rule id it reports. Do not call
-> `blueprint_upsert` until `blueprint_validate` returns no `error`-severity findings. Then
-> `blueprint_upsert` with `publish: true`.
->
-> Report the final node and edge count, and any `BP-019` warnings you chose to leave.
+**That prompt is the source of truth for the blueprint shape, and this README deliberately
+does not restate it.** It carries the whole node / edge / entity / label contract, because —
+unlike dataset filling — **nothing in the tool surface tells Claude the blueprint shape up
+front.** There is no `blueprint_skeleton`, so if the contract is not in the prompt it is
+nowhere a caller can reach over MCP. The text lives in
+[`src/agentprops/service/prompts.py`](src/agentprops/service/prompts.py) and is composed
+against your store, so the example it tells Claude to imitate is one you actually have — and
+when you have none it says so instead of naming an id that does not resolve.
 
-Insist on that validate loop. Nineteen `BP-*` rules catch an unreachable node, a cycle with
-no loop node, a `var` path no output schema declares, and — the important one — **BP-014**:
-two nodes sharing a `tool_name` where position cannot disambiguate them. That is the mistake
-that makes an agent untestable, because `fetch_step` then cannot tell which step you mean,
-and it is far cheaper to hear now than at the first run.
+Insist on the validate loop the prompt asks for. The `BP-*` rules catch an unreachable node, a
+cycle with no loop node, a `var` path no output schema declares, and — the important one —
+**BP-014**: two nodes sharing a `tool_name` where position cannot disambiguate them. That is
+the mistake that makes an agent untestable, because `fetch_step` then cannot tell which step
+you mean, and it is far cheaper to hear now than at the first run.
 
 ### 3. Have Claude fill datasets
 
-This prompt is **short on purpose.** `dataset_skeleton` returns an `instructions` field
-that already explains fill order, SK-002, re-fill-as-repair, and the exact content shape
-each section takes — so the prompt only supplies *intent*, not mechanics:
+Two registered prompts here. **`fill-a-dataset`** takes `agent_id`, an optional `version` and
+your scenarios one per line, and it is **short on purpose**: `dataset_skeleton` returns an
+`instructions` field that already explains fill order, SK-002, re-fill-as-repair and the exact
+content shape each section takes, so the prompt supplies *intent* and nothing else. That is not
+a claim about restraint —
+[`tests/unit/test_prompts_contract.py`](tests/unit/test_prompts_contract.py) diffs the prompt
+against the live `instructions` text and fails if it starts repeating it.
 
-> Author agent-props datasets for `<agent_id>` at `<version>`, one per scenario below.
->
-> Before starting, call `label_vocabulary` to see the dimensions and values this blueprint
-> declares, and `dataset_find` then `dataset_get` on an existing dataset to see what a
-> filled one looks like.
->
-> For each scenario: call `dataset_skeleton` with a complete label set and a seed, **read
-> the `instructions` field it returns and follow it**, fill each section with
-> `dataset_fill_part`, then call `dataset_submit`.
->
-> Two fields people get wrong, so be deliberate. **`narrative`** is what happens in the
-> world — the story the agent walks through. **`intent`** is why this dataset exists in the
-> test suite: what behaviour it pins down, what bug prompted it, what would go untested if
-> it were deleted. They must not be the same text, and a reviewer reads the second one.
->
-> If `dataset_submit` reports rule ids, each error carries the section it belongs to —
-> re-fill only that section and submit again. Do not regenerate the whole dataset.
->
-> Scenarios to cover:
-> 1. the happy path, no edge cases
-> 2. the retry loop firing exactly once
-> 3. the escalation or failure branch
-> 4. …
->
-> Report each dataset's title, its labels, and any warnings the submit returned.
+The section scoping is what makes filling cheap: a rejection names the one section to redo.
 
-The section scoping is what makes this cheap: a rejection names the one section to redo.
-And ask for the label space to be **covered** rather than for a dataset count — the PRD's
-exit criterion is twenty datasets spanning the declared labels, and `label_vocabulary`
-returns per-value counts, so Claude can see which combinations are still empty.
+**`cover-the-label-space`** is the prompt that could not have been a README paragraph. Given
+`agent_id` and an optional `version` it reads `label_vocabulary` against *your* store and names
+every declared label value that carries **no** dataset, plus the label combinations already
+present and how many datasets carry each. Ask for the label space to be **covered** rather than
+for a dataset count — the PRD's exit criterion is twenty datasets spanning the declared labels,
+not one per combination, and the prompt states the cross-product's size rather than enumerating
+a list nobody could finish.
 
 ### 4. Point your agent at the fixtures
 
@@ -188,30 +153,15 @@ uv sync
 The client does **not** pull in the service package — `importlib.util.find_spec("agentprops")`
 is `None` in a consumer project, which is the separation ground rule 2 requires.
 
-Start the service over HTTP (`--transport http --port 8000`), then have Claude rewire the
-agent. This is ordinary code editing, so the prompt is mostly about *where the seam goes*:
-
-> Add an agent-props fixture mode to this agent, for tests.
->
-> Read `<your agent's entry point>` and find every outbound tool call. Introduce a **single
-> seam** — one injected client, or one module-level indirection — so that in fixture mode
-> each of those calls is replaced by `props.fetch_step(...)` and nothing else changes. Do
-> not scatter conditionals through the agent's logic.
->
-> Use `agentprops_client`: `connect(url, agent_id=...)`, then `run_start` once with a
-> selector, then `fetch_step(node_id=...)` — or `fetch_step(tool_name=...)` where the agent
-> only knows which tool it is calling. Pass `iteration=` for a loop node, counting from 0.
->
-> Three things that will bite otherwise: you must `fetch_step` a node before `record_step`
-> can report an actual for it, or you get `AP-004`; warnings on a reply are typed objects,
-> so `w.code` and not `w["code"]`; and the run id is generated by the client, so do not
-> invent one.
->
-> Finish with `record_step` for the terminal step and `run_finish(outcome)`. Then grade in
-> the **test**, not in the agent: `compare.grade(mode, expected, actual)`, where `mode` is
-> the dataset's own `expected.comparison`.
->
-> Keep the real tool path as the default and make fixture mode opt-in via one env var.
+Start the service over HTTP (`--transport http --port 8000`), then run the registered prompt
+**`wire-an-agent`**. It takes an optional `agent_id` and an optional `url`, and it is mostly
+about *where the seam goes* — one injected client or one module-level indirection, rather than
+conditionals scattered through the agent's logic. It carries the `agentprops_client` call
+sequence, the three things that will bite otherwise (`AP-004` for a `record_step` on an
+unserved step, warnings as typed objects so `w.code` and not `w["code"]`, and the
+client-generated run id), and grading in the **test** rather than in the agent. The
+`run_start` selector it shows is a real dataset's own label set read out of your store, so the
+snippet you paste pins something that exists.
 
 Then it looks like this — the example below ran against the worked example:
 
@@ -254,24 +204,8 @@ expectation and hands back evidence, and never compares.
 
 ### Could Claude do this without the prompts?
 
-Partly, today. Mostly, with one small addition. Measured against the running service rather
-than guessed:
-
-**Dataset filling is already nearly promptless.** `dataset_skeleton` returns an
-`instructions` field, and it is a real product surface rather than a stub — it states the
-fill order and its rule id, that re-filling is how you repair a rejection, the exact content
-shape each of the five sections takes, and that `label_vocabulary` is the pre-flight for the
-one input a re-fill cannot repair. It is derived from the manifest, so it cannot describe a
-section that does not exist. That is why the step-3 prompt above is three lines of intent
-and a scenario list: the mechanics arrive with the tool call.
-
-**Blueprint authoring is not**, and that asymmetry is the gap. There is no
-`blueprint_skeleton`, so nothing tells Claude the shape before it writes one — which is
-exactly why the step-2 prompt is the long one. `blueprint_validate` gives a good feedback
-loop, but only after a guess.
-
-**The concrete missing piece: the server advertises `prompts` and `resources` and registers
-neither.** Both come back empty:
+That question is what produced the prompts, and the answer changed when they were registered
+(ruling **R-76**). Measured against the running service *before*:
 
 ```text
 prompts  : []
@@ -279,24 +213,48 @@ resources: []
 tools    : 25
 ```
 
-Those are the parts of MCP designed for this. Registering them would replace the copy-paste
-above with something Claude picks from a menu:
+**Dataset filling was already nearly promptless.** `dataset_skeleton` returns an `instructions`
+field, and it is a real product surface rather than a stub — it states the fill order and its
+rule id, that re-filling is how you repair a rejection, the exact content shape each of the
+five sections takes, and that `label_vocabulary` is the pre-flight for the one input a re-fill
+cannot repair. It is derived from the manifest, so it cannot describe a section that does not
+exist. That is why `fill-a-dataset` is intent and a scenario list.
 
-- **`prompts/list`** would expose `author-a-blueprint`, `fill-a-dataset` and
-  `cover-the-label-space` as parameterised entries — in Claude Code they appear as slash
-  commands. The prompt text stops living in a README that can drift from the tool surface,
-  and starts living beside the tools it drives.
-- **`resources/list`** would expose the golden blueprint and datasets as canonical examples,
-  so "orient yourself on a known-good example" needs no hard-coded `location-onboarding`
-  id — which is the one line of the step-2 prompt that is wrong for anyone who has not
-  seeded the demo store.
+**Blueprint authoring was not**, and that asymmetry is why `author-a-blueprint` is the long one.
+There is no `blueprint_skeleton`, so nothing tells Claude the shape before it writes one.
+`blueprint_validate` gives a good feedback loop, but only after a guess.
 
-Neither changes a tool, a rule, or the storage contract; both are additive surface on an
-existing capability the SDK already advertises. It is not in the phase-1 plan — the plan
-predates the observation — so it is recorded as a phase-1.5 candidate rather than smuggled
-in. **The honest summary: samples alone would not remove the prompts, because a prompt also
-carries intent — which scenarios matter, where the seam goes. What removes the boilerplate
-is registering the prompts themselves, and the capability is already there and unused.**
+**The concrete problem was that the server advertised `prompts` and `resources` and registered
+neither.** Both capabilities were in its `initialize` reply from M4 onward, so every workflow
+instruction lived in this README — a second place to drift from the tools it describes, and one
+that already had: the old step-2 prompt hard-coded `location-onboarding` as the example to
+imitate, which is wrong for any store that has not seeded the demo fixtures.
+
+Both are registered now, and the four steps above point at them instead of restating them:
+
+```text
+prompts  : ['author-a-blueprint', 'fill-a-dataset', 'cover-the-label-space', 'wire-an-agent']
+resources: ['agentprops://catalogue', 'agentprops://examples/blueprint',
+            'agentprops://examples/dataset']
+templates: ['agentprops://blueprint/{agent_id}/{version}',
+            'agentprops://dataset/{agent_id}/example']
+tools    : 25
+```
+
+- **`prompts/list`** exposes the four as parameterised entries — in Claude Code they appear as
+  slash commands, which is the ergonomic payoff. The text lives beside the tools it drives, and
+  the `BP-*` count `author-a-blueprint` quotes is read off the live rule registry rather than
+  typed, so it cannot go stale the way a README sentence can.
+- **`resources/list`** exposes the canonical examples **read from your store**, never from
+  `tests/fixtures/`: `agentprops://catalogue` names every URI the store can serve, so "orient
+  yourself on a known-good example" needs no hard-coded id at all. On an empty store the bodies
+  say `"available": false` and what to do next, because a resource that promised an example
+  this store does not hold would be worse than no resource.
+
+Neither changed a tool, a rule, or the storage contract; both are additive surface on a
+capability the SDK already advertised. What removes the boilerplate is registering the prompts
+themselves — a sample alone would not, because a prompt also carries intent: which scenarios
+matter, where the seam goes.
 
 ### Rough edges, so you meet them here and not mid-session
 
@@ -307,6 +265,11 @@ is registering the prompts themselves, and the capability is already there and u
   anyway. That is ground rule 3, not a bug.
 - **Fetch before you record.** `record_step` on an unserved step is `AP-004`, by design.
 - **Warnings are typed objects**, so `w.code`, not `w["code"]`.
+- **`resources/list` is a fixed set of three, not one entry per stored document.**
+  `agentprops://catalogue` is the index that names the rest; the per-agent URIs are resource
+  *templates* and appear under `resources/templates/list`. The SDK serves `resources/list` from
+  a registry built at import time, so a live per-document list is not reachable through its
+  public API — `src/agentprops/server/resources.py` records what was tried.
 - **One store, one process at a time** for SQLite. Point the service and Claude Code at the
   same `--store` file, not two copies.
 
@@ -608,6 +571,7 @@ them and still be rejected by the validation catalogue.
 
 ```
 src/agentprops/   the service: models, validation, storage, service, server, expansion, export
+                  server/ registers the tools, the four prompts and the five resources
 client/python/    agent-props-client: the run client and the three comparison helpers
 web/              the React browse-and-edit app; every write goes through the tool surface
 schemas/          Blueprint and Dataset JSON Schemas, generated from the models

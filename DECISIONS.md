@@ -4907,3 +4907,349 @@ has spent nine milestones learning to distrust, and it was in the module that un
    behaves that way, so a DS-027 document is savable. Worth confirming, because it means the web app
    will happily store a dataset whose intent duplicates its narrative — which PRD 5.7 calls "what a
    hurried author does". The warning is rendered prominently; nothing stops the author.
+
+## [M9.5] Two registration modules, two composition modules, and one new package constant each
+Ruling R-76's layering clause is "registration is `server/`, thin as ever. Any prompt whose text
+depends on store contents composes in `service/`". Taken literally and symmetrically:
+`server/prompts.py` and `server/resources.py` register; `service/prompts.py` composes text and
+`service/examples.py` composes the resource bodies. Every prompt here reads the store — even
+`fill-a-dataset`, which has to resolve "the latest published version" before it can name one — so
+in practice nothing was left in `server/` but four `@mcp.prompt()` and five `@mcp.resource()`
+one-liners.
+
+`PROMPT_MODULES` and `RESOURCE_MODULES` join `TOOL_MODULES` in `server/__init__.py`, rather than
+the new modules being added to `TOOL_MODULES`. They are not tool modules: the M4 layering guards
+match on the `@mcp.tool()` decorator and `test_the_tool_module_table_is_not_empty` asserts there are
+exactly four, so folding them in would have made a tool guard silently cover something that
+registers nothing callable through `tools/call`.
+
+`server/prompts.py` imports the service module as `prompt_text` rather than as `prompts`. The plain
+spelling works — the local name shadows nothing — but `prompts.author_a_blueprint(...)` inside a
+module *named* `agentprops.server.prompts` reads as a self-call, and one alias is cheaper than a
+reader having to check.
+
+## [M9.5] Prompt arguments are `str`, and only `agent_id` on two prompts is required
+Every *tool* parameter on this surface is annotated `object` with its real type in
+`json_schema_extra`, so a malformed argument comes back as an `AP-001` envelope rather than an SDK
+protocol error (`server/args.py`). That does not transfer to prompts, and the reason is the protocol
+rather than a preference: `GetPromptRequestParams.arguments` is typed `dict[str, str] | None`, so a
+non-string is refused by the request-params model one layer above a prompt function and there is no
+wrong-type case left to catch. There is also no envelope on this surface to put a finding in.
+
+So prompt parameters are plain `str`, and a missing subject is answered with *text* —
+`service/prompts.py::_no_such_blueprint` — which is the only shape `prompts/get` offers and, unlike
+an error, is something a model can act on.
+
+`version` is optional on all three prompts that take one, defaulting to the latest published
+version. R-76's scope line reads "an `agent_id`, a `version`, a scenario list", which names the
+arguments rather than their requiredness; making `version` mandatory would have been the only place
+on this whole surface where an omitted version is not "the latest published", and the prompt
+interpolates the *resolved* version into its text either way, so nothing is left ambiguous. The
+alternative — required `version` — was rejected on that consistency ground.
+
+`Field(description=...)` on each argument is load-bearing rather than decoration: it becomes
+`PromptArgument.description`, which is what a caller reads in the slash-command list these prompts
+exist to populate. `test_prompt_and_resource_surface.py` asserts every registered argument has one,
+enumerated from the registry.
+
+## [M9.5] A fourth prompt, `wire-an-agent`, because README step 4 carried a prompt too
+R-76 names three prompts "at minimum". The brief for this milestone also says to replace the
+README's step-2, step-3 **and step-4** prompt bodies with a pointer to the registered prompts — and
+step 4's body is about editing the caller's own agent, which none of the three covers. Leaving that
+one body in the README would have left exactly the second place to drift the milestone exists to
+close, so it is registered as `wire-an-agent`.
+
+It composes in `service/` like the others, and it earns that in one respect the README version could
+not: the `run_start` selector it shows is a **real dataset's own label set** read out of the store.
+The README's snippet hard-coded `{"scenario": "missing-documents"}`, which is the same defect R-76
+cites one step earlier — wrong in any store that has not seeded the demo fixtures. When the store
+holds no dataset the prompt says so and points at `fill-a-dataset` instead of showing a selector
+that matches nothing.
+
+The alternative was leaving step 4 as prose with no prompt. Rejected: the four-step structure is
+what a caller follows, and three of four steps being a slash command and one being a paste is the
+inconsistency that makes people paste all four.
+
+## [M9.5] The resource URI scheme: `agentprops://`, three static, two templates
+```text
+agentprops://catalogue                            the index
+agentprops://examples/blueprint                   one known-good blueprint, no id needed
+agentprops://examples/dataset                     one known-good dataset, no id needed
+agentprops://blueprint/{agent_id}/{version}       every published blueprint, addressably
+agentprops://dataset/{agent_id}/example           one example dataset per agent
+```
+A custom `agentprops://` scheme rather than `file://` or an `https://` URL, because neither is
+true: these are documents in a store, not files and not web pages, and `Resource.uri` is a plain
+`str` in `mcp` 2.2.0 so nothing normalises the path out from under us.
+
+The two static `examples/*` URIs are what makes R-76's "find something to imitate **without being
+told an id**" literally true: they take no argument and return a whole document. The two templates
+are the per-agent halves R-76 asks for by name, and `agentprops://catalogue` enumerates the concrete
+URIs of both, so a caller who has listed the resources never has to be handed an id.
+
+`agentprops://dataset/{agent_id}/example` puts the literal `example` at the **end** rather than
+spelling it `agentprops://examples/dataset/{agent_id}`. The prefix form would have shared a prefix
+with the static `agentprops://examples/dataset`, and the coverage guard asks "does any tested URI
+match this template" — which the *static* resource's own test could then have satisfied, leaving the
+template covered by nothing. A URI shape chosen so a guard cannot be fooled is worth one odd-looking
+segment order.
+
+The URI strings live in `service/examples.py`, not in `server/resources.py`, even though a URI is
+protocol surface. `catalogue()` puts them *inside* a document and `service/prompts.py` names them in
+prose, so `server/` owning them would mean handing them down or spelling them twice — and a prompt
+naming `agentprops://examples/blueprint` while the decorator registers `agentprops://example/
+blueprint` is precisely the drift R-76 exists to close. One home; the decorators import it.
+
+`BLUEPRINT_URI_TEMPLATE` is used as both an RFC 6570 template (in the decorator) and a `str.format`
+template (in `blueprint_uri`), because the two syntaxes coincide for the simple `{name}` form. That
+coincidence is load-bearing — it is what stops the registered URI drifting from the built one — so
+`test_a_template_and_its_builder_agree` round-trips `UriTemplate.parse(TEMPLATE).match(builder(...))`
+including a value that needs percent-escaping, rather than trusting it.
+
+## [M9.5] `resources/list` is a fixed set of three; the two ways to make it live were both worse
+R-76 reads as though `resources/list` should enumerate one entry per published blueprint. On
+`mcp` 2.2.0 that is not reachable through the public API, and both workarounds are worse than an
+index:
+
+- `MCPServer` serves `resources/list` from `ResourceManager._resources`, populated at *import* time.
+  There is no listing callback, and `Extension.methods()` explicitly refuses to replace an
+  already-registered handler ("extension methods are additive and cannot replace another handler").
+  The only override left is `mcp._lowlevel_server.add_request_handler` — a private attribute, and
+  ruling R-16 exists because this build already paid for one wrong assumption about this SDK's
+  surface.
+- `mcp.add_resource(...)` **is** public and could be called from `bind()`. It would freeze the list
+  at bind time, so a blueprint published mid-session never appears; and because `binding()` nests
+  and restores in tests while the resource registry does not, one test's store would leak resources
+  into the next. A stale list that also cross-contaminates is not an improvement.
+
+So the *set* of resources is a property of the server and only the *bodies* are store-derived. R-76's
+intent is met in full — a caller lists, reads the catalogue, and has every id — and the cost is one
+indirection, recorded in `server/resources.py` beside the code.
+
+## [M9.5] The empty store: one fixed key set per resource, always carrying `available` and `note`
+`resources/list` cannot be `[]` here, for the reason above, so the honesty has to live in the
+bodies. Every example resource returns the **same keys** whether or not there is anything to show —
+`{available, agent_id, version, uri, blueprint, note}` and the dataset equivalent — with the
+identifying fields `null` and `note` saying why there is none and what to do next. `catalogue()`
+answers `{"agents": []}` with a `next_step` that names the `author-a-blueprint` prompt.
+
+Two alternatives were rejected. **Returning the bare document when available and a different object
+when not** gives one URI two shapes, so a reader cannot tell which they got without inspecting. **A
+protocol error for the missing case** is the same dishonesty as a lie with less information: the
+caller learns nothing about why, and CLAUDE.md's "structured errors, never exceptions, for anything
+a user could cause" points the other way.
+
+The prompts get the same treatment from the other side: each one resolves what it is about to name
+*before* naming it, so an empty store produces a prompt that says "this store holds no published
+blueprint" and still carries the full shape contract, rather than an instruction to imitate an id
+that does not resolve. Both ends are tested — `test_prompts_contract.py` writes every
+store-dependent assertion twice, once seeded and once empty.
+
+**These bodies are not envelopes**, and that is ruling R-43(b) rather than an oversight: there is no
+`ok`, no `warnings`, no `errors` and no single named `data` key on either surface, and
+`test_no_resource_body_is_an_envelope` / `test_no_prompt_message_is_an_envelope` enforce it
+mechanically over the whole registered surface.
+
+## [M9.5] Which document is "the example": two decisions, one site each, deliberately uncoupled
+**The example blueprint** is the latest *published* version of the first agent in
+`list_blueprints(published)` order — total since ruling R-35. "Latest published" is not a second
+choice: it is exactly what `get_blueprint(agent_id, None)` already means, so this reuses the store's
+resolution rather than inventing one. `examples.example_agent_id` is the only place that picks, and
+both the prompts and `resources/read` read it, which `test_the_prompts_and_the_resources_agree_
+about_the_example` measures across the two surfaces.
+
+**The example dataset** is the first row of `find_datasets` — the oldest lineage, at its latest
+version, archives excluded, in the total `(created_at, id)` order rulings R-38 and R-09 fix.
+
+They are computed **independently**, and the coupling was considered and rejected. Pinning the
+store-wide example dataset to the example blueprint's agent would give a caller a matching pair,
+which reads better; it would also report "no example dataset" whenever *that* agent has none while
+the store holds plenty for other agents. A false "unavailable" is the exact failure this milestone
+is about, and a matching pair is not worth buying one. Every body names its own `agent_id`, so
+nothing is ambiguous. `test_the_store_wide_example_dataset_is_not_pinned_to_the_example_blueprint`
+constructs precisely that arrangement.
+
+The per-agent template never falls back either: `agentprops://dataset/<agent>/example` for an agent
+with no dataset is `available: false`, not somebody else's dataset.
+
+## [M9.5] Published-only, and the `status` check a test had to find
+A resource is "a known-good document in *this* store" (R-76), and a draft is not known-good. So
+`examples.published()` filters on `STATUS_PUBLISHED` and the catalogue lists published agents only;
+`agent_list` and `blueprint_list` remain the surfaces that show drafts.
+
+The `status` check inside `example_blueprint` looked redundant and is not. `Store.get_blueprint`
+documents itself as "with `version`, that exact version **whatever its status**", so
+`agentprops://blueprint/<agent>/1.0.0` served a *draft* as a canonical example while the module
+docstring claimed it did not. `test_a_draft_version_is_not_served_as_a_resource` caught it on its
+first run — a docstring claim contradicted by the code, which is the failure mode this build keeps
+finding. The test asserts **both** halves now: the resource refuses the draft and `blueprint_get`
+still returns it, so the difference stays a tested decision rather than becoming an accident again.
+
+## [M9.5] `cover-the-label-space` reports per-value gaps and present tuples, never the cross-product
+"Name the combinations that currently have zero datasets" has an obvious reading — the cross-product
+of every dimension — and it is not a list worth serving. The golden blueprint declares five
+dimensions whose product is **432**; a realistic vocabulary is worse. A prompt enumerating that
+hands a caller a task nobody can finish, which is its own kind of dishonesty, and it is not what the
+measurement supports: `label_vocabulary` counts **per value**, and the PRD's exit criterion is twenty
+datasets *spanning* the declared labels.
+
+So the prompt reports two things, both **complete and bounded**: every `dimension=value` with no
+dataset (bounded by the vocabulary) and every label tuple already stored with how many datasets carry
+it (bounded by the dataset count). The cross-product's size is stated as a number. A threshold —
+"enumerate the product when it is small" — was rejected: it is a magic number and a second exit from
+one decision.
+
+The zero-count arithmetic reuses `service/admin.py::value_counts`, promoted from `_counts` for the
+purpose, so "how many datasets carry this value" has one implementation shared with
+`label_vocabulary`. `test_cover_the_label_space_names_the_values_with_no_dataset` cross-checks the
+prompt against that tool's own output over the same session, so the two cannot disagree about what
+is empty.
+
+## [M9.5] Two private helpers promoted to public, so a resource and a tool serve the same bytes
+`service/blueprints.py::_document` and `service/datasets.py::_document` became `document`, and
+`service/admin.py::_counts` became `value_counts`. A resource serving a blueprint has to produce
+ruling R-08's `exclude_unset` dump, and a third copy of that one-liner is a third thing to keep in
+step — the bytes a caller reads out of `blueprint_get` are the bytes BP-016 compares a re-publish
+against, so "agrees today" is not good enough.
+
+Sharing the call is not proof that the bytes match, so
+`test_the_blueprint_resource_is_byte_identical_to_blueprint_get` and its dataset twin compare
+`json.dumps` of both over one session.
+
+The rename also removed a shadowing hazard it created: the local `document = read_document(...)` in
+three `validate`/`upsert` functions now shadowed a module-level `document`, harmless today and a
+confusing failure the first time somebody calls it there. Those locals are `resolved` now.
+
+## [M9.5] The `BP-*` count in `author-a-blueprint` is counted, not typed
+The README's step-2 text said "Nineteen `BP-*` rules". It is nineteen today. It is a claim that goes
+stale the milestone a twentieth lands — the class of false statement this build has spent nine
+milestones learning to distrust, and one that survived in a README precisely because nothing tested
+it.
+
+`service/prompts.py::_validate_loop` counts the `BP-` prefixed keys of `RULE_REGISTRY` at call time,
+and `test_the_prompt_states_the_live_blueprint_rule_count` re-derives the number independently from
+the registry and asserts the prompt states it. `service/` may import `validation/`, so this costs
+nothing structurally. The README no longer states a count at all.
+
+The same treatment for the endpoint `wire-an-agent` shows: `service/` may not import `server/`, so
+`DEFAULT_HTTP_URL` is a literal there — and
+`test_the_endpoint_the_wiring_prompt_shows_is_the_one_the_server_serves_on` rebuilds it from
+`DEFAULT_HTTP_HOST`/`PORT`/`PATH` and compares, so the literal cannot go quietly wrong.
+
+## [M9.5] The coverage guards enumerate the registered surface, and the AST walk is shared
+`tests/unit/test_prompt_and_resource_surface.py` is M4's tool guard applied to the two new surfaces,
+and the property that matters is the one R-76 names: it enumerates what the running `MCPServer`
+reports and asks whether each entry appears in a `get_prompt` / `read_resource` call somewhere under
+`tests/`. Nothing in the file names a prompt or a resource except the two negative controls. A fifth
+prompt fails the guard the moment it is registered, and the failure message names it.
+
+Resource **templates** are matched with the SDK's own `UriTemplate.match` rather than by string
+prefix, so the guard agrees with the resource manager about which template answers a URI — the only
+definition of "covered" that means anything here.
+
+The AST walk moved to `tests/sourcescan.py` and `test_tool_surface.py` now calls it too. Two copies
+of a scanner is two things to keep in step, and a scanner that has quietly stopped matching makes
+every coverage assertion pass vacuously. What did **not** move is each guard's non-vacuity controls —
+"the scan finds something" and "the scan does not credit a name nobody calls" — because those are
+claims about a particular surface.
+
+The controls are `infer-a-blueprint` and `agentprops://inferred-blueprint/never-registered`, both
+named for `blueprint_infer`, which contracts section 4 tags *(phase 1.5)* and says is "Not in phase
+1" — so unlike a deferred tool that will one day land they stay valid for the whole build. That was
+a flaw `test_tool_surface.py` had to fix once already (`DECISIONS.md` `[M5]`). The first draft of
+this file picked a control URI it also passed to `read_resource` in the unknown-URI test, so the
+control credited itself and the guard's own guard passed while proving nothing; caught by running it.
+
+**Both guards were shown failing, and failing for the stated reason.** A pytest plugin
+(`-p planter`) registers `planted-prompt`, `agentprops://planted` and
+`agentprops://planted/{agent_id}/thing` before the guard module is imported — the only window in
+which a plant is visible to a module-level enumeration. Exactly three tests fail, each naming
+exactly the planted entry:
+
+```text
+AssertionError: these prompts are registered but no test calls them by name: ['planted-prompt']
+AssertionError: these resources are registered but no test reads them by URI: ['agentprops://planted']
+AssertionError: no test reads a URI served by these templates: ['agentprops://planted/{agent_id}/thing']
+3 failed, 47 passed
+```
+
+And a second plugin blunts `literals_passed_to` into "every string literal in the test tree", which
+is the defect the negative controls exist to catch. Both controls fire — the new one *and* M4's, so
+the shared-scanner refactor did not defang the guard it inherited:
+
+```text
+FAILED test_prompt_and_resource_surface.py::test_the_scanners_do_not_credit_a_name_nobody_calls
+FAILED test_tool_surface.py::test_the_scanner_does_not_credit_a_name_nobody_calls
+2 failed, 75 passed
+```
+
+## [M9.5] The three thinness guards widened to `@mcp.prompt()` and `@mcp.resource()` functions
+R-76 says registration is "`server/`, thin as ever". `test_layering.py`'s three shape guards — under
+twenty lines, no control flow, never raises — matched only on `@mcp.tool()`, so a prompt function
+could have grown a store loop and nothing would have said so. `tool_functions` is now
+`registered_functions(path, decorators)` with `REGISTRATION_DECORATORS` covering all three, the
+guards run over `TOOL_MODULE_FILES + SURFACE_MODULE_FILES`, and
+`test_every_surface_module_registers_at_least_one_prompt_or_resource` keeps the widening from
+passing against a module that registers nothing. `tool_functions` survives as the M4 spelling so its
+own non-vacuity test still measures tools specifically.
+
+## [M9.5] No prompt or resource table in `docs/contracts.md`
+The tool guard compares the registered surface against `docs/contracts.md` section 4, and the
+symmetrical move would be a prompts table there with a matching drift test. Not done, and the reason
+is R-76's own risk clause: a documented table is a second place to state what a prompt says, and the
+prompt descriptions are already the thing a caller reads. The guards enumerate from the **registered**
+surface, which is stronger than agreement between two documents; `contracts.md` is also the frozen
+catalogue of record (R-25) and this milestone changes no rule, envelope or storage contract.
+
+Recorded rather than assumed, because the asymmetry with the tool surface is deliberate and a future
+reader will notice it.
+
+## [M9.5] What moved out of the README, and what stayed
+**Moved into a prompt** — deleted from `README.md`, not copied:
+
+- step 2's whole blockquote: the node/edge/entity/label contract, the `entity:<id>` reference form,
+  the validate loop, the report line. It is `author-a-blueprint` now, and the `BP-*` count it used to
+  state is derived rather than typed.
+- step 3's blockquote: the orientation calls, the per-scenario sequence, the narrative-versus-intent
+  warning (which `dataset_skeleton`'s own section description already carried, so the prompt does not
+  repeat it either), the scenario list. It is `fill-a-dataset` plus `cover-the-label-space`.
+- step 4's blockquote: the seam instruction, the client call sequence, the three gotchas, grade-in-
+  the-test, the env-var opt-in. It is `wire-an-agent`.
+
+**Stayed in the README**, because none of it is instruction to a model:
+
+- the four-step structure and every step's surrounding explanation — *why* step 2's prompt is the
+  long one, why step 3's is short, why the validate loop matters, what BP-014 costs;
+- step 1's `.mcp.json` and the `initialize` probe, which are shell and config;
+- step 4's `pyproject.toml`, `uv sync`, the import-isolation note, and the worked-example Python
+  script with its real output and the three things it demonstrates;
+- the "Rough edges" list, plus one new bullet: `resources/list` is a fixed set of three and the
+  per-agent URIs are templates;
+- the "Could Claude do this without the prompts?" subsection, **rewritten**. Leaving it would have
+  shipped a measured claim that is now false — it stated `prompts: []` as the present tense. It keeps
+  its reasoning, in the past tense, and prints the surface as it is now. R-68's own correction is
+  about exactly this: a stale measured claim inside a document about stale claims.
+
+The README no longer contains a single `>` blockquote line, which is the mechanical version of "the
+prompt bodies are gone".
+
+## Questions for the owner — M9.5
+1. **Should `resources/list` enumerate one entry per stored document rather than an index?**
+   R-76's wording reads that way and I could not reach it through the SDK's public API — the two
+   routes and why each is worse than the index are recorded above and in
+   `src/agentprops/server/resources.py`. If a live per-document list matters more than staying off
+   `mcp._lowlevel_server`, say so and it is a `resources/list` request handler plus a guard.
+2. **Is a fourth prompt in scope?** R-76 names three "at minimum" and the milestone brief asks for
+   the README's step-4 prompt body to be replaced too, which needs one. `wire-an-agent` is that
+   fourth. Deleting it means step 4 goes back to being the only pasted prompt of the four.
+3. **Should `docs/contracts.md` document the prompt and resource surfaces?** Not done, on the
+   grounds that a table is a second place to state what a prompt already says and the guards
+   enumerate from the registered surface instead. The asymmetry with the tool surface is
+   deliberate; it is one table plus one drift test if you want it.
+4. **Should `cover-the-label-space` name whole label tuples that are missing, not just values?**
+   It names every `dimension=value` with no dataset and every tuple already present, and states the
+   cross-product's size — 432 for the golden blueprint — without listing it. Naming missing tuples
+   means choosing which of hundreds to name, which is a policy decision I did not want to invent.
+5. **`fill-a-dataset` and `cover-the-label-space` require `agent_id` and default `version` to the
+   latest published.** Consistent with every tool on the surface. Worth confirming, because R-76's
+   scope line names `version` among the arguments and a reader could take that as "required".

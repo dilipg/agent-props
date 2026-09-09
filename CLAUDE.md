@@ -12,12 +12,14 @@ step's fixture back. It inverts "mock each tool call" into "author the world onc
 through it".
 
 Phase 1 is eleven milestones, **M0 to M10**, defined in
-[docs/build-handoff.md](docs/build-handoff.md) section 4. **M11, the TypeScript client, was
+[docs/build-handoff.md](docs/build-handoff.md) section 4, plus **M9.5** - an owner-approved
+additive milestone between M9 and M10, defined by ruling **R-76** rather than by the handoff. **M11, the TypeScript client, was
 descoped by the owner — do not build it (R-68).** Build one milestone per session, in order.
 Each milestone's acceptance criteria are the gate: do not start one until the previous one's
-criteria pass. **M0 through M9 are built:** the models, the validator, all three storage adapters,
-the MCP surface, the skeleton pipeline, the runtime read path, the containers, the promotion path,
-the Python client and the web app. Twenty-five tools, three backends, two packages and one web app -
+criteria pass. **M0 through M9 are built, plus M9.5:** the models, the validator, all three storage
+adapters, the MCP surface, the skeleton pipeline, the runtime read path, the containers, the
+promotion path, the Python client, the web app and the MCP prompt and resource surfaces.
+Twenty-five tools, four prompts, five resources, three backends, two packages and one web app -
 the service in `src/agentprops/`, `agent-props-client` in `client/python/`, which is separately
 installable and depends on nothing of the service's, and `web/`, which reaches the service through
 the tool surface and nothing else.
@@ -87,6 +89,16 @@ chosen, the reason, and the alternative rejected. The file is append-only.
 nothing from the others and do no I/O. Business logic lives in `service/`; a tool function in `server/`
 parses, delegates, shapes the response, and stays under 20 lines. Storage is reached only through the
 `Store` Protocol in `storage/base.py`, never through an adapter directly.
+
+The **prompt and resource** surfaces obey the same rule, and ruling R-76 states it for them:
+registration in `server/prompts.py` and `server/resources.py`, thin; anything whose content depends
+on store contents composes in `service/prompts.py` and `service/examples.py`. `tests/unit/
+test_layering.py` holds a `@mcp.prompt()` or `@mcp.resource()` function to the same thinness budget
+a `@mcp.tool()` function has. Neither surface is wrapped in a `SuccessEnvelope`: `prompts/get` and
+`resources/read` have their own protocol shapes and R-43(b)'s one-named-key `data` convention
+governs tool payloads only. **Registering a prompt does not put an LLM in the service** (ground
+rule 4) - a prompt is templated text served over a protocol method, the same category as a tool
+description, and nothing calls a model.
 
 Two web-app invariants beyond the layering rule, both from ruling R-72 and R-73's fix round:
 **the envelope has three shapes, not two** - success-with-`data`, validate-with-`errors` (no
