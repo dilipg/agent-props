@@ -14,6 +14,18 @@ with a mutating verb, minus the three run writes. So a method M7 or M9 adds -
 ``put_expansion``, ``set_dataset_labels``, anything - is forbidden here the day
 it appears on the Protocol, with no edit to this file.
 
+**And a stricter clause for M10's two.** ``run_evidence`` and ``run_export``
+reach **no store mutator at all**, not even the five run writes the six runtime
+entry points are allowed
+(:func:`test_no_evidence_entry_point_reaches_any_store_write`). The two clauses
+differ by exactly those five, and that is the reason the second exists:
+``run_export`` is the only function in this service that talks to a third party,
+and the obvious thing to do after publishing a trace is to record that you did -
+through ``put_run``, which the *looser* clause permits.
+:func:`test_the_strict_guard_catches_a_planted_run_write` plants exactly that
+and asserts both that the strict clause catches it and that the loose one does
+not.
+
 **The one dataset write.** :func:`test_put_dataset_has_exactly_one_call_site`
 pins what the M6 brief states as fact: ``put_dataset`` is called from exactly
 one place in `src/`, in `service/skeletons.py`, and that place is reachable from
@@ -128,6 +140,24 @@ RUNTIME_ENTRY_POINTS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("evidence.py", "evidence"),
         ("evidence.py", "export"),
     }
+)
+
+#: M10's two, again, and under a **stricter** rule: they may reach no store
+#: mutator **at all**, not even the five run writes the six above are allowed.
+#:
+#: The two clauses differ by exactly :data:`RUN_WRITES`, and that difference is
+#: the whole reason the second exists. ``run_export`` is the only function in
+#: this service that talks to a third party, and the obvious thing to do after
+#: publishing a trace is to record that you did - for which the cheapest route
+#: is ``put_run(run.model_copy(update={"external_refs": ...}))``, and ``put_run``
+#: is on the other clause's allowlist. So the temptation `service/evidence.py`'s
+#: own docstring names would have met **no resistance** from the guard that
+#: docstring, `server/tools_run.py` and `docs/contracts.md` all claim exists.
+#:
+#: Added in M10's fix round, because the claim was made in three places and the
+#: implementation was not. The claim was right; the code was missing.
+EVIDENCE_ENTRY_POINTS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {("evidence.py", "evidence"), ("evidence.py", "export")}
 )
 
 #: The authoring entry points, for the other half of
@@ -378,6 +408,90 @@ def test_the_call_graph_guard_catches_a_planted_dataset_write(tmp_path: Path) ->
             stack.extend(k for k in index if k[1] == name and k not in seen)
     assert calls & WORLD_WRITES == {"put_dataset"}
     assert ("runtime.py", "_draw") in seen, "the walk did not follow the helper"
+
+
+@pytest.mark.parametrize("entry", sorted(EVIDENCE_ENTRY_POINTS), ids=lambda entry: entry[1])
+def test_no_evidence_entry_point_reaches_any_store_write(entry: tuple[str, str]) -> None:
+    """``run_evidence`` and ``run_export`` are **pure reads**. Not even a run write.
+
+    ``STORE_MUTATORS``, not ``WORLD_WRITES``: stricter than the clause above by
+    exactly the five run writes, which is the whole point. An export publishes a
+    run and records nothing about having done so, because the trace id is
+    ``blake2b(run_id)`` and is therefore already implied by the run.
+
+    `service/evidence.py`, `server/tools_run.py` and `docs/contracts.md` all
+    state this. Until M10's fix round none of them was backed by an assertion -
+    the closure was intersected with ``WORLD_WRITES``, so a ``put_run`` on the
+    evidence path would have passed in silence.
+    """
+    offences = reachable({entry}) & STORE_MUTATORS
+    assert not offences, (
+        f"service/{entry[0]}::{entry[1]} can reach {sorted(offences)}. The evidence path "
+        f"writes nothing at all, not even a run: the trace id is derived from the run id, so "
+        f"there is nothing to store (see service/evidence.py's module docstring)."
+    )
+
+
+def test_the_evidence_entry_points_do_read_what_they_need() -> None:
+    """The other side of the same walk, so the strict guard is not vacuous.
+
+    Without this, deleting every store call from `evidence.py` would make the
+    guard above pass - and a bundle assembled from nothing is exactly the shape
+    a vacuous guard hides. All three reads are named, and they are the **pin's**:
+    the run, and the dataset and blueprint versions it pinned.
+    """
+    calls = reachable(EVIDENCE_ENTRY_POINTS)
+    assert {"get_run", "get_dataset", "get_blueprint"} <= calls, (
+        f"the evidence path does not read what it is supposed to read; got {sorted(calls)}"
+    )
+
+
+def test_the_strict_guard_catches_a_planted_run_write(tmp_path: Path) -> None:
+    """The stricter guard, run against the thing it forbids. Ruling R-77(e).
+
+    A synthetic `evidence.py` that stamps the trace id onto the run through
+    ``put_run`` - which is a **permitted** write for the other six entry points,
+    and therefore the one a reasonable author would reach for. Two assertions,
+    and the second is what distinguishes the two clauses: the planted call is
+    caught by ``STORE_MUTATORS`` and is invisible to ``WORLD_WRITES``, so a
+    guard written against the looser set would have passed on this module.
+
+    Transitive, like the control above it: the entry point calls a helper and the
+    *helper* writes, because a service function writing a run directly on the
+    evidence path is the version nobody would write.
+    """
+    planted = tmp_path / "evidence.py"
+    planted.write_text(
+        "def export(context, run_id, target):\n"
+        "    return _stamped(context, run_id)\n"
+        "\n"
+        "def _stamped(context, run_id):\n"
+        "    run = context.store.get_run(run_id)\n"
+        "    return context.store.put_run(run)\n",
+        encoding="utf-8",
+    )
+    index = {
+        (planted.name, node.name): node
+        for node in ast.walk(parse(planted))
+        if isinstance(node, ast.FunctionDef)
+    }
+    calls: set[str] = set()
+    stack = [(planted.name, "export")]
+    seen: set[tuple[str, str]] = set()
+    while stack:
+        key = stack.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        for name in called_names(index[key]):
+            calls.add(name)
+            stack.extend(k for k in index if k[1] == name and k not in seen)
+    assert calls & STORE_MUTATORS == {"put_run"}, calls
+    assert calls & WORLD_WRITES == set(), (
+        "a guard written against WORLD_WRITES would have passed on this module, which is "
+        "why the evidence path needs the stricter clause"
+    )
+    assert ("evidence.py", "_stamped") in seen, "the walk did not follow the helper"
 
 
 # ---------------------------------------------------------- the one write site
