@@ -86,35 +86,88 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 
 ### 2. Have Claude author the blueprint
 
-Restart Claude Code in your agent repo so it picks up the server, then ask it to read the
-agent and model it. A prompt that works:
+Restart Claude Code in your agent repo so it picks up the server. This step needs the
+longest prompt, because — unlike dataset filling — **nothing in the tool surface tells
+Claude the blueprint shape up front.** There is no `blueprint_skeleton`. Paste this:
 
-> Read this repo's agent and author an agent-props blueprint for it. One node per step the
-> agent takes, with `tool_name` set to the tool it actually calls. Mark branch points
-> `kind: decision`, retry loops `kind: loop` with `max_iterations` and `pool: true`, and
-> terminal states `kind: terminal`. Declare an entity per domain noun that persists across
-> steps, and a `label_schema` covering the dimensions I'd filter datasets by. Call
-> `blueprint_validate` and fix every rule id it reports before calling `blueprint_upsert`
-> with `publish: true`.
+> Read this repository's agent and author an agent-props blueprint for it, using the
+> `agent-props` MCP tools.
+>
+> First orient yourself on a known-good example rather than guessing the shape: call
+> `agent_list`, then `blueprint_get` for `location-onboarding` at `1.0.0`. Copy its
+> structure, not its content.
+>
+> Then model *this* repo's agent:
+>
+> - **One node per step the agent actually takes.** Set `tool_name` to the tool it really
+>   calls, verbatim. Set `kind` to `tool_call`, `decision`, `loop` or `terminal`.
+> - **`entry_node`** is the step that starts a run, and it must have no inbound edges.
+> - **Edges** carry a JSONLogic `condition` for every branch out of a `decision`. Every
+>   `{"var": "..."}` path must name a property the source node's `output_schema` actually
+>   declares — that is checked, and it is the rule most blueprints fail first.
+> - **Retry loops** get `kind: loop`, an integer `max_iterations`, and `pool: true`. Every
+>   cycle in the graph must pass through a loop node.
+> - **At least one `kind: terminal` node**, with no outbound edges.
+> - **`entities`**: one per domain noun that persists across steps — the thing the agent
+>   reads at step 2 and reads again at step 5. Give each a Draft 2020-12 JSON Schema, and
+>   reference them from node schemas as `{"$ref": "entity:<id>"}`.
+> - **`input_schema` and `output_schema`** per node, Draft 2020-12.
+> - **`outcome_schema`**: the shape of a finished run's result.
+> - **`label_schema`**: the dimensions I would filter datasets by — persona, scenario,
+>   tier, outcome, plus an `edge_case` dimension whose vocabulary includes `none`. Every
+>   dimension needs at least one value, and a dataset must later carry a value for *every*
+>   dimension — so keep the set small and give each an explicit not-applicable value.
+> - **`notes`** on each node: what the step does and what a realistic fixture looks like.
+>   Absent notes are a warning, and they make generated data worse.
+>
+> Then loop: call `blueprint_validate` and fix **every** rule id it reports. Do not call
+> `blueprint_upsert` until `blueprint_validate` returns no `error`-severity findings. Then
+> `blueprint_upsert` with `publish: true`.
+>
+> Report the final node and edge count, and any `BP-019` warnings you chose to leave.
 
-Insist on the `blueprint_validate` loop. Nineteen `BP-*` rules will catch an unreachable
-node, a cycle with no loop node, a `var` path that no output schema declares, and two nodes
-sharing a `tool_name` where position cannot disambiguate them — that last one (BP-014) is
-the mistake that makes an agent untestable, and it is cheaper to hear now.
+Insist on that validate loop. Nineteen `BP-*` rules catch an unreachable node, a cycle with
+no loop node, a `var` path no output schema declares, and — the important one — **BP-014**:
+two nodes sharing a `tool_name` where position cannot disambiguate them. That is the mistake
+that makes an agent untestable, because `fetch_step` then cannot tell which step you mean,
+and it is far cheaper to hear now than at the first run.
 
 ### 3. Have Claude fill datasets
 
-Then, per scenario you want covered:
+This prompt is **short on purpose.** `dataset_skeleton` returns an `instructions` field
+that already explains fill order, SK-002, re-fill-as-repair, and the exact content shape
+each section takes — so the prompt only supplies *intent*, not mechanics:
 
-> Call `dataset_skeleton` for `<agent_id>` at `<version>` with labels `{…}` and a seed.
-> Fill the five sections in manifest order — provenance, entities, nodes.core,
-> nodes.branches, expected — with `dataset_fill_part`, then `dataset_submit`. `narrative`
-> is what happens in the world; `intent` is why this dataset exists in the suite. They must
-> not be the same text. If submit reports rule ids, re-fill only the section each one is
-> scoped to.
+> Author agent-props datasets for `<agent_id>` at `<version>`, one per scenario below.
+>
+> Before starting, call `label_vocabulary` to see the dimensions and values this blueprint
+> declares, and `dataset_find` then `dataset_get` on an existing dataset to see what a
+> filled one looks like.
+>
+> For each scenario: call `dataset_skeleton` with a complete label set and a seed, **read
+> the `instructions` field it returns and follow it**, fill each section with
+> `dataset_fill_part`, then call `dataset_submit`.
+>
+> Two fields people get wrong, so be deliberate. **`narrative`** is what happens in the
+> world — the story the agent walks through. **`intent`** is why this dataset exists in the
+> test suite: what behaviour it pins down, what bug prompted it, what would go untested if
+> it were deleted. They must not be the same text, and a reviewer reads the second one.
+>
+> If `dataset_submit` reports rule ids, each error carries the section it belongs to —
+> re-fill only that section and submit again. Do not regenerate the whole dataset.
+>
+> Scenarios to cover:
+> 1. the happy path, no edge cases
+> 2. the retry loop firing exactly once
+> 3. the escalation or failure branch
+> 4. …
+>
+> Report each dataset's title, its labels, and any warnings the submit returned.
 
-The section scoping is the part that makes this cheap — a rejection names the one section
-to redo, not the whole dataset.
+The section scoping is what makes this cheap: a rejection names the one section to redo.
+And ask for the label space to be **covered** rather than for a dataset count — the PRD's
+exit criterion is twenty datasets spanning the declared labels, and `label_vocabulary`
+returns per-value counts, so Claude can see which combinations are still empty.
 
 ### 4. Point your agent at the fixtures
 
@@ -135,8 +188,32 @@ uv sync
 The client does **not** pull in the service package — `importlib.util.find_spec("agentprops")`
 is `None` in a consumer project, which is the separation ground rule 2 requires.
 
-Start the service over HTTP (`--transport http --port 8000`), then replace each of your
-agent's tool calls with a `fetch_step`. This ran against the worked example:
+Start the service over HTTP (`--transport http --port 8000`), then have Claude rewire the
+agent. This is ordinary code editing, so the prompt is mostly about *where the seam goes*:
+
+> Add an agent-props fixture mode to this agent, for tests.
+>
+> Read `<your agent's entry point>` and find every outbound tool call. Introduce a **single
+> seam** — one injected client, or one module-level indirection — so that in fixture mode
+> each of those calls is replaced by `props.fetch_step(...)` and nothing else changes. Do
+> not scatter conditionals through the agent's logic.
+>
+> Use `agentprops_client`: `connect(url, agent_id=...)`, then `run_start` once with a
+> selector, then `fetch_step(node_id=...)` — or `fetch_step(tool_name=...)` where the agent
+> only knows which tool it is calling. Pass `iteration=` for a loop node, counting from 0.
+>
+> Three things that will bite otherwise: you must `fetch_step` a node before `record_step`
+> can report an actual for it, or you get `AP-004`; warnings on a reply are typed objects,
+> so `w.code` and not `w["code"]`; and the run id is generated by the client, so do not
+> invent one.
+>
+> Finish with `record_step` for the terminal step and `run_finish(outcome)`. Then grade in
+> the **test**, not in the agent: `compare.grade(mode, expected, actual)`, where `mode` is
+> the dataset's own `expected.comparison`.
+>
+> Keep the real tool path as the default and make fixture mode opt-in via one env var.
+
+Then it looks like this — the example below ran against the worked example:
 
 ```python
 from agentprops_client import compare, connect
@@ -174,6 +251,52 @@ from a **tool name** — position disambiguates two nodes that share it. `pool_e
 arrived at **iteration 2**, not 3, because the pool holds two entries (ruling R-52 corrects
 the published script here). And the run was graded **in the client**: the service stores the
 expectation and hands back evidence, and never compares.
+
+### Could Claude do this without the prompts?
+
+Partly, today. Mostly, with one small addition. Measured against the running service rather
+than guessed:
+
+**Dataset filling is already nearly promptless.** `dataset_skeleton` returns an
+`instructions` field, and it is a real product surface rather than a stub — it states the
+fill order and its rule id, that re-filling is how you repair a rejection, the exact content
+shape each of the five sections takes, and that `label_vocabulary` is the pre-flight for the
+one input a re-fill cannot repair. It is derived from the manifest, so it cannot describe a
+section that does not exist. That is why the step-3 prompt above is three lines of intent
+and a scenario list: the mechanics arrive with the tool call.
+
+**Blueprint authoring is not**, and that asymmetry is the gap. There is no
+`blueprint_skeleton`, so nothing tells Claude the shape before it writes one — which is
+exactly why the step-2 prompt is the long one. `blueprint_validate` gives a good feedback
+loop, but only after a guess.
+
+**The concrete missing piece: the server advertises `prompts` and `resources` and registers
+neither.** Both come back empty:
+
+```text
+prompts  : []
+resources: []
+tools    : 25
+```
+
+Those are the parts of MCP designed for this. Registering them would replace the copy-paste
+above with something Claude picks from a menu:
+
+- **`prompts/list`** would expose `author-a-blueprint`, `fill-a-dataset` and
+  `cover-the-label-space` as parameterised entries — in Claude Code they appear as slash
+  commands. The prompt text stops living in a README that can drift from the tool surface,
+  and starts living beside the tools it drives.
+- **`resources/list`** would expose the golden blueprint and datasets as canonical examples,
+  so "orient yourself on a known-good example" needs no hard-coded `location-onboarding`
+  id — which is the one line of the step-2 prompt that is wrong for anyone who has not
+  seeded the demo store.
+
+Neither changes a tool, a rule, or the storage contract; both are additive surface on an
+existing capability the SDK already advertises. It is not in the phase-1 plan — the plan
+predates the observation — so it is recorded as a phase-1.5 candidate rather than smuggled
+in. **The honest summary: samples alone would not remove the prompts, because a prompt also
+carries intent — which scenarios matter, where the seam goes. What removes the boilerplate
+is registering the prompts themselves, and the capability is already there and unused.**
 
 ### Rough edges, so you meet them here and not mid-session
 
