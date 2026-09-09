@@ -3728,3 +3728,91 @@ Corrected in the fix-round-2 appendix rather than edited in place, the same way 
 counts are listed rather than silently rewritten. If line 290 is meant as a cap on the total rather
 than as a naming of the subject, this needs a ruling; either way it needed stating rather than
 denying.
+
+## [M7, fix round 3] Ruling R-62: `build-handoff.md` line 290 names a subject, not a ceiling
+Ratified as I read it, and the requirement is on the *report* rather than the tests: section 2's
+claim that `hypothesis` is used "in exactly the one place `build-handoff.md` names - five property
+tests in `tests/unit/test_seeded.py`" is corrected to match section 4, which describes the Mongo key
+codec's property tests in plain words. **All eight stay.**
+
+The ruling's reasoning is the part worth keeping: an escaping scheme is a function that must be
+reversible and collision-free over an infinite input space, and no table of examples establishes
+that. `encode_keys`/`decode_keys` is what stands between a section id containing a dot -
+`nodes.core`, `nodes.branches`, which M7 was instructed not to rename - and a silently mangled
+`Skeleton.parts`. Round-trip *and* injectivity over an alphabet built from the escape characters
+themselves (`%.$2E45abc`) is precisely what the technique buys.
+
+So the deviation was in the *summary*, not in the tests: the decision had been recorded here and
+described in the report, and then a sentence eighty lines above denied it. Corrected in the fix-round
+appendix rather than edited in place, which is the same treatment the superseded test counts get.
+
+## [M7, fix round 3] Ruling R-63: the test database is named per process
+`conftest.TEST_DATABASE_NAME` is `agentprops_conformance_<pid>_<random>`, computed once at import so
+it is constant for the life of a process and different in any other. Postgres gets a real
+`CREATE DATABASE` of that name; Mongo simply uses it. Both are dropped on session exit.
+`postgres_test_url()` is now the **server** - the database that is connected to in order to create
+the session's own - and `postgres_session_url()` is what the tests and alembic receive.
+
+**Why a convention was not enough, which is the whole content of the ruling.** The `store` fixture
+drops its database *before every test*, because half the conformance suite counts rows. That is
+correct isolation within a run and none at all between two of them. And the failure does not look
+like a collision: it looks like a suite finding bugs. Measured, deliberately, as a negative control -
+R-63 removed, two concurrent `--store mongo` runs on one server:
+
+| | with a shared name | with the per-session name |
+|---|---|---|
+| run A | 6 failed, 123 passed, 4 errors | **133 passed** |
+| run B | 10 failed, 98 passed, 25 errors | **133 passed** |
+
+Every failure is a row count, a latest-version assertion or a fixture error. M7 came within one
+paste of reporting one such run as a real result.
+
+**This is R-60's lesson applied the same day it was ruled**, and R-63 is right that it is the worse
+of the two: the wrong-server case produced suspiciously *passing* numbers, which is the easier thing
+to notice, while this one produces a plausible failure count. Of the three reproduction preconditions
+M7 was about to leave documented-but-unenforced - clean database, one process, the URL beside any
+backend count - R-60 converted one to structure and this converts the second. R-61's stays
+documented, and correctly: a clean database is inherent to a fixture that owns its schema, and
+stamping `alembic_version` to avoid it would fabricate the state the check verifies.
+
+**The pid is in the name on purpose and it is the useful half.** Live processes always have distinct
+pids, so no two concurrent sessions can collide. And a *stray* database is triageable, because a
+developer can ask whether that pid is still running. The random suffix is only there to stop a
+recycled pid from silently adopting an older run's leftovers.
+
+**Cleanup, and the sweep for when cleanup cannot run.** Both fixtures drop their database on the way
+out; verified by checking for stragglers after a clean exit and after two concurrent runs - zero on
+both backends each time. A process that is *killed* runs no teardown, so the prefix is a constant a
+shell pattern can match, and the sweep lives in `tests/integration/conftest.py`'s module docstring.
+Both halves were run against the containers, and the Postgres half needed a second attempt: the
+generated `format('drop database %I with (force)', ...)` had no trailing semicolon, so `psql` read
+two statements as one, reported a syntax error and dropped nothing. It is in the docstring with the
+semicolon and with that note.
+
+Cleanup **warns rather than raises** when it fails, and the warning carries the database name. A
+green run that could not tidy up is still a green run; turning teardown into an error would make the
+test count depend on the tidying, which is the class of problem R-60 and R-63 both exist to remove.
+
+Rejected: a per-session Postgres **schema** with `search_path` instead of a database. It needs
+alembic's `version_table_schema` plumbed through, it puts every concurrent run in one database's
+catalogs, and it is a second mechanism to explain. A database costs one `CREATE DATABASE` in
+`AUTOCOMMIT` and needs no plumbing at all, because the isolation lives in the URL.
+
+**Three guards, and all three were verified to fail.** `test_two_sessions_compute_different_database_names`
+asks three real subprocesses for the name, because a per-process value compared with itself inside
+one interpreter agrees by construction - with R-63 removed it reports
+`['agentprops_conformance', 'agentprops_conformance', 'agentprops_conformance']`.
+`test_every_session_name_starts_with_the_prefix_the_sweep_looks_for` protects the sweep, and fails on
+the same removal. And `test_no_test_file_uses_the_bare_prefix_as_a_database_name` covers the silent
+direction: one hard-coded name in a suite of unique ones is worse than uniform sharing, because
+everything passes until two runs overlap and then only *those* tests corrupt each other. Planting
+`MongoStore(client, "agentprops_conformance")` in `test_mongo_allocation_races.py` fails it with the
+file and the line number.
+
+**That last guard earned a rewrite.** It began as a regex over the file text and failed on its own
+module docstring, which quotes the mistake concretely. A guard that cannot tell prose from code has
+to be exempted from itself - making the one file most likely to describe the mistake the one file not
+checked for it - or it forces the documentation to stop being concrete. So it parses: an `ast` walk
+that collects string constants equal to the prefix and excludes docstrings by position. Comments
+never reach the AST at all. `test_the_bare_prefix_guard_sees_a_value_and_not_a_docstring` pins all
+four cases, including a function that has both a docstring and a value.
