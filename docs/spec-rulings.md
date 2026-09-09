@@ -1911,6 +1911,62 @@ rather than the client type". That is R-72's lesson applied at the field level: 
 asserting a shape nobody checks against the source is the same falsehood as a harness emitting
 one. Two instances in one milestone is why R-72 asks for an assertion rather than diligence.
 
+### R-77 — five M9.5 decisions, and a third vacuous guard
+
+**(a) `resources/list` is an index plus templates, not one entry per document.** Ratified,
+and the constraint is real rather than a shortcut: `mcp` 2.2.0 serves that list from an
+**import-time registry** with no listing callback, and `Extension.methods()` refuses to
+replace a registered handler — the only override is the private `_lowlevel_server`.
+
+R-76 asked for two things and got both. "Without being told an id" is satisfied in full: a
+caller lists, finds `agentprops://catalogue`, reads it, and has real ids. "Expose the
+published blueprints" is satisfied by template plus index rather than N entries, at the cost
+of one extra read. **Reaching into `_lowlevel_server` to buy back that read would be worse** —
+it would make this surface depend on an SDK internal, and R-16 already cost this build a fix
+round over an SDK detail that moved. Record the limitation so it can be revisited if the SDK
+grows a callback.
+
+**(b) Four prompts, not three.** Ratified — my brief implied it. R-76 said "at minimum
+three" *and* asked for step 4's body to be replaced, and none of the three covered wiring a
+caller's agent. `wire-an-agent` is the fourth, and it is the one whose absence would have
+left a README section with nothing to point at.
+
+**(c) `cover-the-label-space` names per-`dimension=value` gaps, not missing tuples.**
+Ratified. The golden blueprint's label cross-product is **432**; enumerating the absent
+tuples would hand a caller a task nobody finishes. Per-dimension gaps plus the tuples
+actually present is the useful shape, and it is the honest one.
+
+**(d) `contracts.md` documents neither new surface, deliberately.** Ratified — and worth
+distinguishing from R-25, which insisted the opposite for rule ids.
+
+The difference is what the guard compares against. R-12's drift test reads the **prose**
+catalogue and asserts it equals the registry, so `contracts.md` must be the single catalogue
+of record or the test has nothing to compare. The prompt and resource guards enumerate the
+**registered surface itself**, so a prose table would be a second place to drift with no test
+holding it — exactly the risk R-76 named. Same principle, opposite conclusion, because the
+mechanism differs.
+
+**(e) The guard's own negative control was vacuous on the first draft.** The uncalled-resource
+control was also passed to `read_resource` in the unknown-URI test, so it credited itself: the
+guard's guard passed while proving nothing. **Found only by running it.**
+
+That is the **third** instance in this build — after M5's bounded-integer guard, vacuous
+because an earlier argument short-circuited before the one under test, and M9's clause-1
+harness, which could only emit a shape the service never sends. It happened **inside the
+milestone whose brief explicitly warned about it**, which is the finding: a warning in a
+dispatch does not prevent this class. Only executing the guard against the defect does.
+
+Standing consequence for M10 and any milestone after it: **a guard is not delivered until it
+has been run against the thing it forbids and observed to fail.** Not reasoned about — run.
+
+**Also caught in passing, by a test on its first run:** `service/examples.py` served a
+**draft** blueprint as a canonical example, because `get_blueprint` returns an exact version
+"whatever its status". A draft offered as canonical is actively misleading — worse than no
+example — and the docstring/behaviour gap was the tell. Both halves are now asserted.
+
+**Cost if wrong.** (a) is one extra read; (b)–(d) are additive or documentary; (e) is a
+process rule that costs one command per guard.
+
 ## Owner scope decisions
 
 ### R-76 — M9.5: register the MCP `prompts` and `resources` the server already advertises
