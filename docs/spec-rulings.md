@@ -1913,6 +1913,63 @@ one. Two instances in one milestone is why R-72 asks for an assertion rather tha
 
 ## Owner scope decisions
 
+### R-76 — M9.5: register the MCP `prompts` and `resources` the server already advertises
+
+**Owner decision, 2026-09-09: build it.** Phase 1 still ends at M10; this is an additive
+milestone between M9 and M10, and it is the phase-1.5 candidate the README records.
+
+**The finding it answers**, measured against the running service rather than inferred:
+
+```text
+prompts  : []
+resources: []
+tools    : 25
+```
+
+The server advertises both capabilities in its `initialize` reply and registers neither. So
+every workflow instruction lives in `README.md` — which is the drift this build has spent
+seventy-five rulings learning to distrust. A prompt beside the tools it drives cannot fall
+out of step with them; a prompt in a README can, and one already had: the step-2 prompt
+hard-codes `location-onboarding` as the example to imitate, which is wrong for any store
+that has not seeded the demo fixtures.
+
+**This does not violate ground rule 4.** "No LLM inside the service" means no model client,
+no API key handling, no judge. An MCP *prompt* is templated text served over a protocol
+method — the same category as a tool's description. Nothing calls a model; the caller's
+model reads what it is handed. State that in the module docstring, because the word invites
+the wrong reading.
+
+**Scope.**
+
+- **Prompts:** at minimum `author-a-blueprint`, `fill-a-dataset` and `cover-the-label-space`,
+  parameterised (an `agent_id`, a `version`, a scenario list). These surface as slash
+  commands in Claude Code, which is the ergonomic payoff.
+- **Resources:** the canonical examples, read **from the store** rather than from
+  `tests/fixtures/`. A resource is "a known-good document in *this* store", so a fixture-
+  backed resource would be a lie in any store the fixtures were never imported into. That
+  also removes the hard-coded id from the authoring prompt: a caller lists resources instead
+  of being told a name.
+- **Guards:** extend the coverage guard to the prompt and resource surfaces, enumerating
+  from the **registered** surface rather than a literal list — the property that made M4's
+  tool guard durable, and the absence of which let a 14th tool have slipped through.
+- **The README then points at the prompts instead of restating them.** Single source of
+  truth: the register, the tools and the prompts each say a thing once.
+
+**Not in scope.** No new tool. No change to a rule, an envelope, or the storage contract.
+R-43(b)'s one-named-key convention governs tool `data` payloads and does **not** apply here
+— `prompts/get` and `resources/read` have their own protocol shapes, so do not wrap them in
+a `SuccessEnvelope`.
+
+**Layering.** Registration is `server/`, thin as ever. Any prompt whose text depends on
+store contents — a label vocabulary, an example id — composes in `service/`, because that
+is where reads live.
+
+**Cost if wrong.** Two protocol surfaces nobody calls, deletable without touching a tool.
+The risk worth naming instead is duplication: if a prompt restates the README rather than
+replacing it, this milestone has added a second place to drift and fixed nothing.
+
+
+
 ### R-68 — M11, the TypeScript client, is descoped
 
 **Owner decision, 2026-09-09: do not build the TypeScript client.** Phase 1 ends at M10.
