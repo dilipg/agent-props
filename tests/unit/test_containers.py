@@ -25,6 +25,14 @@ URL prefix. A compose file saying ``mongo://`` instead of ``mongodb://`` falls
 through to the SQLite branch and the service quietly serves a file named
 ``mongo://mongo:27017/agentprops``.
 
+**A published host port that the test URLs do not dial.** Ruling R-60 moved both
+databases off their default host ports so a foreign server cannot be reached by
+accident, and that only works while `docker-compose.yml` and
+`tests/conftest.py` agree about the number. If they drift apart the suite dials
+a port nothing publishes and **skips every backend test** - green, and testing
+nothing. If either drifts *back* to 27017 or 5432 the hazard R-60 removed
+returns. Both directions are asserted below.
+
 **A missing health dependency.** ``docker compose --profile local up`` is
 required by the acceptance criteria to give "a working service with Mongo in
 **one command**". Without ``condition: service_healthy`` that is a race the
@@ -34,6 +42,7 @@ on other people's machines.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Final
 
@@ -50,6 +59,7 @@ from agentprops.service.context import (
     _MONGO_PREFIXES,
     _POSTGRES_PREFIXES,
 )
+from conftest import DEFAULT_TEST_MONGO_URL, DEFAULT_TEST_POSTGRES_URL
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 COMPOSE_PATH: Final[Path] = REPO_ROOT / "docker-compose.yml"
@@ -59,6 +69,45 @@ DOCKERIGNORE_PATH: Final[Path] = REPO_ROOT / ".dockerignore"
 #: The two profiles `docs/build-handoff.md` section 2 names, and the database
 #: each one is for.
 PROFILES: Final[dict[str, str]] = {"local": "mongo", "shared": "postgres"}
+
+#: The host ports a foreign server would be sitting on. Ruling R-60 moved the
+#: published ports off these, so finding one here again is the hazard returning.
+COLLIDING_PORTS: Final[dict[str, int]] = {"mongo": 27017, "postgres": 5432}
+
+#: The test URL whose port each database's published port has to match, so that
+#: ``--store mongo`` with no environment set reaches the container this file
+#: describes.
+TEST_URLS: Final[dict[str, str]] = {
+    "mongo": DEFAULT_TEST_MONGO_URL,
+    "postgres": DEFAULT_TEST_POSTGRES_URL,
+}
+
+
+#: A ``ports:`` host side written as ``${AGENTPROPS_X_PORT:-27117}``. Matched
+#: rather than split, because the mapping carries three colons and the naive
+#: split returns ``-27117}`` - which ``int()`` reads as a *negative* port and an
+#: assertion then compares against the wrong number. Found by the guard failing
+#: for the wrong reason.
+_INTERPOLATED_PORT: Final = re.compile(r"\$\{[A-Z_]+:-(\d+)\}")
+
+
+def published_host_port(database: str) -> int:
+    """The host port ``database`` publishes by **default**, from its ``ports:`` mapping.
+
+    The default is what a developer gets without setting anything, and therefore
+    the only value worth asserting on. A mapping this cannot parse raises rather
+    than returning a number, because a guard that silently compares nonsense is
+    worse than no guard.
+    """
+    (mapping,) = services()[database]["ports"]
+    host, _, _container = str(mapping).rpartition(":")
+    interpolated = _INTERPOLATED_PORT.fullmatch(host)
+    return int(interpolated.group(1)) if interpolated else int(host)
+
+
+def url_port(url: str) -> int:
+    """The port a test URL dials."""
+    return int(url.rsplit(":", 1)[-1].split("/")[0])
 
 
 def compose() -> dict[str, Any]:
@@ -178,6 +227,48 @@ def test_each_profile_points_at_the_backend_it_is_for(
     )
     url = environment[STORE_ENV_VAR]
     assert url.startswith(prefixes), f"the {profile} store URL {url!r} dispatches elsewhere"
+
+
+@pytest.mark.parametrize("database", sorted(COLLIDING_PORTS), ids=lambda name: str(name))
+def test_the_published_host_port_is_not_the_one_a_foreign_server_sits_on(database: str) -> None:
+    """Ruling R-60, and the reason it is structural rather than a convention.
+
+    A *default* that can reach a foreign server is the hazard. It fired three
+    times while M7 was built, and the third time it silently added 14 passing
+    tests to a reviewer's gate run against an unrelated MongoDB - so the
+    reported test count depended on what happened to be listening, which makes
+    it evidence of very little.
+
+    Mongo answering ``ping`` successfully is the bad case rather than Postgres
+    refusing a password: a failure gets investigated and a **pass** does not.
+    So the assertion is about the number rather than about any behaviour, and it
+    is the one thing a future author might "tidy" back.
+    """
+    assert published_host_port(database) != COLLIDING_PORTS[database], (
+        f"{database} publishes {COLLIDING_PORTS[database]} again, which a foreign server on this "
+        f"machine can be sitting on - see ruling R-60"
+    )
+
+
+@pytest.mark.parametrize("database", sorted(TEST_URLS), ids=lambda name: str(name))
+def test_the_published_host_port_is_the_one_the_test_urls_dial(database: str) -> None:
+    """The other half, and the half that fails *silently* if it drifts.
+
+    R-60's move only works while `docker-compose.yml` and `tests/conftest.py`
+    agree about the number. Drift them apart and the suite dials a port nothing
+    publishes: every backend test **skips**, the run is green, and the skip
+    message names a URL that looks perfectly reasonable. That is the same class
+    of failure R-60 was written about - a number whose meaning depends on
+    something unstated - so it gets the same kind of guard.
+
+    Read from :data:`conftest.DEFAULT_TEST_MONGO_URL` and
+    :data:`conftest.DEFAULT_TEST_POSTGRES_URL` rather than spelled again here,
+    so there is one source per side and this compares them.
+    """
+    assert published_host_port(database) == url_port(TEST_URLS[database]), (
+        f"docker-compose.yml publishes {database} on {published_host_port(database)} while the "
+        f"default test URL dials {url_port(TEST_URLS[database])}: every {database} test would skip"
+    )
 
 
 @pytest.mark.parametrize("profile", sorted(PROFILES), ids=lambda name: str(name))

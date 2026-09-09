@@ -77,7 +77,12 @@ __all__ = ["FROZEN_NOW"]
 #: listening on 27017, holding an unrelated production database, and the default
 #: URL reached it - so an M7 run created and dropped this database on a server
 #: nobody meant to test. Taking the name from the URL's path would have made the
-#: same run drop `pascal-prod`. A constant is the whole of the protection.
+#: same run drop that one.
+#:
+#: Ruling R-60 has since moved the default port to 27117 so the *reach* is gone
+#: too, but this constant stays and stays load-bearing: an override can still
+#: point the suite anywhere, and the thing that must never be possible is
+#: dropping a database whose name came from the URL someone typed.
 MONGO_TEST_DATABASE = "agentprops_conformance"
 
 #: The skip reason for a server that has already been shown to be unreachable,

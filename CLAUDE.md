@@ -88,8 +88,10 @@ Available from M0 onward, once `pyproject.toml` exists.
 - `uv run ruff check` and `uv run mypy` — both must pass before any commit (`mypy` covers `tests/`
   as well as `src/`)
 - `docker compose --profile local up` — service plus Mongo, for authoring; `--profile shared` for
-  Postgres. Alternatives rather than layers; both publish the service on 8000. Set
-  `AGENTPROPS_POSTGRES_PORT` / `AGENTPROPS_MONGO_PORT` if something already holds one
+  Postgres. Alternatives rather than layers; both publish the service on 8000. The databases
+  publish **Mongo on 27117 and Postgres on 5442**, not their default ports, and the test URLs
+  dial exactly those — ruling R-60, so a foreign server on 27017 or 5432 cannot be reached by
+  accident. `AGENTPROPS_MONGO_PORT` / `AGENTPROPS_POSTGRES_PORT` override, deliberately
 - `--store <path>` — a SQLite file, the containerless mode and what CI uses. `--store` also takes a
   `sqlite://` / `postgresql://` / `mongodb://` URL, and every argument reads an `AGENTPROPS_*`
   environment variable

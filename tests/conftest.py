@@ -68,15 +68,27 @@ DEFAULT_STORE_BACKENDS = ("sqlite",)
 
 #: Where ``--store postgres`` and ``--store mongo`` look for their servers.
 #:
-#: Defaults match `docker-compose.yml`'s published ports, so
+#: The ports match `docker-compose.yml`'s published ones, so
 #: ``docker compose --profile shared up -d postgres`` followed by
 #: ``uv run pytest -m integration --store postgres`` needs no environment at
-#: all. Both are overridable, because a developer with a Postgres already
-#: running on 5432 should not have to stop it.
+#: all - and `tests/unit/test_containers.py` asserts the two sides agree,
+#: because a default that dials a port nothing publishes is a default that
+#: skips every test.
+#:
+#: **27117 and 5442 rather than 27017 and 5432, and that is ruling R-60 rather
+#: than a preference.** A default that can reach a *foreign* server is the
+#: problem: it happened three times on the machine M7 was built on, and the
+#: third time it silently added 14 passing tests to a reviewer's gate run
+#: against an unrelated MongoDB. The cost was never the stray database - it was
+#: a reported test count that depended on what happened to be listening.
+#: Overridable ports plus a skip message naming the URL was the first mitigation
+#: and it was not enough, because neither changes what the *default* does. Now a
+#: foreign server on 27017 or 5432 is unreachable unless someone overrides on
+#: purpose.
 POSTGRES_URL_ENV_VAR = "AGENTPROPS_TEST_POSTGRES_URL"
 MONGO_URL_ENV_VAR = "AGENTPROPS_TEST_MONGO_URL"
-DEFAULT_TEST_POSTGRES_URL = "postgresql://agentprops:agentprops@localhost:5432/agentprops"
-DEFAULT_TEST_MONGO_URL = "mongodb://localhost:27017"
+DEFAULT_TEST_POSTGRES_URL = "postgresql://agentprops:agentprops@localhost:5442/agentprops"
+DEFAULT_TEST_MONGO_URL = "mongodb://localhost:27117"
 
 
 def postgres_test_url() -> str:

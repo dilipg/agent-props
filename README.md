@@ -126,7 +126,7 @@ from agentprops.storage import MongoStore, SqlStore, create_schema, sqlite_url
 
 store = SqlStore.from_url(sqlite_url("agentprops.db"))  # containerless, what CI uses
 store = SqlStore.from_url("postgresql://user:pw@host/agentprops")  # shared; migrate it first
-store = MongoStore.from_url("mongodb://localhost:27017/agentprops")  # local authoring
+store = MongoStore.from_url("mongodb://localhost:27117/agentprops")  # local authoring
 
 store.put_blueprint(blueprint, publish=True)
 version_1 = store.put_dataset(dataset)  # the store allocates the version
@@ -153,8 +153,8 @@ on startup, because `create_index` is idempotent and there is no Alembic for a d
 ```bash
 uv run python -m agentprops.server --store agentprops.db                     # stdio, SQLite file
 uv run python -m agentprops.server --store agentprops.db --transport http    # streamable HTTP
-uv run python -m agentprops.server --store mongodb://localhost:27017/agentprops
-uv run python -m agentprops.server --store postgresql://user:pw@host/agentprops
+uv run python -m agentprops.server --store mongodb://localhost:27117/agentprops
+uv run python -m agentprops.server --store postgresql://user:pw@host:5442/agentprops
 ```
 
 `--store` takes a SQLite file path or a `sqlite://` / `postgresql://` / `mongodb://` URL, and every
@@ -226,10 +226,17 @@ Two profiles, and they are alternatives rather than layers — both publish the 
 A third mode has no compose file at all: `--store ./agentprops.db` runs against a SQLite file with
 no container, and that is what CI uses.
 
-The two databases publish their native ports, so the conformance suite can run from the host
-against a container started here. Set `AGENTPROPS_POSTGRES_PORT` / `AGENTPROPS_MONGO_PORT` if
-something already holds one — on Windows a host Postgres bound to `0.0.0.0:5432` wins the race for
-IPv4 over Docker's port proxy, and every connection then lands on the wrong server.
+The two databases publish **Mongo on 27117 and Postgres on 5442** — not their default ports — and
+the test URLs dial exactly those, so the conformance suite runs from the host against a container
+started here with no environment set. Container-internal the ports are still 27017 and 5432.
+
+The odd numbers are ruling R-60 and they are not fussiness. A host Postgres on `0.0.0.0:5432` wins
+the race for IPv4 over Docker's port proxy on Windows, so every connection lands on the wrong
+server and is told the password is wrong; and a host Mongo on 27017 answers *successfully*, so the
+suite **passes** against a server nobody meant to test. That happened three times while M7 was
+built, and the damage was not a stray database — it was a reported test count that depended on what
+happened to be listening. `AGENTPROPS_MONGO_PORT` / `AGENTPROPS_POSTGRES_PORT` still override, which
+is now a deliberate act rather than a default.
 
 ## Promote a dataset
 

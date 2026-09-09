@@ -12,8 +12,10 @@
 # runs the service against a SQLite file with no container at all, and that is
 # what CI uses (`docs/build-handoff.md` section 2).
 #
-# The two databases publish their native ports, so the conformance suite can be
-# run from the host against a container started here:
+# The two databases publish **non-default** host ports - Mongo on 27117 and
+# Postgres on 5442 - and `tests/conftest.py`'s default test URLs dial exactly
+# those, so the conformance suite can be run from the host against a container
+# started here with no environment set at all:
 #
 #   docker compose --profile local up -d mongo
 #   uv run pytest -m integration --store mongo
@@ -21,26 +23,41 @@
 #   docker compose --profile shared up -d postgres
 #   uv run pytest -m integration --store postgres
 #
-# `tests/conftest.py`'s default URLs match the credentials and ports below, so
-# neither command needs any environment set.
+# **The ports are odd on purpose (ruling R-60).** Container-internal they are
+# still 27017 and 5432; only what the host publishes moved. See below.
 #
-# The three published host ports are overridable, because a developer with a
-# Postgres or a Mongo already running is the normal case and not an edge one -
-# and this machine had both. Two ways it goes wrong, and only one of them looks
-# like an error:
+# Why 27117 and 5442 rather than 27017 and 5432 (ruling R-60)
+# ------------------------------------------------------------
+# A developer with a Postgres or a Mongo already running is the normal case, not
+# an edge one - and this machine had both. It went wrong two ways, and only one
+# of them looked like an error:
 #
 #   * on Windows a host Postgres bound to 0.0.0.0:5432 wins the race for IPv4
 #     over Docker's port proxy, so the container is created, listening and
 #     healthy while every connection lands on the other server, which answers
 #     "password authentication failed" for a role it has never heard of;
-#   * a host Mongo on 27017 answers *successfully*, so the suite passes against
-#     a server nobody meant to test. Found by noticing a `pascal-prod` database
-#     in `listDatabases`. This is why the conformance fixture takes its database
-#     name from a constant and never from the URL: it drops that database, and a
-#     collision must not be able to drop someone else's.
+#   * a host Mongo on 27017 answers *successfully*, so the suite **passes**
+#     against a server nobody meant to test. Found by noticing an unrelated
+#     database in `listDatabases`. It happened three times, the third to the
+#     reviewer's own gate run, which returned a test count 14 higher than a
+#     genuinely containerless one.
 #
-# Set AGENTPROPS_POSTGRES_PORT / AGENTPROPS_MONGO_PORT (and the matching
-# AGENTPROPS_TEST_*_URL) and the ambiguity is gone.
+# The real cost was never the stray database: it was that the reported test
+# count depended on what happened to be listening, which makes it evidence of
+# very little. Overridable ports plus skip messages naming the URL was the first
+# mitigation and it was insufficient - a *default* that can reach a foreign
+# server is the problem. So the default moved. A foreign server on 27017 or 5432
+# is now unreachable unless someone sets AGENTPROPS_MONGO_PORT /
+# AGENTPROPS_POSTGRES_PORT or the matching AGENTPROPS_TEST_*_URL, which is a
+# deliberate act.
+#
+# Rejected: a sentinel "is this our schema?" probe. It adds a round trip and a
+# failure mode, and it still has to connect to the wrong server to discover the
+# server is wrong. Picking a port nobody else uses ends the question.
+#
+# The conformance fixture still takes its database name from a constant and
+# never from the URL, because it *drops* that database and a collision must not
+# be able to drop someone else's. That belt stays whatever the port is.
 #
 #   AGENTPROPS_POSTGRES_PORT=5433 docker compose --profile shared up -d postgres
 #   AGENTPROPS_TEST_POSTGRES_URL=postgresql://agentprops:agentprops@localhost:5433/agentprops
@@ -92,7 +109,8 @@ services:
     image: mongo:8
     restart: unless-stopped
     ports:
-      - "${AGENTPROPS_MONGO_PORT:-27017}:27017"
+      # 27117 on the host, 27017 inside. See the R-60 note above.
+      - "${AGENTPROPS_MONGO_PORT:-27117}:27017"
     volumes:
       - mongo-data:/data/db
     healthcheck:
@@ -133,7 +151,8 @@ services:
     image: postgres:17
     restart: unless-stopped
     ports:
-      - "${AGENTPROPS_POSTGRES_PORT:-5432}:5432"
+      # 5442 on the host, 5432 inside. See the R-60 note above.
+      - "${AGENTPROPS_POSTGRES_PORT:-5442}:5432"
     environment:
       POSTGRES_USER: agentprops
       POSTGRES_PASSWORD: agentprops
