@@ -1595,6 +1595,98 @@ is a different and stronger property — it would require resolution to be posit
 for unique tool names, which it already is, and a separate test should assert that directly
 rather than smuggling it into step 8.
 
+### R-65 — an identical re-write is a warned no-op; a differing one is a refused write
+
+M8 made both mismatch conditions — `step_actual_conflict` and `run_finish_mismatch` —
+**warnings**, arguing R-53 and ground rule 3, and flagged that the SK-005-shaped reading is
+defensible but that "neither `RT-E0x` nor `AP-00x` fits a policy verdict".
+
+**Ruling.** Split by whether the value differs, because the two cases have different truths
+to report:
+
+- **Same value** → **no-op success with a warning.** Idempotent, and it matches R-29's
+  byte-identical re-publish and R-47's CAS: the caller's intent is already satisfied, nothing
+  changed, and saying so is honest.
+- **Differing value** → **`ok: false` with an `AP-*` code.** The write **did not happen**.
+  Returning `ok: true` for a refused write misrepresents the outcome, and that is the same
+  class of defect as M3's silent success carrying the winner's value — louder, but the same
+  lie about what the store now holds.
+
+**On "neither family fits": `AP-*` does fit, and R-43 created it for exactly this.** Its
+ruling says the family exists for errors "no registry rule can own — a malformed argument, an
+unknown id, an unparseable document", and a write-once conflict is one. No new family is
+needed; one new code in section 3.5 is.
+
+**On ground rule 3.** "The service never gates" is about refusing to **serve** — the read
+path must hand over fixtures even when something looks wrong. It has never meant that every
+*write* is accepted. R-56 already settled this in terms: "Returning DS-023 is **not** gating.
+Ground rule 3 forbids refusing to serve over a *policy* judgement; this is a validation
+failure on a write, which section 1's envelope covers explicitly." A refused write-once is
+the same shape.
+
+And R-33 already made the store refuse: `set_step_actual` raises on a differing actual. A
+tool that turns that refusal into `ok: true` is reporting a success the storage layer
+explicitly declined to give it.
+
+**Cost if wrong.** If the owner wants a warning for both, the code becomes a warning and the
+tool returns the stored value — but it must then say *which* value it is returning, which is
+the thing M3's defect taught.
+
+### R-66 — `subset` over arrays is positional, and that is a data-contract decision
+
+M8 implemented `subset`'s array handling positionally and correctly flagged that this is not
+merely a helper's internal choice: `expected.comparison` is **stored in every dataset**, so
+the semantics are part of what a stored dataset *means*.
+
+**Ruling.** Positional, as implemented. Three reasons:
+
+1. **It is explainable.** A positional mismatch names an index. Set-like matching answers
+   "no element matched" and leaves the author to work out which, and an error a dataset author
+   cannot act on is a worse product than a stricter rule.
+2. **Set-like matching would mask an ordering bug**, and ordering is precisely what this
+   product exists to make reproducible. R-35 and R-58 spent two rulings making every ordering
+   total *and* collation-stable so that order is meaningful; a comparison mode that then
+   ignores order in the graded payload would undo that at the last step.
+3. **The escape hatch already exists.** An author who genuinely does not care about order
+   uses `schema` mode, whose JSON Schema can describe a set without ordering.
+
+Because it is stored semantics rather than an implementation detail, **document it in
+`contracts.md` beside the `comparison` field and pin it with a test**, so a future change is
+visibly a change to what datasets mean.
+
+**Cost if wrong.** Switching to set-like later silently re-grades every stored dataset that
+uses `subset` over an array — which is exactly why it is being written down now rather than
+left to the helper.
+
+### R-67 — three M8 ratifications
+
+**(a) `run_already_finished` as a third warning-vocabulary addition.** Ratified. R-54(c) says
+a finished run still serves and that M8 "may add a warning if it proves useful; it must not
+add a refusal". M6 shipped saying nothing; saying something is the improvement R-54(c)
+anticipated. `Warning.code` is an open string by R-22.
+
+**(b) `grade` as a fourth exported function.** Ratified. A convenience wrapper over the three
+named helpers is the obvious ergonomic addition, and it stays on the **client** side of ground
+rule 2 — the service still never grades. Requirement: `grade` must be a composition of the
+three, not a fourth comparison mode, so that `expected.comparison`'s three values remain the
+whole vocabulary.
+
+**(c) `mcp` as a required client dependency rather than an extra.** Ratified for phase 1. The
+acceptance criterion is about the **import graph** — "importing the compare module pulls in no
+network dependency" — and that holds: `compare.py` reaches only stdlib and `jsonschema`, with
+a guard deriving its allowlist from `jsonschema`'s own import set rather than from a list of
+today's network libraries, which is the stronger shape. A grading-only install pulling a
+transport is packaging bloat, not a contract violation. The remedy if a grading-only consumer
+appears is a `[transport]` extra; recorded rather than built, since one install path is
+simpler until someone needs two.
+
+**Also ratified:** the correction M8 made to its own test. Its docstring claimed a `put_run`
+implementation "would revert warnings", and a planted **fresh-read** `put_run` passed it — so
+the docstring was more careful than the code, and the test with teeth is the service-level
+stale-read one. That is the fifth self-caught instance in this build of a test proving less
+than it claimed, and every one of the five was caught by an implementer rather than a
+reviewer.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
