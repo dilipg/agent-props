@@ -52,6 +52,7 @@ than doing so quietly.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from agentprops.models import (
@@ -301,11 +302,14 @@ class Store(Protocol):
         implementation of both, ``put_run`` with an edited copy of the run, is
         **wrong in a way nothing today would catch**: :meth:`put_run` writes
         every column from the model it is handed, so a ``fetch_step`` adding a
-        ``pool_exhausted`` warning from a snapshot read before M8's
+        ``pool_exhausted`` warning from a snapshot read before a concurrent
         ``run_finish`` committed would revert ``status`` to ``running`` and null
         ``outcome`` and ``finished_at``. A run that un-finishes itself under
-        load is the most expensive shape of bug this build can ship, and
-        ``run_finish`` not existing yet is the only reason it is not one.
+        load is the most expensive shape of bug this build can ship. **M8 has
+        landed ``run_finish``**, through :meth:`mark_run_finished`, so the
+        column bound below is now the only thing standing between the two
+        writers - it is no longer true that the bug is unreachable because the
+        other half does not exist.
 
         Narrowing the write to one column is what makes the residue R-54(b)
         accepts *actually* what R-54(b) describes: two concurrent warning
@@ -343,6 +347,45 @@ class Store(Protocol):
         :class:`StoreError` when a *different* actual is already recorded.
         Re-recording an identical one is a no-op success, the same replay
         tolerance :meth:`mark_skeleton_submitted` and BP-016 have.
+
+        Ground rule 1 is untouched: this writes to a run, never to a dataset.
+        """
+        ...
+
+    def mark_run_finished(
+        self, run_id: str, status: str, outcome: Mapping[str, Any], finished_at: datetime
+    ) -> bool:
+        """Close a run. A **compare-and-set** on ``finished_at IS NULL``.
+
+        An addition to `docs/contracts.md` section 6 at M8, where ruling R-15
+        lands ``run_finish``. Writes ``status``, ``outcome`` and ``finished_at``
+        and **touches no other column**, for the reason
+        :meth:`set_run_warnings` is narrow, mirrored: ``put_run`` writes every
+        column from the model it is handed, so finishing a run through an edited
+        copy of a snapshot would revert the ``warnings`` a concurrent
+        ``fetch_step`` had just merged in. The two narrow writes are each
+        other's counterpart - one owns ``warnings``, one owns the lifecycle -
+        and between them nothing on the run path writes a column it does not
+        own.
+
+        **A compare-and-set rather than an unconditional update**, for ruling
+        R-47's reason: an unconditional write makes the loser of two concurrent
+        finishes disappear silently, and it hands *both* callers a success
+        envelope naming their own outcome while the row holds one of them. So
+        the condition is evaluated by the database and the return value says
+        which call closed the run: ``True`` if this one did, ``False`` if the
+        run was already finished. The service then reports the divergence as a
+        warning rather than an error - the run keeps the outcome it was closed
+        with, exactly as ``run_start`` keeps its pin (ruling R-53).
+
+        ``finished_at IS NULL`` is the predicate rather than
+        ``status = 'running'`` because both terminal statuses set it, so one
+        clause covers ``finished`` and ``abandoned`` without enumerating a
+        vocabulary the Protocol does not own.
+
+        Raises :class:`RecordNotFoundError` for an unknown run, for the reason
+        :meth:`set_run_warnings` does: "no such run" is not a false answer to
+        "did this call close it".
 
         Ground rule 1 is untouched: this writes to a run, never to a dataset.
         """

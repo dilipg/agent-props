@@ -948,6 +948,45 @@ class MongoStore:
             # concurrent writer's value got there first.
         raise StoreError(f"could not record an actual for {run_id}/{node_id}/{iteration}")
 
+    def mark_run_finished(
+        self, run_id: str, status: str, outcome: Mapping[str, Any], finished_at: datetime
+    ) -> bool:
+        """See :meth:`agentprops.storage.base.Store.mark_run_finished`.
+
+        **One statement, three fields, and a filter the server evaluates.**
+        ``finished_at: None`` is part of the filter, which is what makes this a
+        compare-and-set: the server decides once which of two concurrent
+        updates matches a record, and ``matched_count`` is the answer rather
+        than a follow-up read. That is :meth:`mark_skeleton_submitted`'s shape,
+        for ruling R-47's reason.
+
+        A ``$set`` of exactly these three fields cannot revert ``warnings``,
+        which :meth:`set_run_warnings` owns and a concurrent ``fetch_step``
+        writes.
+
+        ``finished_at`` is supplied by the *caller* here rather than read from
+        the server with ``hello``, and that is not a departure from ruling R-09:
+        it is ``service/``'s injected ``Clock``, the same source
+        ``started_at`` already comes from through :meth:`put_run`. A run's two
+        lifecycle timestamps have to come from one clock or the interval between
+        them is not a duration.
+
+        The existence check stays separate and still raises: "no such run" is
+        not a false answer to "did this call close it".
+        """
+        if not self._run_exists(run_id):
+            raise RecordNotFoundError(f"no run {run_id}")
+        claimed = self._runs.update_one(
+            {"_id": run_id, "finished_at": None},
+            {
+                "$set": _encoded(
+                    RUNS,
+                    {"status": status, "outcome": dict(outcome), "finished_at": finished_at},
+                )
+            },
+        )
+        return bool(claimed.matched_count)
+
     # -------------------------------------------------------------------- health
 
     def health(self) -> StoreHealth:

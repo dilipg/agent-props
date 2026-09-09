@@ -1149,21 +1149,14 @@ def test_set_run_warnings_writes_that_column_and_nothing_else(
     null.
 
     So the guarantee is column-level and it is asserted as such. The run here is
-    put into the state M8's ``run_finish`` will produce - directly, since that
-    tool does not exist yet - and then a warning is written from a *stale*
-    model. Every other field has to survive.
+    closed through :meth:`Store.mark_run_finished` - M8's method, which is what
+    ``run_finish`` writes through, replacing the ``put_run`` simulation this test
+    used while that method did not exist - and then a warning is written from a
+    *stale* model. Every other field has to survive.
     """
     finished_at = datetime(2026, 9, 8, 13, 30, tzinfo=UTC)
     stale = store.put_run(make_run("run-0010", pinned))
-    store.put_run(
-        stale.model_copy(
-            update={
-                "status": "finished",
-                "finished_at": finished_at,
-                "outcome": {"training": "reduced"},
-            }
-        )
-    )
+    assert store.mark_run_finished(stale.id, "finished", {"training": "reduced"}, finished_at)
 
     written = store.set_run_warnings(
         stale.id, [Warning(code="pool_exhausted", detail={"node_id": "request_docs"})]
@@ -1200,6 +1193,108 @@ def test_set_run_warnings_replaces_the_list_and_refuses_an_unknown_run(
 
     with pytest.raises(RecordNotFoundError):
         store.set_run_warnings("no-such-run", [Warning(code="pool_exhausted", detail={})])
+
+
+def test_mark_run_finished_is_a_compare_and_set(store: Store, pinned: Dataset) -> None:
+    """M8's narrow lifecycle write, and the ``False`` is the whole point.
+
+    A compare-and-set on ``finished_at IS NULL``, for ruling R-47's reason: an
+    unconditional update would make the loser of two concurrent finishes
+    disappear silently, and would hand *both* callers a success naming their own
+    outcome while the row held one of them. So the database decides once, and
+    the boolean says which call closed the run.
+
+    The second call here carries a **different** status and outcome, which is
+    what makes the assertion about the row meaningful: a method that reported
+    ``False`` and wrote anyway would pass an assertion on the return value
+    alone.
+    """
+    run = store.put_run(make_run("run-0012", pinned))
+    assert run.status == "running" and run.finished_at is None
+
+    first = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
+    assert store.mark_run_finished(run.id, "finished", {"onboarding_status": "complete"}, first)
+
+    second = datetime(2026, 9, 8, 15, 0, tzinfo=UTC)
+    escalated = {"onboarding_status": "escalated"}
+    assert not store.mark_run_finished(run.id, "abandoned", escalated, second)
+
+    stored = store.get_run(run.id)
+    assert stored is not None
+    assert stored.status == "finished", "the losing finish overwrote the winner"
+    assert stored.outcome == {"onboarding_status": "complete"}
+    assert stored.finished_at == first
+
+
+def test_mark_run_finished_writes_three_columns_and_nothing_else(
+    store: Store, pinned: Dataset
+) -> None:
+    """The counterpart of :func:`test_set_run_warnings_writes_that_column_and_nothing_else`.
+
+    M6 narrowed the warning write because ``put_run`` would revert the
+    lifecycle. The lifecycle write has the same exposure with the columns
+    swapped: built on ``put_run`` it would revert ``warnings``, and under load
+    that means a ``run_finish`` erasing the ``pool_exhausted`` warning a
+    concurrent ``fetch_step`` had just merged in.
+
+    So the run is written with its warnings, its model and its declared version
+    first, and every one of them has to survive a close that knows nothing about
+    them. The steps are asserted too: ``put_run`` re-upserts every step it is
+    handed, and this must not.
+    """
+    run = store.put_run(
+        make_run(
+            "run-0013",
+            pinned,
+            declared_blueprint_version="9.9.9",
+            model=ModelInfo(provider="anthropic", name="claude-opus-5", version="20260401"),
+            external_refs={"otel_trace_id": "trace-77"},
+            warnings=[Warning(code="pool_exhausted", detail={"node_id": "request_docs"})],
+        )
+    )
+    store.upsert_step(run.id, StepRecord(node_id="receive_request", iteration=0, served={"a": 1}))
+    store.set_step_actual(run.id, "receive_request", 0, {"b": 2})
+    before = store.get_run(run.id)
+    assert before is not None
+
+    assert store.mark_run_finished(
+        run.id, "finished", {"onboarding_status": "complete"}, FROZEN_NOW
+    )
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert [item.code for item in after.warnings] == ["pool_exhausted"], (
+        "the lifecycle write reverted the warnings column"
+    )
+    assert after.model == before.model
+    assert after.declared_blueprint_version == "9.9.9"
+    assert after.external_refs == {"otel_trace_id": "trace-77"}
+    assert after.started_at == before.started_at
+    assert after.steps == before.steps, "closing a run rewrote its steps"
+
+
+def test_mark_run_finished_refuses_an_unknown_run(store: Store, pinned: Dataset) -> None:
+    """Raises, for the reason :meth:`Store.set_run_warnings` does.
+
+    "No such run" is not a false answer to "did this call close it", and the
+    ``bool`` return leaves no room for a third value.
+    """
+    with pytest.raises(RecordNotFoundError):
+        store.mark_run_finished("no-such-run", "finished", {}, FROZEN_NOW)
+
+
+def test_an_abandoned_run_is_closed_for_the_compare_and_set(store: Store, pinned: Dataset) -> None:
+    """Both terminal statuses set ``finished_at``, which is why that is the predicate.
+
+    A compare-and-set keyed on ``status = 'running'`` would behave identically
+    here today and would need a second clause the moment the vocabulary grew.
+    The Protocol holds no opinion about the vocabulary at all.
+    """
+    run = store.put_run(make_run("run-0014", pinned))
+    assert store.mark_run_finished(run.id, "abandoned", {}, FROZEN_NOW)
+    assert not store.mark_run_finished(run.id, "finished", {}, FROZEN_NOW)
+    stored = store.get_run(run.id)
+    assert stored is not None and stored.status == "abandoned"
 
 
 def test_the_path_is_reconstructed_from_the_steps(store: Store, pinned: Dataset) -> None:

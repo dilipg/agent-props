@@ -1257,6 +1257,37 @@ class SqlStore:
             # concurrent writer's value got there first.
         raise StoreError(f"could not record an actual for {run_id}/{node_id}/{iteration}")
 
+    def mark_run_finished(
+        self, run_id: str, status: str, outcome: Mapping[str, Any], finished_at: datetime
+    ) -> bool:
+        """See :meth:`agentprops.storage.base.Store.mark_run_finished`.
+
+        **One statement, three columns, and a ``WHERE`` the database evaluates.**
+        ``WHERE finished_at IS NULL`` is what makes this a compare-and-set
+        rather than a read-then-write: exactly one of two concurrent statements
+        reports a matched row, and ``rowcount`` is the answer rather than a
+        follow-up ``SELECT`` that would reintroduce the race one statement
+        later. That is :meth:`mark_skeleton_submitted`'s shape, for ruling
+        R-47's reason.
+
+        Naming the three columns is the other half. An ``UPDATE`` that set only
+        these cannot revert ``warnings``, which is the column
+        :meth:`set_run_warnings` owns and the one a concurrent ``fetch_step``
+        writes.
+
+        The existence check stays separate and still raises: "no such run" is
+        not a false answer to "did this call close it".
+        """
+        with self._engine.begin() as conn:
+            if self._existing_run(conn, run_id) is None:
+                raise RecordNotFoundError(f"no run {run_id}")
+            claimed = conn.execute(
+                update(runs)
+                .where(runs.c.id == run_id, runs.c.finished_at.is_(None))
+                .values(status=status, outcome=dict(outcome), finished_at=finished_at)
+            )
+            return bool(claimed.rowcount)
+
     # -------------------------------------------------------------------- health
 
     def health(self) -> StoreHealth:
