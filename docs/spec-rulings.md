@@ -1705,6 +1705,86 @@ stale-read one. That is the fifth self-caught instance in this build of a test p
 than it claimed, and every one of the five was caught by an implementer rather than a
 reviewer.
 
+## Rulings that bind M9 (the web app)
+
+### R-70 — F-16 is answered: same-origin, and `dataset_import` is the edit path
+
+**The transport half.** M9 measured it rather than reasoning about it: a browser **cannot**
+drive the MCP transport cross-origin. `OPTIONS /mcp` returns 405 (`allow: GET, POST, DELETE`),
+no response carries any `access-control-*` header, and there is no `expose-headers` for
+`mcp-session-id`. So the minimum honest shape is **same-origin** — Vite proxies `/mcp` in
+development and the built app is served beside the service.
+
+**Ratified.** It needs no service change and adds no REST API alongside the tool surface,
+which is what R-17 requires and what clause 5 makes mechanical. The opt-in `--allow-origin`
+patch is described in `DECISIONS.md` and deliberately **not built**: phase 1 has no auth and
+no multi-tenancy, so a same-origin deployment is coherent rather than a limitation. Record it
+as the deployment constraint it is — cross-origin is impossible until that patch exists.
+
+**The edit half — and I was about to rule the other way on a false premise.**
+
+`dataset_import` is the web app's dataset-edit path, because the tool surface has no
+`dataset_upsert`: the dataset writes are `dataset_submit` (which mints a *new lineage*, so it
+is a different dataset rather than an edit), `dataset_expand`, the two archive flags, and
+`dataset_import`. Only import produces a new version of the *same* lineage, which is what
+R-17's "copy-on-write" means.
+
+I was going to mandate a new `dataset_update` tool, on the reasoning that an edit button must
+not be able to publish a blueprint as a side effect. **I checked instead of assuming, and the
+premise is false.** The app sends `blueprints: []` in the bundle, deliberately: import
+validates against a resolver answering from the receiving store *plus* the bundle, so a
+dataset whose blueprint is already published satisfies DS-001 without the bundle re-carrying
+it — and sending it would re-publish an immutable version for no reason. With an empty
+blueprint list, `dataset_import` cannot publish anything.
+
+**Ruling: accept `dataset_import` as the edit path for phase 1.** Three facts carry it:
+
+1. It **cannot** publish a blueprint in this usage, per the above.
+2. It re-runs **full** validation on arrival, which is exactly what an edit needs and more
+   than a purpose-built `dataset_update` would get for free.
+3. Nothing in the stored dataset records *how* a version came to be, so there is no audit
+   trail to misrepresent. My "import lies about an edit" concern was about the caller's API
+   ergonomics, not about stored data — a materially smaller problem than I first thought.
+
+The residual cost is real but small: a caller must know the bundle-wrapping idiom, and M9
+documents it at the call site rather than leaving it to be rediscovered. **The remedy, if a
+second consumer appears, is `dataset_update`** — a second caller having to rediscover the
+idiom is the trigger, not aesthetics.
+
+**Cost if wrong.** A tool mirroring `dataset_submit`'s validate-then-store path, added later
+against a settled contract.
+
+### R-71 — five M9 ratifications
+
+**(a) The validation split.** Ajv carries **shape only** and the catalogue round-trips to
+`blueprint_validate` / `dataset_validate`, which **store nothing** — so both halves are
+genuinely before save, and clause 1 is satisfied without pretending Ajv can see BP-005
+reachability or DS-008 entity drift. This is R-04's division arriving exactly where it was
+designed to: the schemas describe shape, the catalogue owns policy.
+
+**(b) `JsonEditor.tsx` has no unit test**, because CodeMirror needs layout `jsdom` lacks. It
+is covered by `vite build`, the live run, and a same-contract `<textarea>` stub in the
+component test. Ratified, and the honesty is the point — this was stated rather than glossed,
+which is the standard the last five milestones have set.
+
+**(c) Clause 3's test cannot assert its own claim.** It asserts the named fields are present
+at full length and that the list makes exactly one call (re-checked at 20 rows); it cannot
+assert those fields are *enough* to judge relevance, and a fifth needed field would still
+pass. Ratified as stated — "enough to judge relevance" is a design claim, and saying plainly
+what a test does and does not cover is worth more than a test that pretends to cover it.
+
+**(d) Bundle at 482 kB gzipped**, nearly all CodeMirror and React Flow, both behind a click;
+`React.lazy` not done. Ratified for a local authoring tool. Recorded, not optimised.
+
+**(e) The three-backend suite was not re-run**, because no storage code was touched. Correct
+reasoning — M7's evidence stands, and re-running it would prove nothing about this diff.
+
+**One hazard worth recording permanently:** `vanilla-jsoneditor` bundles its own Ajv 8 and the
+app adds another, and the top-level `ajv` resolved to **6.15.0** — hoisted from ESLint — until
+`ajv@8` was pinned explicitly. A transitive hoist silently supplying the wrong *major* version
+is the same shape as this build's other silent-success failures. Do not remove that pin as
+"already provided".
+
 ## Owner scope decisions
 
 ### R-68 — M11, the TypeScript client, is descoped
