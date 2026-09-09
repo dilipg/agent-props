@@ -4103,3 +4103,156 @@ guard that has only ever been green is a guard nobody has evidence for.
    measures that), but a `[grading]`/`[client]` extra split would make the packaging match the
    layering. Left as one distribution because the client's primary job is talking to a server, and a
    default install that cannot do that is user-hostile.
+
+# Fix round 1 — M8
+
+## [M8, fix round 1] Correction: a differing re-write is `ok: false` with `AP-007` (ruling R-65)
+The entry above — "`record_step` and `run_finish` answer a re-write the way `run_start` answers a
+re-start" — argued that **both** halves of a repeated write are warnings on a success, from R-53 and
+ground rule 3. It also flagged, as question 1, that the SK-005-shaped reading was defensible. R-65
+rules against it, and the reasoning is the part worth keeping: `ok: true` for a write that **did not
+happen** misreports what the store now holds, which is M3's silent-success defect said louder. And
+R-33 already makes `set_step_actual` *raise* on a differing actual, so the tool was reporting a
+success the storage layer had explicitly declined to give it.
+**What was wrong with my ground-rule-3 argument**, precisely: I read "the service never gates" as
+covering every refusal. R-65 draws the line where R-56 already drew it — ground rule 3 governs
+refusing to **serve**, and a refused *write* is `ok: false` and is not gating. R-56 says it in terms
+for DS-023 and I had that ruling in front of me. This is the second time in this build that a ground
+rule was stretched one layer past its subject; the remedy both times was a ruling that names the
+subject rather than the rule.
+**And `AP-*` does fit**, which I said it did not. R-43 created the family for errors "no registry
+rule can own", and a write-once conflict is one. One code, `AP-007`, not a new family.
+So the split is: **identical → no-op success with a warning; differing → `ok: false` with
+`AP-007`.** Two branch points, `_conflicted` and `_finish_divergence`, and nothing structural moved
+— no adapter, no Protocol change, no model change.
+Where the finding points, and what it carries. `record_step` points at `/actual`: the address
+resolved and the run exists, so the only thing wrong with the request is the document it carries.
+`run_finish` points at the **first** diverged field in a fixed order, so a status-only divergence
+points at `/status` and an outcome-only one at `/outcome`, deterministically — a pointer can address
+only one field and picking by a rule beats picking by whichever comparison ran first, with
+`diverged` in the context naming every field. Neither carries the *documents*: an `actual` and an
+`outcome` are arbitrary agent output with no size bound, and `run_get` is where a caller reads them.
+What the caller needs from the finding is that a value is there, under which key, and that it is not
+theirs.
+Verified from the losing side: with the pre-ruling warn-on-success behaviour planted back, **seven**
+tests fail — four service, the wire contract test, and the read-only walk.
+
+## [M8, fix round 1] `AP-007` is distinct from `AP-005`, and that distinction is the reason both exist
+`AP-005` means the store refused a write with **nothing** recorded — contention, its retry budget
+exhausted. `AP-007` means a value is there and it is not the caller's.
+Reason: telling a caller its evidence lost to a value that does not exist is the specific error
+`_conflicted`'s classification was written to avoid, and collapsing the two would reintroduce it
+under a new name. `_conflicted` re-reads the step and branches on which condition actually holds,
+which is not a second decision site for the *write* — the store made that decision, once, in its own
+single-decision loop — but classification of the refusal it returned.
+`_conflicted`'s third branch is **unreachable by construction** and is written out rather than
+asserted away: an identical re-record never reaches it, because `set_step_actual` returns the
+existing record and does not raise. Reaching it would mean a value *equal* to the caller's appeared
+between the raise and the re-read, which write-once makes impossible; if it ever did, the caller's
+intent is satisfied and a success is the honest answer, so that is what it returns rather than
+raising a second exception inside an error path.
+
+## [M8, fix round 1] R-65's no-op half carries a warning, and this is the one place I went past the listed scope
+The coordinator's scoping said the same-value paths were "unchanged" and that my existing tests
+"already do this and stay". They did not: my paths were **silent**. R-65's bullet reads "**no-op
+success with a warning** ... nothing changed, and saying so is honest", and the round's verification
+step asks to show "an identical one still returning a **warned** success". Two statements of the
+ruling against one aside that misdescribed my code, so I implemented the warning.
+`run_finish` needed **no new code**: an identical re-finish reports `run_already_finished`, which is
+the same code, the same detail and the same helper (`_lifecycle`) that `fetch_step` uses for a closed
+run — because the condition *is* the same. `record_step` needed one, `step_actual_already_recorded`,
+keyed per step (`node_id` and `iteration` in the detail) because the fact is about a step where
+`run_already_finished` is about the run.
+Worth recording that R-65's two cited precedents both point the other way: R-29's byte-identical
+re-publish is silent, and R-47's CAS loser gets an *error*. The bold text and the verification
+instruction are what decided it, and the difference is defensible on its own terms — a re-publish
+tells a caller nothing it did not know, where a second writer on one run step is a fact about the
+harness.
+**How the repeat is detected**, and why that is not a second decision site: `set_step_actual` returns
+a `StepRecord` for both a first record and an identical repeat and does not say which it did, so
+`record_step` reads the run snapshot *before* the write. It decides nothing about whether to write —
+only what to say afterwards, which is the shape `run_start`'s `_replayed` already uses. Residue,
+stated: a concurrent writer landing an *equal* actual between the snapshot and the call makes this
+call look like the first and report no warning. The stored value is correct either way, and a
+*differing* concurrent write is refused with `AP-007` rather than mis-reported.
+Cost: one warning-vocabulary addition, on top of the two R-65 removed. Net one fewer than M8 shipped.
+
+## [M8, fix round 1] R-66: `subset`'s array semantics are documented beside the `comparison` field
+The implementation was already positional and already pinned by a test. What this round adds is the
+**documentation**, in `contracts.md` section 2.2 next to the `comparison` field rather than only in
+the helper's docstring.
+Reason, which is R-66's: `expected.comparison` is stored in every dataset, so what each mode *means*
+is part of what a stored dataset means, and switching to set-like later would silently re-grade every
+stored dataset that uses `subset` over an array. A decision with that blast radius belongs where a
+dataset author reads, not only where a helper is implemented. DS-017's row now points at it.
+The three reasons are the ruling's and worth keeping together: a positional mismatch **names an
+index** where set-like matching can only say "no element matched", and an error a dataset author
+cannot act on is a worse product than a stricter rule; set-like matching would **mask an ordering
+bug**, and R-35 and R-58 spent two rulings making every ordering total and collation-stable so that
+order is meaningful; and the **escape hatch already exists** — an author who genuinely does not care
+about order uses `schema` mode, whose JSON Schema can describe a set.
+The two neighbouring decisions are documented in the same place for the same reason: `null` is not
+absence, and numbers cross `int`/`float` while `bool` crosses nothing. Including the note that
+`schema` mode is *more* permissive about whole floats than `exact` is — JSON Schema says `0.0` is an
+integer — so the modes agreeing about `1` and `1.0` is a coincidence rather than a shared rule.
+
+## [M8, fix round 1] Two docstrings corrected rather than reworded
+Both found by the review, and both are the shape this build keeps finding: a docstring more careful
+than what it describes.
+**`read_envelope` claimed to be "tolerant of the fields it does not need"**, and said that rejecting
+a new optional field would break against a newer server. The tolerance is real only *inside* `data`,
+`warnings` and `errors`; an unknown **top-level** key is rejected, and
+`test_client_run.py::test_a_protocol_level_error_is_not_mistaken_for_a_failure_envelope` pins that.
+The docstring now says which half is which, why that is the right way round — contracts section 1
+fixes the envelope at two shapes, so a third top-level key means the transport handed back something
+that is not an agent-props response — and what the trade costs: a future envelope-level addition
+needs the client updated rather than being ignored.
+**`connect` said the portal and the session close "in that order"**, which is the opposite of what
+the `with` does. The *code* is right and the prose was wrong: the session's `__aexit__` has to run on
+the portal's loop and in the task that entered it, so the portal must outlive it — which is exactly
+the failure the whole arrangement exists to avoid, and why the two are one `with` rather than two.
+
+## [M8, fix round 1] The end-to-end test asserts the warnings that must be absent
+Its non-pool fetches asserted resolution and not an empty warning list, so "nothing spurious" rested
+entirely on the pool loop's `== []` and a unit negative control one directory away.
+Reason it matters *here* specifically: this file is the milestone's most quotable artifact, and a
+walk that asserted only where a warning **is** expected would pass against a server that warned on
+everything. Every non-pool fetch on a running run now asserts `warnings == ()`, inside the artifact
+rather than only in a guard nobody reads alongside it.
+Also: step 4 iterated the *golden* document's keys, so a submitted dataset carrying an **extra**
+top-level field would never have appeared in `differing`. The key sets are compared first, which is
+what makes "the golden fixture but for its id" exact rather than one-directional.
+
+## [M8, fix round 1] `connect` is driven against a real stdio subprocess
+Every other test handed `connect` the in-process `MCPServer` object. That is a real MCP session over
+the real server and store (R-16) and it satisfies clause 1 — but it is the one target for which the
+blocking portal's whole reason for existing is invisible, because there is no process to re-spawn.
+So the script is walked once against `python -m agentprops.server --transport stdio` over a real
+pipe, from a **synchronous** test function. What that adds over `test_transports.py`, which already
+spawns this process: that file drives it with a raw `mcp.Client` in an `async` test, and this drives
+it with the client library, synchronously — the combination a real user has, and the one where a
+mistake in the portal's lifecycle surfaces as `RuntimeError: Attempted to exit cancel scope in a
+different task` rather than as a failed assertion.
+**What it does not prove, stated in the test rather than left implied.** "One session for the whole
+block, not one per call" is structural — `connect` enters
+`portal.wrap_async_context_manager(Client(target))` exactly once — and no assertion here can observe
+the spawn count, because the subprocess's state lives in a SQLite *file* that would survive being
+re-spawned. What it does show is that the claim is now made about a target where being wrong costs
+eleven process launches, and that the whole authoring flow plus a run walk completes on one session.
+It is the only test outside `test_transports.py` that spawns a process, which is why it is in
+`tests/integration/` (CLAUDE.md: "no subprocesses in unit tests").
+
+## Questions for the owner — M8 fix round 1
+1. **R-65's no-op half now warns, which is one more warning code than the round's scope listed.**
+   The ruling's bold text and the verification step both say "with a warning"; the scoping line said
+   my silent paths were unchanged and already did it, which was a misreading of my code rather than
+   a decision. I followed the ruling. If the intent was silence, deleting
+   `step_actual_already_recorded` and dropping `_lifecycle` from `finish`'s success path reverts it
+   in about ten lines, and the two tests say which assertions to flip.
+2. **`run_finish` reuses `run_already_finished` for an identical repeat.** The condition is
+   genuinely the same one `fetch_step` reports, so no code was invented — but it does mean the code
+   now appears on a *write* as well as a read. A distinct `run_already_closed_with_this_outcome`
+   would separate them at the cost of a fifth vocabulary addition.
+3. **`AP-007`'s context omits the documents.** A caller that wants to see what it disagreed with
+   makes a second call (`run_get`). The alternative is putting an unbounded agent-produced document
+   into an error envelope, which no other finding in this product does.
