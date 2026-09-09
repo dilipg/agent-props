@@ -5307,20 +5307,26 @@ un-de-duplicated README, with fixture content already removed:
 
 ```text
 prompt author-a-blueprint shares 21 9-word shingle(s) with README.md
-    'nodes sharing a tool_name where position cannot …' (line 113)                [x3]
+    'nodes sharing a tool_name where position cannot disambiguate them' (line 113)
+    'sharing a tool_name where position cannot disambiguate them that' (line 113)
+    'two nodes sharing a tool_name where position cannot disambiguate' (line 113)
 prompt wire-an-agent shares 8 9-word shingle(s) with README.md
-    'python from agentprops_client import compare connect with …'                 [x3 shown]
+    'python from agentprops_client import compare connect with connect("http://127.0.0.1:8000/mcp agent_id="location-onboarding'
+    'agentprops_client import compare connect with connect("http://127.0.0.1:8000/mcp agent_id="location-onboarding as props'
+    'connect with connect("http://127.0.0.1:8000/mcp agent_id="location-onboarding as props start = props.run_start({"labels'
 prompt cover-the-label-space shares 5 9-word shingle(s) with README.md
-    'exit criterion is twenty datasets spanning the …' (line 133)                  [x3]
+    'exit criterion is twenty datasets spanning the declared labels' (line 133)
+    'criterion is twenty datasets spanning the declared labels not'
+    'datasets spanning the declared labels not one per combination'
 prompt cover-the-label-space shares 1 9-word shingle(s) with DECISIONS.md
-    'exit criterion is twenty datasets spanning the …'
+    'exit criterion is twenty datasets spanning the declared labels'
 ```
 
-Each quoted shingle is **truncated to eight words**, one below the window, and the full untruncated
-output is in `.superpowers/sdd/build-handoff/task-M9.5-report.md`, which is gitignored and so
-outside the comparison. That is not tidiness: `DECISIONS.md` is a tracked `.md` the guard reads, and
-the first draft of this entry quoted the output verbatim - which re-introduced the duplication it was
-recording. The guard caught it, which is the guard working on its own author.
+**Restored to full length in fix round 2** - see the entry below. As first written this block was
+clipped to eight words per shingle, one below the window, because the guard then compared *every*
+tracked `.md` including this file, and quoting its own failure output re-introduced the duplication
+it was recording. The guard caught that, which is the guard working on its author; ruling R-78 was
+then amended to exempt `DECISIONS.md`, and the reason to clip went with it.
 
 All three of the reviewer's fragments, plus a fourth against `DECISIONS.md` that only a guard over
 *every* tracked `.md` would have found. `REPORTED = 3` shingles per offence rather than one: the
@@ -5349,18 +5355,19 @@ text is not load-bearing:
 - `cover-the-label-space`'s exit-criterion sentence. `DECISIONS.md` is append-only and its `[M9.5]`
   entry quotes the PRD's criterion while explaining why the prompt states it, so the README fix
   alone would have left the `DECISIONS.md` collision with nothing to do about it. The prompt now
-  states the same fact - PRD 6's twenty-dataset bar - in different words, which is what a shingle
-  guard asks for and all it asks for. Rewording the prompt was cheaper than exempting the shingle,
-  and an exemption would have stopped the guard noticing a *future* README that restated it.
+  now says "Twenty datasets that span the declared labels is the bar PRD 6 sets" - the same fact,
+  not the same nine words. Rewording the prompt was cheaper than exempting the shingle, and an
+  exemption would have stopped the guard noticing a *future* README that restated it.
 - `wire-an-agent`'s code block. It opened with the same two lines as the README's step-4 worked
   example (`from agentprops_client import compare, connect` and `with connect(...) as props:`). The
   README's block is a demonstration with real output and stays; the prompt's is instruction, so it
   now shows a flat call sequence starting at `props = connect(...)` with a following line saying
   `connect` is a context manager. Better as instruction anyway - less to copy, more explicit.
-- `_CLIENT_GOTCHAS`. Its sentence about where grading happens was verbatim in the README's
-  worked-example commentary, which is also staying, so the prompt's version was rephrased. The
-  gotchas are also named in the README's "Rough edges" list, which the brief says to leave intact -
-  so the guard is now what holds those two apart, and the constant carries a comment saying so.
+- `_CLIENT_GOTCHAS`. "The service stores the expectation and hands back evidence" was verbatim in
+  the README's worked-example commentary, which is also staying. Reworded to "This service holds
+  the expectation and returns evidence; the comparison is yours". The gotchas are also named in the
+  README's "Rough edges" list, which the brief says to leave intact - so the guard is now what
+  holds those two apart, and the constant carries a comment saying so.
 
 ## [M9.5, fix round 1] The "whatever its status" bug had a second site, and the two prompts must word a miss differently
 `Store.get_blueprint` returns an exact version **whatever its status**. M9.5 fixed that in
@@ -5474,3 +5481,68 @@ on the Protocol rather than a page size in the catalogue. Recorded in the functi
 3. **Carried forward, unchanged:** should `resources/list` enumerate one entry per document (now
    that subclassing is known to be a public route)? Should `contracts.md` document either surface?
    Should `cover-the-label-space` name missing tuples rather than per-value gaps?
+
+## [M9.5, fix round 2] R-78's amendment reaches the guard, and the clipped evidence is restored
+R-78 was amended mid-round to exempt `DECISIONS.md` by name - "an append-only record whose function
+is quotation" cites rather than drifts - and the amendment was passed on with the note that it
+"mandates no new work". It mandated exactly the work of changing the guard, which still compared
+every tracked `.md`. So the ruling and the code disagreed, which is the state this build distrusts
+above all others, and the disagreement was in the ruling's favour: the guard was stricter than the
+rule it implements.
+
+**The exemption is a second mechanism, not a second entry in the first one.** `EXEMPT` forgives one
+nine-word phrase everywhere; `EXEMPT_DOCUMENTS` forgives one file entirely. Keeping them separate is
+what makes the stronger reason a per-file exemption needs visible at the exemption - R-78 asks for
+the reason to live there and not only in the register, because a reader of the guard is the person
+who would otherwise add the next entry.
+
+`tracked_markdown()` stays unfiltered and `compared_markdown()` applies the exemption, so the
+listing test can compare *what git found* against *what the guard reads*. Without that split there
+would be nothing to notice an exemption growing.
+
+**Four assertions stop the exemption becoming a deletion by instalments**, which is the failure mode
+R-78 names when it says never to delete the guard. Every exempt name must be a file git actually
+tracks, so an exemption cannot rot into a no-op that reads as protection - the same shape as
+`test_every_deferral_names_a_documented_tool`. The compared set must still hold `README.md` and
+`CLAUDE.md`, and must still hold something under `docs/`, which is R-78's amended scope spelled out.
+And each exempt file must really be skipped, so the mechanism does what its name says.
+
+**Both ends, on synthetic inputs.** The comparison moved into `duplications(rendered, documents,
+stored)` so a test can drive it directly, with the exemption applied *inside* it rather than by a
+pre-filtered argument - a test that filtered its own input would be testing a copy of the rule. One
+planted nine-word run, two documents: reported for `README.md`, silent for `DECISIONS.md`. The
+failing half is asserted first and its message is checked to name the document, because an exemption
+that swallowed everything would satisfy the passing half alone.
+
+**And measured against the real repository, which is the stronger evidence.** With the exemption in
+place the guard reports nothing. With `EXEMPT_DOCUMENTS` emptied against the same working tree, it
+reports twelve shingles across three prompts - the restored evidence block at lines 5310-5312, the
+restored exit-criterion quote at 5358, and the restored grading sentence at 5368. Those three
+collisions *are* the amendment's subject, so seeing them return when the exemption is removed is the
+proof that it is load-bearing rather than decorative.
+
+**The clipped evidence is back at full length**, which was the second half of the instruction. As
+first written that block quoted eight words per shingle, one below the window, purely to satisfy a
+scope that has now been withdrawn - so what stood in the record was a distortion produced by a rule
+rather than a decision anyone made.
+
+**Where this file was edited rather than appended to, and the rule used.** `DECISIONS.md` is
+append-only and R-68's precedent is that a wrong entry gets "a retraction entry rather than an
+edit". Three places were edited in place anyway: the evidence block, and the two sentences in
+`[M9.5, fix round 1]` that *described* a reworded prompt sentence instead of quoting it. The rule
+distinguishing them is whether the round-1 text recorded a **decision** or was **deformed by the
+withdrawn scope**. A retraction preserves a decision that turned out wrong, which is worth keeping;
+preserving a paraphrase nobody chose, plus a retraction explaining that the quotes were fine all
+along, would leave the record harder to read and no more honest. Owner question 1 from round 1 was
+*not* edited - it was a correct question when written, and R-78's amendment is its answer.
+
+## Questions for the owner — M9.5 fix round 2
+1. **Was editing `DECISIONS.md` in place the right call?** The instruction was to restore the
+   evidence, and I extended that to the two paraphrased quotes beside it on the same reasoning. If
+   the append-only convention is absolute, the alternative is reverting all three and adding the
+   full text in this entry instead - which I can do in one commit, and which I did not choose
+   because it would leave the deformed text as the reader's first encounter with the evidence.
+2. **`.claude/skills/run-agent-props/SKILL.md` is compared and is arguably instructions.** It is
+   tracked, it is `.md`, and it *is* read for instructions - by the harness rather than by a person.
+   It shares nothing today. Flagging it because it is the one file in scope whose classification I
+   guessed rather than derived from R-78's list of three.
