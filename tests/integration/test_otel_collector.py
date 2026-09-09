@@ -58,6 +58,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Final
 from urllib.error import URLError
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 import pytest
@@ -369,18 +370,36 @@ def test_exporting_twice_lands_in_the_same_trace(context: ServiceContext, run_id
     )
 
 
-@pytest.mark.skipif(not REACHABLE, reason=SKIP_REASON)
-def test_the_collector_is_the_one_this_suite_thinks_it_is() -> None:
-    """The guard against the failure ruling R-60 exists for.
+def test_the_default_port_is_not_otlps_default() -> None:
+    """Ruling R-60, and **deliberately not behind the reachability skip.**
 
-    A foreign collector on 4318 would satisfy every assertion above, so the
-    reachability check and the endpoint the export actually used are asserted to
-    be the *same* place - and the port is asserted not to be OTLP's default,
-    because that is the value a well-meaning edit would put back.
+    This is the assertion that has to run in the gate that always runs. An edit
+    putting 4318 back would otherwise pass CI - where no collector is up and
+    every test in this file skips - and would then let clause 1 pass against
+    whatever collector happened to be listening on a developer's machine. That
+    is the precise failure R-60 exists for, and a guard for it that only runs
+    when the thing it guards is already present is not a guard.
+
+    Three properties, none of which needs a collector: the URL is a traces
+    endpoint, the port is not OTLP's default, and the default this suite dials
+    is the one `docker-compose.yml` publishes.
     """
     assert traces_url().endswith("/v1/traces")
     assert ":4318/" not in traces_url(), (
         "4318 is OTLP's default and any collector on this machine answers it (R-60)"
     )
     assert DEFAULT_OTLP_PORT == "4418"
+    assert DEFAULT_HEALTH_PORT == "13233"
+
+
+@pytest.mark.skipif(not REACHABLE, reason=SKIP_REASON)
+def test_the_collector_answering_is_the_one_the_export_reaches() -> None:
+    """The other half, which does need a collector: one place, not two.
+
+    The reachability probe asks the **health** endpoint and an export posts to
+    the **traces** endpoint, on different ports of the same container. A skip
+    driven by one while the other pointed somewhere else would be the wrong
+    kind of green, so both are asserted to name the same host.
+    """
     assert REACHABLE, SKIP_REASON
+    assert urlsplit(health_url()).hostname == urlsplit(traces_url()).hostname
