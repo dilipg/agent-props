@@ -1379,6 +1379,83 @@ required for a working phase-1 runtime", not "must not exist".
 **Cost if wrong.** If clamping is preferred, it becomes a clamp plus a warning naming the
 requested and actual counts — never a silent one.
 
+### R-57 — R-36's `ILIKE` clause was wrong, and `datasets_search` is dropped
+
+R-36 told M7's Postgres adapter to implement `q` with `ILIKE`. **That instruction was
+already obsolete when I wrote it and I did not notice**: R-39(a), made two milestones later,
+moved both the case fold and the substring match into Python, so `find_datasets` emits **no
+SQL text match at all**. There is nothing for `ILIKE` to be used in and nothing for either
+index to serve.
+
+Worse, following R-36 literally would have broken R-36's own purpose. M7 measured it on
+Postgres 17: `'Straße operator' ILIKE '%strasse%'` is **false**, while Python's
+`str.casefold` matches — and it diverges in both directions. So `ILIKE` is provably not a
+superset of the fold R-39(a) established, and using it would have made two backends disagree
+about what a query returns, which is the exact failure R-36 existed to prevent.
+
+**Ruling.** The `ILIKE` clause in R-36 is **struck**. `q` is matched in Python on every
+backend, per R-39(a). The `datasets_search` index is **dropped**, not replaced with
+`pg_trgm` — a trigram index accelerates a SQL text predicate, and there is no longer one to
+accelerate. R-36's substring semantics stand unchanged; only its implementation instruction
+was wrong.
+
+The general lesson, and the reason this is recorded rather than quietly fixed: **a ruling
+made against one state of the code can be invalidated by a later ruling.** R-39(a) changed
+the mechanism R-36 depended on, and nothing checked the pair. When a ruling names an
+implementation rather than a semantic, it needs re-reading whenever the thing it names
+changes.
+
+**Cost if wrong.** If a SQL-side text predicate returns, both the index and the operator
+choice come back with it — and they must then be measured against `casefold`, not assumed
+equivalent.
+
+### R-58 — a total order is not enough; the collation must match too
+
+R-35 required every list ordering to be **total**, "so that identical inputs give
+byte-identical output on every backend". M7 found that insufficient. On Postgres a locale
+collation orders `'runa'` before `'run-b'`, while SQLite and Mongo do not — so a *total*
+order still produced different byte output across backends. Fixed with `COLLATE "C"` on the
+TEXT tie-breaks, and verified to fail without it.
+
+**Ruling.** R-35 is extended: every ordering must be total **and collation-stable**. Any
+TEXT column used as a sort key or a tie-break carries an explicit, locale-independent
+collation. `COLLATE "C"` on Postgres; SQLite's default binary collation and Mongo's simple
+binary comparison already match it, which is why the divergence appeared on exactly one
+backend.
+
+This was a real gap in my ruling, not an implementation slip. "Total" answers *are two rows
+ever tied?*; it does not answer *do the three backends agree which comes first?* The
+conformance suite asserts identical results across backends, so a collation difference is
+precisely the class of thing it exists to catch — and it did.
+
+**Cost if wrong.** A locale-aware sort would read more naturally to a human browsing the web
+app; if that is ever wanted it belongs in the presentation layer, not in the ordering the
+conformance suite pins.
+
+### R-59 — two M7 decisions, and a testing hazard worth recording permanently
+
+**(a) `MAX_EXPAND_COUNT = 10000` is ratified as an invented bound.** No document gives a
+per-call limit, and DS-023 cannot supply one for a non-loop pool node (R-51 makes pools legal
+there, and no `max_iterations` exists to bound them). An unbounded `count` is a
+denial-of-service on the authoring instance, so a bound is needed and its value is arbitrary.
+Recorded as an owner question. R-56 still governs the loop case: an expansion past
+`max_iterations` is DS-023 regardless of this ceiling.
+
+**(b) The wrong-server hazard is ratified as documented, and it is the most valuable thing
+this milestone found about its own verification.** The machine had a **second, unrelated
+MongoDB on 27017**, and an early `--store mongo` run **passed against it**. Harmless in
+outcome — the test database name is a constant rather than part of the URL path — but the
+implementer's own summary is the point: *"a green run against the wrong server is nobody's
+first suspicion."*
+
+The mitigations are the right ones: compose ports are now overridable, the default URLs match
+the published ports, the skip messages name the URL they tried, and the hazard is written
+down. **Every future backend run should be read with this in mind** — a passing
+`--store postgres` or `--store mongo` proves the adapter works against *something*, and only
+the URL in the skip-or-connect message says what.
+
+**Cost if wrong.** None; these are a constant, a config knob and a documented caveat.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
