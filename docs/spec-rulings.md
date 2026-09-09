@@ -1779,11 +1779,77 @@ what a test does and does not cover is worth more than a test that pretends to c
 **(e) The three-backend suite was not re-run**, because no storage code was touched. Correct
 reasoning — M7's evidence stands, and re-running it would prove nothing about this diff.
 
-**One hazard worth recording permanently:** `vanilla-jsoneditor` bundles its own Ajv 8 and the
-app adds another, and the top-level `ajv` resolved to **6.15.0** — hoisted from ESLint — until
-`ajv@8` was pinned explicitly. A transitive hoist silently supplying the wrong *major* version
-is the same shape as this build's other silent-success failures. Do not remove that pin as
-"already provided".
+**One hazard worth recording permanently:** the top-level `ajv` resolved to **6.15.0** —
+hoisted from ESLint — until `ajv@8` was pinned explicitly. A transitive hoist silently
+supplying the wrong *major* version is the same shape as this build's other silent-success
+failures. Do not remove that pin as "already provided".
+
+**Corrected:** I originally wrote that `vanilla-jsoneditor` "bundles its own Ajv 8 and the app
+adds another", repeating the implementer's framing. M9's reviewer checked: it declares
+`ajv: ^8.17.1` and imports it *externally*, npm dedupes to the single hoisted 8.20.0, and no
+nested copy exists. There is **one** instance, not two, and no duplicate weight. The pin half
+of the hazard is right and stays; the two-copies half was wrong. Fourth ruling of mine to
+carry a factual error, and the fourth caught downstream rather than by me.
+
+### R-72 — the validate tools' envelope is a third shape, and a harness must be able to emit every shape the service sends
+
+M9's reviewer found that the editor **silently discards every warning-severity catalogue
+finding while reporting "shape and catalogue clean"**. The mechanism is a seam between two of
+my own rulings that neither anticipated:
+
+- **R-13** established that a clean-but-warned document is a real reply: `ok: true` with
+  warning-severity items in `errors`, for BP-019, DS-007, DS-027 and DS-032.
+- **R-43(b)** established that every success payload sits under one named key in `data`.
+
+But `blueprint_validate` and `dataset_validate` return an `ErrorEnvelope` — `{ok, errors}`
+with **no `data` key at all**. So a warned-clean reply is `ok: true` *and* has no `data`, which
+R-43(b)'s convention does not describe and the client's payload reader cannot survive: it
+calls `Object.keys(envelope.data)` on `undefined`, throws, the throw is caught, the finding
+list comes back empty, and the UI announces the document is clean. DS-027 — the very rule the
+detail screen cites as the mistake it exists to catch — is invisible in the editor, and the
+same exception is thrown and swallowed on every clean document's debounce tick.
+
+**Ruling.** The envelope has **three** shapes, not two, and every consumer must handle all
+three: success-with-`data`, failure-with-`errors`, and **validate-clean: `ok: true` with
+`errors` and no `data`**. Read `errors` directly rather than routing a validate reply through
+the `data` reader. Document the third shape in `contracts.md` section 1 beside the other two.
+
+**The deeper finding is about the harness, and it generalises.** This was invisible because
+`web/src/test/server.ts` can only construct a `SuccessEnvelope`, so all six clause-1 tests
+stub the validate tools with `ok("report", {...})` — **a wrapper no validate tool produces.**
+Six tests agreed with each other about a shape the service never sends.
+
+So: **a test harness must be able to emit every shape the real surface emits, and something
+must assert that it can.** A harness that cannot construct a real reply does not merely miss a
+bug; it manufactures agreement. This is the sixth instance in this build of something passing
+while proving nothing, and the first where the fixture *itself* was the falsehood.
+
+**Cost if wrong.** Reading `errors` directly is strictly more permissive than routing through
+`data`; nothing that works today stops working.
+
+### R-73 — a tracked source file must be readable by the tools that review it
+
+`web/src/lib/validation.ts` embeds a raw NUL byte as a dedup separator
+(`` `${finding.rule} ${finding.pointer}` ``). Git's NUL heuristic therefore classifies the
+file as **binary**: the review diff showed `Bin 0 -> 6841 bytes` and `Binary files differ`, and
+`git grep`, ripgrep and GitHub's diff view all skip it. I confirmed it — 88 of 90 tracked
+source files are text, and this is one of the two that are not.
+
+**The module implementing clause 1's entire local half was never visible to the review.** Not
+misdescribed, not under-tested — *unreadable*, by every tool the review depends on.
+
+**Ruling.** No tracked source file may contain a NUL byte. Use ` ` as an escape, or any
+printable separator. Add a guard asserting every tracked file under `src/`, `web/src/`,
+`client/` and `tests/` is text, in the shape of this build's other enumerating guards.
+
+**Why this earns a ruling rather than a one-character fix.** Every other failure this build has
+found was a claim that proved less than it stated — something readable that said the wrong
+thing. This is a new class: a file that **cannot be reviewed at all**, which no amount of
+reviewer diligence would have caught, because the reviewer would have had to notice an absence.
+It happened to be found; a guard means it does not depend on that.
+
+**Cost if wrong.** A binary fixture that genuinely needs to be tracked gets a named exemption,
+the way R-20 and R-31 handle theirs.
 
 ## Owner scope decisions
 
