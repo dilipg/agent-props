@@ -1752,6 +1752,33 @@ block quote, and `CLAUDE.md` states the new end of phase 1.
 TypeScript port would mirror, and both are complete and reviewed — so a later port starts from
 a settled contract rather than a moving one, which was M11's whole rationale for being last.
 
+### R-69 — a ruling whose own precedents contradict its text is one to query, not implement around
+
+M8's implementer drew this from over-implementing R-65, and it is sharp enough to bind the
+milestones that remain. In its words: *"I treated 'two statements of the ruling against one
+aside' as arithmetic when the real signal was that **both cited precedents pointed the other
+way**."*
+
+**Ruling.** When a ruling's stated reasoning and its cited precedents disagree, the
+disagreement is the finding. Stop and ask. Do not weigh how many sentences say which thing —
+a ruling that cites R-29 and R-47 as supporting a warning, when R-29 is silent and R-47
+errors, is not a ruling with an aside; it is a ruling built on a mistake, and implementing its
+text faithfully propagates the mistake into code.
+
+This is the counterpart to the standing instruction that a spec's literal text loses to a
+ruling. **The register is authoritative, not infallible** — R-02, R-31, R-36 and R-68 were all
+wrong when first written and were all caught by an implementer. The rule that catches those is
+not "obey the register harder"; it is "when the register argues against itself, that is
+evidence, and evidence outranks either half".
+
+Two rulings in this build were corrected *because* an implementer queried rather than complied
+(R-02's cyclic-graph tautology, R-65's broken precedents), and two more were corrected only
+after the code shipped and a reviewer measured the consequence (R-31's phantom test, R-36's
+obsolete `ILIKE`). The first pair cost a message; the second pair cost a fix round each.
+
+**Cost if wrong.** A query that turns out unnecessary costs one round trip, which is the
+cheapest thing in this process.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
