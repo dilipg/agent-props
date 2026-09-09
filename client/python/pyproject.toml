@@ -1,0 +1,33 @@
+[project]
+name = "agent-props-client"
+version = "0.1.0"
+description = "Python client for agent-props: run ids, step fetching, and the three comparison helpers."
+readme = "README.md"
+requires-python = ">=3.12"
+# Two dependencies, and the split between them is the point.
+#
+# `jsonschema` is the **pure** one: `compare.py` needs a Draft 2020-12
+# validator for its `schema` mode and nothing else, and importing it reaches no
+# network module at all. `tests/unit/test_client_import_isolation.py` measures
+# that in a fresh interpreter and asserts that `agentprops_client.compare`
+# imports nothing beyond what `jsonschema` alone already imports - so the
+# allowlist is derived from this line rather than from a list of today's
+# network libraries.
+#
+# `mcp` and `anyio` are the transport's, reached only through
+# `agentprops_client.session`. Ground rule 2 says the service never grades and
+# the comparison helpers live here; a grading-only caller must therefore be able
+# to use them with no server and no network, which is why nothing above
+# `session.py` imports either of these.
+dependencies = [
+  "jsonschema>=4.26.0",
+  "mcp>=2.2.0",
+  "anyio>=4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentprops_client"]

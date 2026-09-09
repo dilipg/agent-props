@@ -9,6 +9,23 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "agent-props-client"
+version = "0.1.0"
+source = { editable = "client/python" }
+dependencies = [
+    { name = "anyio" },
+    { name = "jsonschema" },
+    { name = "mcp" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", specifier = ">=4.0" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
+    { name = "mcp", specifier = ">=2.2.0" },
+]
+
+[[package]]
 name = "agentprops"
 version = "0.1.0"
 source = { editable = "." }
@@ -26,6 +43,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "agent-props-client" },
     { name = "hypothesis" },
     { name = "mypy" },
     { name = "pytest" },
@@ -51,6 +69,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "agent-props-client", editable = "client/python" },
     { name = "hypothesis", specifier = ">=6.140" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pytest", specifier = ">=9.1.1" },

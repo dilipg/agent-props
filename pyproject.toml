@@ -26,7 +26,17 @@ dev = [
   "hypothesis>=6.140",
   "pyyaml>=6.0",
   "types-pyyaml>=6.0",
+  # M8's client, as a path dependency of the *dev* group only. The service does
+  # not depend on its client and must not: `agent-props-client` is separately
+  # installable and `tests/unit/test_client_packaging.py` builds and installs it
+  # into a throwaway environment with no `agentprops` on the path to prove it.
+  # It is here so that one `uv run pytest` covers both packages - the end-to-end
+  # test needs the client and the server in one process.
+  "agent-props-client",
 ]
+
+[tool.uv.sources]
+agent-props-client = { path = "client/python", editable = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -38,7 +48,7 @@ packages = ["src/agentprops"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "client/python"]
 # ruff 0.16 formats fenced code blocks inside Markdown by default. docs/ holds
 # the frozen specification (worked-example.md is the byte-exact source for
 # tests/fixtures/); it must never be rewritten by a formatter pass. Scope
@@ -66,12 +76,12 @@ ignore = []
 [tool.mypy]
 python_version = "3.12"
 strict = true
-mypy_path = "src"
+mypy_path = "src:client/python"
 # `tests/` is checked too. The suites now carry real load - the R-04, layering
 # and no-delete guards are AST walkers whose whole job is to be precise about
 # node types - and typing them cost three fixes at M3, all of them latent bugs
 # rather than annotation noise.
-files = ["src", "tests"]
+files = ["src", "tests", "client/python/agentprops_client"]
 warn_unused_configs = true
 show_error_codes = true
 
