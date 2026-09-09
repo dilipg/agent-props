@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from typing import Final
 
-__all__ = ["MAX_STORED_INT", "MIN_STORED_INT", "clamp", "storable"]
+__all__ = ["DEFAULT_PAGE_LIMIT", "MAX_STORED_INT", "MIN_STORED_INT", "clamp", "page", "storable"]
 
 #: The largest integer any backend's integer column can hold: signed 64-bit.
 #: SQLite ``INTEGER``, Postgres ``bigint`` and BSON ``long`` are all this.
@@ -62,6 +62,23 @@ def clamp(value: int, *, low: int = 0, high: int = MAX_STORED_INT) -> int:
     the range means the same thing as the nearest value inside it.
     """
     return min(max(value, low), high)
+
+
+#: The page size a list-returning tool uses when the caller names no ``limit``.
+#: A page size, not a cap: an explicit ``limit`` of 5000 is honoured.
+DEFAULT_PAGE_LIMIT: Final = 50
+
+
+def page(limit: int | None, offset: int | None) -> tuple[int, int]:
+    """``(limit, offset)`` defaulted and clamped into ``[0, MAX_STORED_INT]``.
+
+    One implementation for every paging tool. ``dataset_find`` had this inline
+    at M4 and ``run_find`` needs exactly the same two decisions - the default
+    page size, and both ends of the clamp - so it lives here rather than being
+    written a second time. That is ruling R-50's own lesson applied one layer
+    up: the defect sits in the one place a working pattern was not reused.
+    """
+    return clamp(DEFAULT_PAGE_LIMIT if limit is None else limit), clamp(offset or 0)
 
 
 def storable(value: int) -> bool:

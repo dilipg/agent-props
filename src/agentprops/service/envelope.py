@@ -89,6 +89,7 @@ __all__ = [
     "field_pointer",
     "findings_from_validation_error",
     "not_found",
+    "runtime",
     "success",
     "warning",
     "warnings_from",
@@ -153,6 +154,30 @@ def failure(errors: Sequence[RuleError]) -> ErrorEnvelope:
 
 def boundary(code: str, target: str, message: str, **context: Any) -> RuleError:
     """One boundary finding. ``target`` is an RFC 6901 pointer, already built."""
+    return RuleError(
+        rule=code,
+        severity=SEVERITY_ERROR,
+        pointer=target,
+        message=message,
+        section=None,
+        context=context,
+    )
+
+
+def runtime(code: str, target: str, message: str, **context: Any) -> RuleError:
+    """One **runtime** finding: contracts 3.4's ``RT-*`` codes.
+
+    Same ``RuleError`` shape as :func:`boundary` and deliberately a separate
+    name, because the two families answer different questions and a reader
+    should be able to tell which one a call site is emitting. ``AP-*`` means
+    "the request was malformed or named nothing"; ``RT-*`` means "the request
+    was well formed and the runtime cannot resolve it against this run's pin" -
+    an unknown run, an unknown node, an ambiguous step. Neither family is a
+    catalogue rule and neither is ever registered as one.
+
+    ``target`` points at the offending *argument*, since a runtime failure has
+    no submitted document to point into.
+    """
     return RuleError(
         rule=code,
         severity=SEVERITY_ERROR,

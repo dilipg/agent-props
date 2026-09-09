@@ -15,13 +15,16 @@ The layout
 `context.py`                 the two injected ports, together
 `envelope.py`                the contracts section 1 envelopes, plus the
                              six ``AP-*`` boundary codes that are not rules
-`limits.py`                  the integer range a store column can hold, and
-                             the clamp and the predicate that keep values in it
+`limits.py`                  the integer range a store column can hold, the
+                             clamp and predicate that keep values in it, and
+                             the one page-defaulting helper both find tools use
 `documents.py`               argument to document, and R-20's raw-text seam
 `diff.py`                    ``blueprint_diff``'s pure computation
 `blueprints.py`              the five blueprint tools
 `datasets.py`                the five dataset tools M4 owns
 `skeletons.py`               the authoring flow, and the one dataset write
+`resolution.py`              contracts section 5, the step identity algorithm
+`runs.py`                    the runtime read path, which writes only the run
 `admin.py`                   the three admin reads
 ============================ =============================================
 

@@ -51,7 +51,7 @@ from agentprops.models import WARNING_DATASET_ARCHIVED, Dataset, DatasetQuery
 from agentprops.service.context import ServiceContext
 from agentprops.service.documents import read_document
 from agentprops.service.envelope import Reply, not_found, success, warning
-from agentprops.service.limits import clamp, storable
+from agentprops.service.limits import DEFAULT_PAGE_LIMIT, page, storable
 from agentprops.storage import RecordNotFoundError
 from agentprops.validation import envelope as validation_envelope
 from agentprops.validation import validate_dataset
@@ -68,7 +68,12 @@ __all__ = [
 
 #: What ``dataset_find`` returns when the caller names no ``limit``. A page
 #: size, not a cap: an explicit ``limit`` of 5000 is honoured.
-DEFAULT_FIND_LIMIT: Final = 50
+#:
+#: Bound to :data:`~agentprops.service.limits.DEFAULT_PAGE_LIMIT` by assignment
+#: rather than repeated, so ``dataset_find`` and ``run_find`` cannot drift into
+#: two different page sizes. The name stays because it is this module's
+#: documented surface.
+DEFAULT_FIND_LIMIT: Final = DEFAULT_PAGE_LIMIT
 
 
 def find(context: ServiceContext, query: DatasetQuery) -> Reply:
@@ -90,18 +95,17 @@ def paginate(query: DatasetQuery) -> DatasetQuery:
 
     Separate and public so the clamping has a test that does not need a store,
     and so M7's ``dataset_export`` gets the same defaults rather than its own.
+    The two decisions themselves - the default page size and both ends of the
+    clamp - moved to :func:`~agentprops.service.limits.page` at M6, so
+    ``run_find`` shares them rather than repeating them.
 
     The upper clamp is a *representability* bound rather than a policy cap - see
     `limits.py`. A ``limit`` of ``2**63 - 1`` already means "every row there will
     ever be", so a caller asking for more is asking for the same thing and
     nothing is refused.
     """
-    return query.model_copy(
-        update={
-            "limit": clamp(DEFAULT_FIND_LIMIT if query.limit is None else query.limit),
-            "offset": clamp(query.offset or 0),
-        }
-    )
+    limit, offset = page(query.limit, query.offset)
+    return query.model_copy(update={"limit": limit, "offset": offset})
 
 
 def get(context: ServiceContext, dataset_id: str, version: int | None) -> Reply:
