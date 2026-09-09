@@ -28,3 +28,6 @@ client/typescript/dist/
 .worktrees/
 .superpowers/
 .DS_Store
+
+# Screenshots from .claude/skills/run-agent-props/driver.py
+.shots/
