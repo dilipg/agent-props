@@ -59,10 +59,20 @@ Warnings go on the response *and* on the run
 
 Contracts 3.4 says warnings are "attached to both the response and the stored
 run", and PRD 5.2 says a drawing-past-the-pool run "is flagged". So
-:func:`_flag` merges anything new onto ``run.warnings``. It writes only when
-the merge actually adds something, which is what keeps "a repeated fetch
-advances nothing" literally true - a replay recomputes the same
-``(code, detail)`` pair, finds it already recorded, and issues no write.
+:func:`_flag` merges anything new onto ``run.warnings``, keyed by
+``(code, node_id, iteration)`` per ruling R-54(b), and writes only when the
+merge actually adds something - which is what keeps "a repeated fetch advances
+nothing" literally true.
+
+**The write is ``set_run_warnings``, not ``put_run``, and that is not a
+micro-optimisation.** ``put_run`` writes every column from the model it is
+handed, so flagging a warning through an edited copy of the run this call read
+at the top would revert ``status``, ``outcome`` and ``finished_at`` to whatever
+they were at the snapshot - un-finishing a run that M8's ``run_finish``
+completed in between. Nothing today would catch it, because ``run_finish`` does
+not exist yet. `storage/base.py::set_run_warnings` carries the full reasoning;
+the short version is that the column bound is the guarantee, and a transaction
+around a read and a write would not have been one (ruling R-37).
 """
 
 from __future__ import annotations
@@ -114,6 +124,7 @@ __all__ = [
     "RUN_ID_PATTERN",
     "STATUS_RUNNING",
     "WARNING_DATASET_SELECTION_AMBIGUOUS",
+    "WARNING_RUN_START_MISMATCH",
     "fetch_step",
     "find",
     "get",
@@ -149,6 +160,16 @@ STATUS_RUNNING: Final = "running"
 #: broader than they thought has no other way to find out.
 WARNING_DATASET_SELECTION_AMBIGUOUS: Final = "dataset_selection_ambiguous"
 
+#: Attached when ``run_start`` names an existing run id with arguments that do
+#: not match the run that exists - a different ``agent_id``, or a selector that
+#: resolves to a different pin or to nothing at all. Ruling R-53: keep returning
+#: the first run, because a retried request must not create a second run and
+#: must not fail, and **say so**, because ground rule 3 is "mismatches produce
+#: warnings attached to the response and to the stored run". It is the same
+#: shape as ``blueprint_version_mismatch`` - the caller declared one thing, the
+#: run is pinned to another, so serve the pin and report the difference.
+WARNING_RUN_START_MISMATCH: Final = "run_start_mismatch"
+
 
 def start(
     context: ServiceContext,
@@ -168,13 +189,14 @@ def start(
     1. **check the arguments** - the run id's shape, the ``run_class``
        vocabulary, the selector's one-of-two shape, and the ``model`` object,
        all reported together the way ``ArgReader`` reports argument findings;
-    2. **replay an existing run.** A run id that already exists is returned
-       **unchanged**, with no write: the pin is immutable for the run's whole
-       life (PRD 5.6), so re-resolving the selector could hand a run that has
-       already been served from version 1 a pin to version 2. A client retrying
-       ``run_start`` after a network timeout gets the same answer, and a client
-       that changed its mind about the selector can see in the response's
-       ``pin`` which dataset it actually has;
+    2. **replay an existing run**, and warn if the request diverges from it. A
+       run id that already exists keeps its pin: it is immutable for the run's
+       whole life (PRD 5.6), so re-pinning could hand a run already served from
+       version 1 a pin to version 2. A client retrying after a network timeout
+       therefore gets the same answer and never a second run. Ruling R-53 adds
+       the other half - arguments that do not match the run that exists are a
+       *mismatch*, so they warn on the response and on the stored run rather
+       than being silently ignored. See :func:`_replayed`;
     3. **select the dataset** - by explicit id, or by label query. See
        :func:`_select`;
     4. **compare versions and store.** A ``declared_blueprint_version`` other
@@ -191,7 +213,7 @@ def start(
 
     existing = context.store.get_run(run_id)
     if existing is not None:
-        return _started(existing)
+        return _replayed(context, existing, agent_id, selector)
 
     pin, unresolved, warnings = _select(context, agent_id, selector)
     if pin is None:
@@ -573,7 +595,73 @@ def _mismatch(pin: RunPin, declared: str | None) -> list[Warning]:
     ]
 
 
-def _started(run: Run, warnings: list[Warning] | None = None) -> Reply:
+def _replayed(
+    context: ServiceContext, existing: Run, agent_id: str, selector: dict[str, Any]
+) -> Reply:
+    """A second ``run_start`` for a live run id: the same run, plus R-53's warning.
+
+    Nothing about the run changes - not the pin, not ``started_at``, not
+    ``declared_blueprint_version``. What the ruling adds is that a request which
+    does **not** match the run cannot pass silently, so the selector is resolved
+    again purely to be compared, and a divergence is merged onto the stored run
+    as well as returned on the response.
+
+    The response carries the run's warning list as it now stands rather than
+    only this call's, which is what makes a mismatch recorded at the first start
+    still visible on the fourth retry.
+    """
+    diverged = _divergence(context, existing, agent_id, selector)
+    return _started(existing, _flag(context, existing, diverged))
+
+
+def _divergence(
+    context: ServiceContext, existing: Run, agent_id: str, selector: dict[str, Any]
+) -> list[Warning]:
+    """Ruling R-53's comparison: does this request match the run that exists?
+
+    Two fields diverge independently and the ruling covers both. The selector is
+    R-53's own case; ``agent_id`` was found alongside it and the ruling extended
+    to cover it, because ``run_start(same_id, other_agent, ...)`` silently
+    handing back another agent's run is the same shape of surprise.
+
+    A selector that no longer resolves at all counts as divergence, and it is
+    the case the ruling actually names - "the one that surprises a caller who
+    mistyped a ``dataset_id``". A mistyped id does not resolve to a *different*
+    pin, it resolves to nothing, so treating an unresolvable selector as "cannot
+    compare, say nothing" would miss the motivating example. The findings from
+    that resolution are deliberately dropped: a retry must not become an error
+    because the world changed, so an RT-E04 informs the warning rather than
+    replacing the reply.
+
+    :func:`_select`'s own warnings are dropped for a different reason - they
+    describe a pinning decision, and this call is not making one.
+    """
+    diverged: list[str] = []
+    if agent_id != existing.agent_id:
+        diverged.append("agent_id")
+    pin, _unresolved, _selection = _select(context, agent_id, selector)
+    if pin is None or pin != existing.pin:
+        diverged.append("selector")
+    if not diverged:
+        return []
+    return [
+        warning(
+            WARNING_RUN_START_MISMATCH,
+            diverged=diverged,
+            run_id=existing.id,
+            pinned={
+                "agent_id": existing.agent_id,
+                "pin": existing.pin.model_dump(mode="json"),
+            },
+            requested={
+                "agent_id": agent_id,
+                "pin": None if pin is None else pin.model_dump(mode="json"),
+            },
+        )
+    ]
+
+
+def _started(run: Run, warnings: list[Warning]) -> Reply:
     """``{run, pin}`` under one named key, with the warnings on the envelope.
 
     contracts section 4 documents the payload as ``{run, pin, warnings}``;
@@ -581,14 +669,14 @@ def _started(run: Run, warnings: list[Warning] | None = None) -> Reply:
     carried alongside the run as well as inside it, because that is the field a
     caller reads to learn what it was given.
 
-    A replay - step 2 of :func:`start` - passes no ``warnings``, so the stored
-    run's own list is what comes back. That keeps a mismatch recorded at first
-    start visible on every retry rather than only on the first response.
+    ``warnings`` is required rather than defaulted from the run, because the two
+    callers want different lists and a default hid that: a first start reports
+    what *this* call found, and a replay reports what the run now carries.
     """
     return success(
         "start",
         {"run": run.model_dump(mode="json"), "pin": run.pin.model_dump(mode="json")},
-        warnings if warnings is not None else run.warnings,
+        warnings,
     )
 
 
@@ -605,7 +693,9 @@ def _draw(
     so a ``pool: true`` node that is not a loop draws exactly like one, and this
     function never reads ``kind`` or ``max_iterations``.
     """
-    node = next(candidate for candidate in blueprint.nodes if candidate.id == node_id)
+    node = next((candidate for candidate in blueprint.nodes if candidate.id == node_id), None)
+    if node is None:  # pragma: no cover - resolve() has already proved the node exists
+        return None, [], [_no_fixture(dataset, node_id, iteration)]
     if node.pool:
         pool = dataset.pools.get(node_id, [])
         if not pool:  # pragma: no cover - DS-018/DS-019 make this unstorable
@@ -683,24 +773,57 @@ def _serve(
     return context.store.upsert_step(run.id, record).served
 
 
-def _flag(context: ServiceContext, run: Run, warnings: list[Warning]) -> None:
-    """Merge new warnings onto the stored run. No write when nothing is new.
+def _warning_key(item: Warning) -> tuple[str, Any, Any]:
+    """Ruling R-54(b)'s merge key: ``(code, node_id, iteration)``.
+
+    Derived from the detail rather than compared as a whole warning, and the
+    ruling is explicit about why: it makes losing a duplicate concurrent write
+    *provably* a no-op. Whole-``detail`` equality happened to be equivalent for
+    ``pool_exhausted`` - ``pool_length`` and ``served_index`` are functions of
+    the pinned pool and the iteration, so two calls for one key cannot differ -
+    but that equivalence was written nowhere and any added detail field would
+    have quietly broken it.
+
+    A code with neither field in its detail - ``dataset_archived``,
+    ``blueprint_version_mismatch``, ``run_start_mismatch`` - keys on
+    ``(code, None, None)`` and is therefore recorded once per run. That is
+    deliberate rather than a side effect: a client retrying a diverging
+    ``run_start`` in a loop must not grow the run's warning list without bound,
+    and each response carries its own current detail regardless of what the run
+    already records.
+    """
+    return item.code, item.detail.get("node_id"), item.detail.get("iteration")
+
+
+def _flag(context: ServiceContext, run: Run, warnings: list[Warning]) -> list[Warning]:
+    """Merge new warnings onto the stored run; return its list as it now stands.
 
     Contracts 3.4 attaches a warning "to both the response and the stored run"
     and PRD 5.2 says an exhausted pool "flags" the run, so the run has to carry
-    them. De-duplication is on the whole ``(code, detail)`` pair, which is what
-    makes this idempotent: a replayed fetch recomputes an identical warning and
-    adds nothing, while a *different* iteration drawing past the pool records
-    its own entry - so the run says which iterations were served short, not
-    merely that one was.
+    them. Two properties, both load-bearing:
 
-    Writing only on a change is what keeps the replay path free of any store
-    write at all.
+    **The write is narrow.** ``set_run_warnings`` touches one column, so this
+    cannot revert ``status``, ``outcome`` or ``finished_at`` - which ``put_run``
+    with an edited copy of a snapshot would, and which nothing today would catch
+    because ``run_finish`` arrives at M8. See the module docstring and
+    `storage/base.py::set_run_warnings`.
+
+    **The merge is keyed and writes only on a change**, so a replayed fetch
+    recomputes an identical warning, adds nothing, and issues no write at all -
+    which is what "a repeated fetch advances nothing" has to mean for the one
+    part of a response that is recomputed rather than read back.
     """
-    added = [item for item in warnings if item not in run.warnings]
-    if not added:
-        return
-    context.store.put_run(run.model_copy(update={"warnings": [*run.warnings, *added]}))
+    merged = list(run.warnings)
+    seen = {_warning_key(item) for item in merged}
+    for item in warnings:
+        key = _warning_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    if len(merged) == len(run.warnings):
+        return merged
+    return context.store.set_run_warnings(run.id, merged)
 
 
 # ------------------------------------------------------------------- findings

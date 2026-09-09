@@ -988,6 +988,72 @@ def test_fetched_at_falls_back_to_the_column_default(store: Store, pinned: Datas
     assert supplied.fetched_at == FROZEN_NOW
 
 
+def test_set_run_warnings_writes_that_column_and_nothing_else(
+    store: Store, pinned: Dataset
+) -> None:
+    """The narrow write M6 added, and the reason it is narrow (rulings R-53, R-54(b)).
+
+    ``put_run`` writes **every** column from the model it is handed, so the
+    obvious way to append a warning - an edited copy of a run read earlier -
+    reverts whatever changed in between. Under load that means a
+    ``pool_exhausted`` warning un-finishing a run that ``run_finish`` completed:
+    ``status`` back to ``running``, ``outcome`` and ``finished_at`` back to
+    null.
+
+    So the guarantee is column-level and it is asserted as such. The run here is
+    put into the state M8's ``run_finish`` will produce - directly, since that
+    tool does not exist yet - and then a warning is written from a *stale*
+    model. Every other field has to survive.
+    """
+    finished_at = datetime(2026, 9, 8, 13, 30, tzinfo=UTC)
+    stale = store.put_run(make_run("run-0010", pinned))
+    store.put_run(
+        stale.model_copy(
+            update={
+                "status": "finished",
+                "finished_at": finished_at,
+                "outcome": {"training": "reduced"},
+            }
+        )
+    )
+
+    written = store.set_run_warnings(
+        stale.id, [Warning(code="pool_exhausted", detail={"node_id": "request_docs"})]
+    )
+    assert [item.code for item in written] == ["pool_exhausted"]
+
+    after = store.get_run(stale.id)
+    assert after is not None
+    assert after.status == "finished", "the warning write reverted the run's lifecycle"
+    assert after.finished_at == finished_at
+    assert after.outcome == {"training": "reduced"}
+    assert [item.code for item in after.warnings] == ["pool_exhausted"]
+
+
+def test_set_run_warnings_replaces_the_list_and_refuses_an_unknown_run(
+    store: Store, pinned: Dataset
+) -> None:
+    """It replaces rather than appends, because the caller owns the merge.
+
+    Deduplication is policy - ruling R-54(b) fixes the key at
+    ``(code, node_id, iteration)`` - and this Protocol decides no policy, so the
+    service hands over the list it wants stored. An unknown run raises, for the
+    reason :meth:`set_archived` does: the return type leaves no room for "not
+    found".
+    """
+    run = store.put_run(
+        make_run("run-0011", pinned, warnings=[Warning(code="dataset_archived", detail={})])
+    )
+    replaced = store.set_run_warnings(run.id, [Warning(code="pool_exhausted", detail={})])
+    assert [item.code for item in replaced] == ["pool_exhausted"]
+
+    emptied = store.set_run_warnings(run.id, [])
+    assert emptied == []
+
+    with pytest.raises(RecordNotFoundError):
+        store.set_run_warnings("no-such-run", [Warning(code="pool_exhausted", detail={})])
+
+
 def test_the_path_is_reconstructed_from_the_steps(store: Store, pinned: Dataset) -> None:
     """No column holds ``path``, and that is the design.
 

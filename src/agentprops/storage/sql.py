@@ -65,7 +65,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -1255,6 +1255,29 @@ class SqlStore:
                 raise StoreError(f"step {run_id}/{step.node_id}/{step.iteration} vanished")
             return _step(written)
         raise StoreError(f"could not allocate a seq for run {run_id} after repeated races")
+
+    def set_run_warnings(self, run_id: str, warnings: Sequence[Warning]) -> list[Warning]:
+        """See :meth:`agentprops.storage.base.Store.set_run_warnings`.
+
+        **One statement, one column.** That is the whole method and it is the
+        whole point: an ``UPDATE runs SET warnings = ? WHERE id = ?`` cannot
+        revert ``status``, ``outcome`` or ``finished_at``, which is what
+        :meth:`put_run` with an edited copy of a stale run would do. The read
+        back inside the same connection is for the return value, not for the
+        safety - see the Protocol docstring for why a transaction would not be
+        the safety either.
+
+        ``rowcount`` answers "was there such a run" without a follow-up
+        ``SELECT``, the same way :meth:`mark_skeleton_submitted` lets the
+        database decide once.
+        """
+        payload = [warning.model_dump(mode="json") for warning in warnings]
+        with self._engine.begin() as conn:
+            updated = conn.execute(update(runs).where(runs.c.id == run_id).values(warnings=payload))
+            if updated.rowcount == 0:
+                raise RecordNotFoundError(f"no run {run_id}")
+            row = conn.execute(select(runs.c.warnings).where(runs.c.id == run_id)).one()
+        return [Warning.model_validate(warning) for warning in row.warnings]
 
     def set_step_actual(
         self, run_id: str, node_id: str, iteration: int, actual: Mapping[str, Any]

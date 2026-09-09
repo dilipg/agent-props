@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -53,6 +54,7 @@ from agentprops.service.runs import (
     RUN_ID_MAX_LENGTH,
     RUN_ID_MIN_LENGTH,
     WARNING_DATASET_SELECTION_AMBIGUOUS,
+    WARNING_RUN_START_MISMATCH,
 )
 from agentprops.service.runs import paginate as paginate_runs
 from conftest import load_document
@@ -352,13 +354,16 @@ def test_starting_an_existing_run_id_returns_it_unchanged_and_never_re_pins(
     assert started.store.put_dataset(Dataset.model_validate(edited)).version == 2
 
     first = stored_run(started)
-    replayed = data(
-        runs.start(started, RUN_ID, AGENT, {"labels": {"scenario": "missing-documents"}})
-    )["start"]
+    reply = runs.start(started, RUN_ID, AGENT, {"labels": {"scenario": "missing-documents"}})
+    replayed = data(reply)["start"]
     assert replayed["pin"]["dataset_version"] == 1
     assert replayed["run"]["started_at"] == first["started_at"]
     assert len(replayed["run"]["steps"]) == 1, "the replay kept the served step"
     assert started.store.health().counts.runs == 1
+    assert codes(reply) == [WARNING_RUN_START_MISMATCH], (
+        "ruling R-53: the label query now resolves to version 2, which is a divergence from the "
+        "pin and has to be said out loud rather than silently ignored"
+    )
 
 
 def test_a_replay_reports_the_warnings_recorded_at_the_first_start(
@@ -378,6 +383,114 @@ def test_a_replay_reports_the_warnings_recorded_at_the_first_start(
 def test_a_malformed_argument_is_still_refused_on_a_replay(started: ServiceContext) -> None:
     """Argument checks precede the existence check: a bad request is a bad request."""
     assert rules(runs.start(started, RUN_ID, AGENT, {})) == [AP_ARGUMENT]
+
+
+def test_a_replay_with_a_diverging_selector_warns_and_serves_the_pinned_run(
+    started: ServiceContext,
+) -> None:
+    """Ruling R-53. The pin does not move, and the divergence does not pass silently.
+
+    Ground rule 3 decides it without a new principle: "mismatches produce
+    warnings attached to the response and to the stored run". A diverging
+    selector is a mismatch of exactly the shape ``blueprint_version_mismatch``
+    already handles - the caller declared one thing, the run is pinned to
+    another - so serve the pin and say so.
+    """
+    reply = runs.start(started, RUN_ID, AGENT, {"dataset_id": ARUN})
+    assert reply.ok is True
+    assert data(reply)["start"]["pin"]["dataset_id"] == PRIYA, "the pin never moves"
+    assert codes(reply) == [WARNING_RUN_START_MISMATCH]
+    detail = warnings_of(reply)[0].detail
+    assert detail["diverged"] == ["selector"]
+    assert detail["pinned"]["pin"]["dataset_id"] == PRIYA
+    assert detail["requested"]["pin"]["dataset_id"] == ARUN
+
+    recorded = stored_run(started)["warnings"]
+    assert [item["code"] for item in recorded] == [WARNING_RUN_START_MISMATCH], (
+        "the warning has to reach the stored run too, not only the response"
+    )
+
+
+def test_a_replay_naming_a_dataset_that_resolves_to_nothing_still_warns(
+    started: ServiceContext,
+) -> None:
+    """R-53's motivating case: "the one that surprises a caller who mistyped a
+    ``dataset_id``".
+
+    A mistyped id does not resolve to a *different* pin, it resolves to nothing.
+    Treating an unresolvable selector as "cannot compare, say nothing" would
+    miss the example the ruling was written about, so it counts as divergence
+    and ``requested.pin`` is null.
+    """
+    reply = runs.start(
+        started, RUN_ID, AGENT, {"dataset_id": "3f8c1a20-0000-4000-8000-00000000ffff"}
+    )
+    assert reply.ok is True, "a retry must not fail because the world changed"
+    assert codes(reply) == [WARNING_RUN_START_MISMATCH]
+    detail = warnings_of(reply)[0].detail
+    assert detail["diverged"] == ["selector"]
+    assert detail["requested"]["pin"] is None
+
+
+def test_a_replay_under_another_agent_id_warns_too(started: ServiceContext) -> None:
+    """The half of R-53 the review added: ``run_start(same_id, other_agent, ...)``.
+
+    It silently returned another agent's run. The ruling was extended to cover
+    it because it is the same shape of surprise as the selector case.
+
+    ``agent_id`` cannot diverge *alone*: a dataset belongs to one agent, so the
+    selector cannot resolve to the same pin under a different one, and both
+    fields are reported. Asserted as membership rather than equality for that
+    reason.
+    """
+    reply = runs.start(started, RUN_ID, "delivery-dispatch", {"dataset_id": PRIYA})
+    assert reply.ok is True
+    assert data(reply)["start"]["run"]["agent_id"] == AGENT
+    detail = warnings_of(reply)[0].detail
+    assert "agent_id" in detail["diverged"]
+    assert detail["pinned"]["agent_id"] == AGENT
+    assert detail["requested"]["agent_id"] == "delivery-dispatch"
+
+
+def test_an_identical_replay_warns_about_nothing(started: ServiceContext) -> None:
+    """The other end of the boundary: a retry that matches is silent.
+
+    This is the case the run id exists for - a client repeating its request
+    after a network blip - and a warning on it would be noise on every retry.
+    """
+    assert codes(runs.start(started, RUN_ID, AGENT, {"dataset_id": PRIYA})) == []
+    assert stored_run(started)["warnings"] == []
+
+
+def test_the_divergence_warning_is_recorded_once_however_many_retries(
+    started: ServiceContext,
+) -> None:
+    """R-54(b)'s key, on a code with no ``node_id`` or ``iteration``.
+
+    ``run_start_mismatch`` keys on ``(code, None, None)``, so a client retrying
+    a diverging request in a loop cannot grow the run's warning list without
+    bound - while every response still carries the warning, which is what
+    ground rule 3 asks for.
+    """
+    for _ in range(3):
+        reply = runs.start(started, RUN_ID, AGENT, {"dataset_id": ARUN})
+        assert codes(reply) == [WARNING_RUN_START_MISMATCH]
+    assert len(stored_run(started)["warnings"]) == 1
+
+
+def test_an_unparseable_dataset_id_is_rt_e04_rather_than_an_exception(
+    seeded: ServiceContext,
+) -> None:
+    """A malformed id is a miss, not a raise - the store's read path guarantees it.
+
+    ``run_find``'s equivalent was tested and ``run_start``'s was not, which is
+    the asymmetry this closes: any string can arrive as a ``dataset_id``, and
+    the adapter returns ``None`` for one that is not a well-formed UUID rather
+    than raising.
+    """
+    reply = runs.start(seeded, RUN_ID, AGENT, {"dataset_id": "not-a-uuid"})
+    assert rules(reply) == [RT_E04]
+    assert findings(reply)[0].pointer == "/selector/dataset_id"
 
 
 # ------------------------------------------------------------------ fetch_step
@@ -676,18 +789,74 @@ def test_a_replayed_warning_writes_nothing_to_the_run(
 
     The warning list is the one thing on a replay that could still provoke a
     write, because it is recomputed rather than read back. So the second fetch
-    of an exhausted iteration runs with ``put_run`` monkeypatched to raise: if
-    it is called at all, this test fails, and the failure is loud rather than a
-    duplicated warning nobody notices.
+    of an exhausted iteration runs with **both** run writes monkeypatched to
+    raise: if either is called, this test fails, and the failure is loud rather
+    than a duplicated warning nobody notices.
+
+    Both, and not only the one ``_flag`` uses today, because that is how this
+    test lost its teeth once already: it patched ``put_run``, and fix round 1
+    narrowed the merge onto ``set_run_warnings`` - after which the assertion was
+    green and covering nothing. A test named for a write should name every write
+    that could satisfy it.
     """
     fetch(started, node_id=POOL_NODE, iteration=POOL_LENGTH)
 
-    def refuse(run: Any) -> Any:
+    def refuse(*arguments: Any, **keywords: Any) -> Any:
         raise AssertionError("a replayed fetch wrote the run")
 
     monkeypatch.setattr(started.store, "put_run", refuse)
+    monkeypatch.setattr(started.store, "set_run_warnings", refuse)
     reply = fetch(started, node_id=POOL_NODE, iteration=POOL_LENGTH)
     assert codes(reply) == [WARNING_POOL_EXHAUSTED], "the response still carries the warning"
+
+
+def test_a_stale_fetch_that_flags_a_warning_leaves_the_run_lifecycle_alone(
+    started: ServiceContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The losing side of the write ``_flag`` used to make. **A note for M8.**
+
+    ``run_finish`` does not exist yet, so the finished state is written here
+    through ``put_run`` directly - that is the simulation, and it is the only
+    part of this test M8 should replace. Everything else is the real path.
+
+    What is being guarded: ``_flag`` once handed ``put_run`` an edited copy of
+    the run snapshot ``fetch_step`` read at the top, and ``put_run`` writes
+    **every** column from the model it is given. So a ``fetch_step`` adding a
+    ``pool_exhausted`` warning from a snapshot taken before a concurrent
+    ``run_finish`` committed would revert ``status`` to ``running`` and null
+    ``outcome`` and ``finished_at`` - a run that un-finishes itself under load.
+    The fix narrows the write to ``set_run_warnings``, one column.
+
+    Forced with the M3 race technique: one internal read returns the pre-finish
+    snapshot, which is exactly what the concurrent caller holds. Note that a
+    *sequential* version of this test cannot fail - a fresh snapshot carries the
+    finished state, so writing every column writes it back unchanged - which is
+    why the stale read is the test rather than a convenience.
+    """
+    finished_at = datetime(2026, 9, 8, 13, 0, 0, tzinfo=UTC)
+    real_get_run = started.store.get_run
+    stale = real_get_run(RUN_ID)
+    assert stale is not None
+    started.store.put_run(
+        stale.model_copy(
+            update={
+                "status": "finished",
+                "finished_at": finished_at,
+                "outcome": {"training": "reduced"},
+            }
+        )
+    )
+
+    monkeypatch.setattr(started.store, "get_run", lambda run_id: stale)
+    reply = fetch(started, node_id=POOL_NODE, iteration=POOL_LENGTH)
+    assert codes(reply) == [WARNING_POOL_EXHAUSTED], "the warning was still attached"
+
+    after = real_get_run(RUN_ID)
+    assert after is not None
+    assert after.status == "finished", "a warning write reverted the run's lifecycle"
+    assert after.finished_at == finished_at
+    assert after.outcome == {"training": "reduced"}
+    assert [item.code for item in after.warnings] == [WARNING_POOL_EXHAUSTED]
 
 
 def test_idempotency_is_keyed_on_the_resolved_node_and_the_iteration(

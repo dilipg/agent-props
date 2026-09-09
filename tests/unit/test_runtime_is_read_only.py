@@ -41,7 +41,7 @@ from __future__ import annotations
 import ast
 import copy
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -60,6 +60,7 @@ from agentprops.models import (
     Skeleton,
     StepRecord,
     StoreHealth,
+    Warning,
 )
 from agentprops.service import ServiceContext, blueprints, datasets, runs
 from agentprops.service.limits import MAX_STORED_INT
@@ -81,11 +82,24 @@ POOL_NODE = "request_docs"
 #: silently ignored it.
 MUTATING_VERBS: Final[tuple[str, ...]] = ("put_", "set_", "mark_", "upsert_", "delete_")
 
-#: The three writes the runtime is *allowed* to make. PRD 5.6: "``record_step``
-#: writes to the run, never to the world." ``set_step_actual`` is M8's and is
+#: The verbs a **reading** ``Store`` method begins with, and the one reader whose
+#: name is a bare verb. Not used to permit anything - every method not matched by
+#: :data:`MUTATING_VERBS` is already treated as a read - but to make that
+#: treatment a *decision* rather than a default:
+#: :func:`test_every_store_method_is_classifiable` fails on a method matching
+#: neither list, so a future ``archive_dataset``, ``record_outcome`` or
+#: ``bump_version`` cannot be silently classified as harmless. Without it, the
+#: durability claim for the guard below holds only for the five prefixes above.
+READING_VERBS: Final[tuple[str, ...]] = ("get_", "find_", "list_")
+READING_NAMES: Final[frozenset[str]] = frozenset({"health"})
+
+#: The writes the runtime is *allowed* to make. PRD 5.6: "``record_step`` writes
+#: to the run, never to the world." ``set_step_actual`` is M8's and is
 #: allowlisted here rather than at M8, because the property being asserted is
-#: "only the run is written", not "only these two calls exist today".
-RUN_WRITES: Final[frozenset[str]] = frozenset({"put_run", "upsert_step", "set_step_actual"})
+#: "only the run is written", not "only the calls that exist today".
+RUN_WRITES: Final[frozenset[str]] = frozenset(
+    {"put_run", "upsert_step", "set_step_actual", "set_run_warnings"}
+)
 
 #: Where the runtime starts. Every public function in `service/runs.py`, named
 #: as ``(module, function)`` pairs so the closure below is unambiguous about
@@ -146,6 +160,34 @@ def test_the_protocol_enumeration_finds_the_writes_it_should() -> None:
     assert "put_dataset" in WORLD_WRITES
     assert "set_archived" in WORLD_WRITES
     assert "upsert_step" not in WORLD_WRITES
+
+
+def test_every_store_method_is_classifiable() -> None:
+    """The guard's durability, closed. Nothing may default to "not a write".
+
+    :func:`store_mutators` is a prefix test, and every public method it does not
+    match is treated as a read by mechanisms 1 and 2. That is fine for the
+    sixteen methods on the Protocol today and it is *not* self-maintaining: a
+    method named ``archive_dataset``, ``record_outcome`` or ``bump_version``
+    would write the world and be classified as harmless, with only mechanism 3
+    left to notice.
+
+    So an unclassifiable name fails here instead. Adding one is then a visible
+    decision - put the verb in :data:`MUTATING_VERBS` or in
+    :data:`READING_VERBS` - rather than a silent widening of what the runtime
+    is allowed to reach.
+    """
+    public = {name for name in dir(Store) if not name.startswith("_")}
+    assert len(public) >= 16, f"the Protocol enumeration is broken: {sorted(public)}"
+    unclassifiable = {
+        name
+        for name in public
+        if not name.startswith(MUTATING_VERBS + READING_VERBS) and name not in READING_NAMES
+    }
+    assert not unclassifiable, (
+        f"these Store methods match neither the mutating nor the reading verbs, so the read-only "
+        f"guards would treat them as harmless reads: {sorted(unclassifiable)}. Classify them."
+    )
 
 
 def test_the_protocol_declares_no_delete() -> None:
@@ -446,6 +488,9 @@ class RunOnlyStore:
 
     def upsert_step(self, run_id: str, step: StepRecord) -> StepRecord:
         return self.inner.upsert_step(run_id, step)
+
+    def set_run_warnings(self, run_id: str, warnings: Sequence[Warning]) -> list[Warning]:
+        return self.inner.set_run_warnings(run_id, warnings)
 
     def set_step_actual(
         self, run_id: str, node_id: str, iteration: int, actual: Mapping[str, Any]

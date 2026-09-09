@@ -51,7 +51,7 @@ than doing so quietly.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from agentprops.models import (
@@ -66,6 +66,7 @@ from agentprops.models import (
     Skeleton,
     StepRecord,
     StoreHealth,
+    Warning,
 )
 
 __all__ = [
@@ -287,6 +288,40 @@ class Store(Protocol):
         This records **what was served**, and only that. Writing ``actual``
         later is :meth:`set_step_actual`'s job, because a no-op repeat cannot
         also be a merge.
+        """
+        ...
+
+    def set_run_warnings(self, run_id: str, warnings: Sequence[Warning]) -> list[Warning]:
+        """Replace a run's warning list. Touches **that column and nothing else**.
+
+        An addition to `docs/contracts.md` section 6, authorised by ruling R-53
+        - which requires a diverging ``run_start`` to warn "attached to the
+          response *and* to the stored run" - and by R-54(b), which accepts the
+        merge as read-modify-write. It exists because the obvious
+        implementation of both, ``put_run`` with an edited copy of the run, is
+        **wrong in a way nothing today would catch**: :meth:`put_run` writes
+        every column from the model it is handed, so a ``fetch_step`` adding a
+        ``pool_exhausted`` warning from a snapshot read before M8's
+        ``run_finish`` committed would revert ``status`` to ``running`` and null
+        ``outcome`` and ``finished_at``. A run that un-finishes itself under
+        load is the most expensive shape of bug this build can ship, and
+        ``run_finish`` not existing yet is the only reason it is not one.
+
+        Narrowing the write to one column is what makes the residue R-54(b)
+        accepts *actually* what R-54(b) describes: two concurrent warning
+        writers can lose one advisory entry, and nothing else can be touched.
+        Note what a transaction would **not** buy here - pysqlite defers
+        ``BEGIN`` until the first DML and Postgres under READ COMMITTED behaves
+        the same way (ruling R-37), so wrapping a read and a write does not lock
+        the value read. The column bound is the guarantee; the transaction is
+        not.
+
+        The caller computes the merged list, because deduplication is policy -
+        R-54(b) fixes the key at ``(code, node_id, iteration)`` - and this
+        Protocol does not decide policy. Returns the list as stored, and raises
+        :class:`RecordNotFoundError` for an unknown run, for the reason
+        :meth:`set_archived` does: the return type leaves no room for "not
+        found".
         """
         ...
 
