@@ -25,17 +25,30 @@
 # neither command needs any environment set.
 #
 # The three published host ports are overridable, because a developer with a
-# Postgres or a Mongo already running is the normal case and not an edge one:
-# on Windows a host Postgres bound to 0.0.0.0:5432 wins the race for IPv4 over
-# Docker's port proxy, so the container is reachable, listening, healthy - and
-# every connection lands on the other server, which answers "password
-# authentication failed" for a role it has never heard of. Set
-# AGENTPROPS_POSTGRES_PORT=5433 (and AGENTPROPS_TEST_POSTGRES_URL to match) and
-# the ambiguity is gone. Found by hitting it.
+# Postgres or a Mongo already running is the normal case and not an edge one -
+# and this machine had both. Two ways it goes wrong, and only one of them looks
+# like an error:
+#
+#   * on Windows a host Postgres bound to 0.0.0.0:5432 wins the race for IPv4
+#     over Docker's port proxy, so the container is created, listening and
+#     healthy while every connection lands on the other server, which answers
+#     "password authentication failed" for a role it has never heard of;
+#   * a host Mongo on 27017 answers *successfully*, so the suite passes against
+#     a server nobody meant to test. Found by noticing a `pascal-prod` database
+#     in `listDatabases`. This is why the conformance fixture takes its database
+#     name from a constant and never from the URL: it drops that database, and a
+#     collision must not be able to drop someone else's.
+#
+# Set AGENTPROPS_POSTGRES_PORT / AGENTPROPS_MONGO_PORT (and the matching
+# AGENTPROPS_TEST_*_URL) and the ambiguity is gone.
 #
 #   AGENTPROPS_POSTGRES_PORT=5433 docker compose --profile shared up -d postgres
 #   AGENTPROPS_TEST_POSTGRES_URL=postgresql://agentprops:agentprops@localhost:5433/agentprops
 #   uv run pytest -m integration --store postgres
+#
+#   AGENTPROPS_MONGO_PORT=27018 docker compose --profile local up -d mongo
+#   AGENTPROPS_TEST_MONGO_URL=mongodb://localhost:27018
+#   uv run pytest -m integration --store mongo
 
 name: agent-props
 

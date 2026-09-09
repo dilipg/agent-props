@@ -72,6 +72,12 @@ __all__ = ["FROZEN_NOW"]
 #: The database the Mongo branch creates, drops and recreates. Named for what it
 #: is, so nobody points ``AGENTPROPS_TEST_MONGO_URL`` at a database they wanted
 #: to keep and loses it: the name is **not** taken from the URL's path.
+#:
+#: That is not a hypothetical. This machine had a **second** MongoDB already
+#: listening on 27017, holding an unrelated production database, and the default
+#: URL reached it - so an M7 run created and dropped this database on a server
+#: nobody meant to test. Taking the name from the URL's path would have made the
+#: same run drop `pascal-prod`. A constant is the whole of the protection.
 MONGO_TEST_DATABASE = "agentprops_conformance"
 
 #: The skip reason for a server that has already been shown to be unreachable,
