@@ -36,15 +36,20 @@ where the run is.**
 Every step asserts what the script says
 ---------------------------------------
 
-Including the warnings. A walk that made the nine calls and checked only that
-none of them failed would pass against a server that resolved every tool name to
-the same node, never warned on an exhausted pool, and re-drew a fixture on every
-fetch. So each step's assertions are written against the *specific* claim the
-document makes at that step, and :func:`test_the_worked_example_end_to_end`
-prints the walk as it goes, which is the report's step-by-step output.
+Including the warnings, **in both directions**. A walk that made the nine calls
+and checked only that none of them failed would pass against a server that
+resolved every tool name to the same node, never warned on an exhausted pool,
+and re-drew a fixture on every fetch. And one that asserted only where a warning
+*is* expected would pass against a server that warned on everything - so every
+non-pool fetch on a running run asserts ``warnings == ()`` as well, inside this
+file rather than only in a unit negative control.
 
-Twice, and the second time synchronously
-----------------------------------------
+So each step's assertions are written against the *specific* claim the document
+makes at that step, and :func:`test_the_worked_example_end_to_end` prints the
+walk as it goes, which is the report's step-by-step output.
+
+Three times: async, sync, and sync over a pipe
+----------------------------------------------
 
 :func:`test_the_worked_example_end_to_end` drives :class:`AsyncRunClient` and
 :func:`test_the_sync_client_walks_the_same_script` drives :class:`RunClient`
@@ -52,16 +57,27 @@ over the blocking portal, against the same server. Both are the milestone's
 deliverable ("sync and async APIs"), and running the *script* through both is
 the only assertion that says the sync facade is a real client rather than a
 wrapper that type-checks.
+
+:func:`test_the_sync_client_drives_a_real_stdio_subprocess` is the third, and it
+covers the gap the other two leave: they hand ``connect`` the ``MCPServer``
+instance, which is the one target where the blocking portal's reason for
+existing is invisible because there is no process to re-spawn. That test walks
+the script against ``python -m agentprops.server --transport stdio`` over a real
+pipe, from a synchronous test function. It is the only test outside
+`test_transports.py` that spawns a process.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from mcp import StdioServerParameters
 
 from agentprops.models import WARNING_POOL_EXHAUSTED, Dataset
 from agentprops.server import binding, mcp
@@ -70,7 +86,7 @@ from agentprops.service.runs import STATUS_FINISHED, WARNING_RUN_ALREADY_FINISHE
 from agentprops.storage import Store
 from agentprops_client import Envelope, connect_async, grade
 from agentprops_client.envelope import ToolError
-from agentprops_client.run import AsyncRunClient
+from agentprops_client.run import AsyncRunClient, RunClient
 from agentprops_client.session import connect
 from conftest import BLUEPRINT_FIXTURE, DATASET_FIXTURE, load_document
 
@@ -223,6 +239,10 @@ async def author_the_dataset(client: AsyncRunClient, log: Recorder) -> str:
     log.say("step 3b", "five sections filled in manifest order")
 
     submitted = payload(await client.call("dataset_submit", skeleton_id=skeleton_id), "dataset")
+    assert set(submitted) == set(GOLDEN), (
+        f"the submitted dataset's fields are not the fixture's; extra "
+        f"{sorted(set(submitted) - set(GOLDEN))}, missing {sorted(set(GOLDEN) - set(submitted))}"
+    )
     differing = {field for field in GOLDEN if submitted[field] != GOLDEN[field]}
     assert differing == {"id"}, (
         f"the submitted dataset is the golden fixture but for its id: {sorted(differing)}"
@@ -239,6 +259,7 @@ async def walk(client: AsyncRunClient, log: Recorder) -> dict[str, Any]:
     """
     first = await client.fetch_step(node_id="receive_request")
     assert first.resolved_node_id == "receive_request"
+    assert first.warnings == (), "a clean fetch on a running run warns about nothing"
     log.say("step 7a", "receive_request by node_id")
 
     early = await client.fetch_step(tool_name=REPEATED_TOOL)
@@ -246,9 +267,10 @@ async def walk(client: AsyncRunClient, log: Recorder) -> dict[str, Any]:
         "from the entry node the repeated tool name must resolve to fetch_store_profile, "
         "not recheck_store"
     )
+    assert early.warnings == ()
     log.say("step 7b", f"{REPEATED_TOOL} -> {early.resolved_node_id} (by tool name)")
 
-    await client.fetch_step(node_id="check_docs")
+    assert (await client.fetch_step(node_id="check_docs")).warnings == ()
 
     inside: list[Mapping[str, Any]] = []
     for iteration in range(POOL_LENGTH):
@@ -264,6 +286,7 @@ async def walk(client: AsyncRunClient, log: Recorder) -> dict[str, Any]:
     assert late.resolved_node_id == "recheck_store", (
         "after the loop the same tool name must now resolve to recheck_store"
     )
+    assert late.warnings == ()
     assert late.resolved_node_id != early.resolved_node_id, (
         "the two tool-name calls resolved to the same node, which is the whole point of step 7"
     )
@@ -291,6 +314,10 @@ async def walk(client: AsyncRunClient, log: Recorder) -> dict[str, Any]:
     for node_id in ("check_docs", "assign_training", "verify_compliance", "complete"):
         served = await client.fetch_step(node_id=node_id)
         assert served.resolved_node_id == node_id
+        assert served.warnings == (), (
+            f"{node_id} is not a pool node on a running run and must warn about nothing; "
+            f"got {[item.code for item in served.warnings]}"
+        )
     log.say("step 7f", "continued to complete")
 
     return dict(early.fixture)
@@ -576,3 +603,113 @@ def test_the_client_records_an_actual_for_every_served_step(seeded: ServiceConte
         assert step["served"] == served[node_id], "recording an actual rewrote the fixture"
         assert step["actual"] == served[node_id]["output"], "the actual was not recorded"
         assert step["recorded_at"] is not None
+
+
+# ---------------------------------------------------- the client over a real pipe
+
+
+def author_synchronously(client: RunClient, golden: Mapping[str, Any]) -> str:
+    """Steps 1 to 4 through the **sync** client. The async walk's helper, unawaited.
+
+    Duplicated rather than shared with :func:`author_the_dataset`, because the
+    two facades are the thing under test: a helper that worked for both would
+    have to hide the difference, and the difference is the deliverable.
+    """
+    published = client.call(
+        "blueprint_upsert", blueprint=load_document(BLUEPRINT_FIXTURE), publish=True
+    )
+    assert published.ok, published.rules()
+
+    started = payload(
+        client.call(
+            "dataset_skeleton",
+            agent_id=AGENT,
+            version=BLUEPRINT_VERSION,
+            labels=golden["labels"],
+            seed=golden["seed"],
+        ),
+        "skeleton",
+    )
+    skeleton_id = str(started["skeleton_id"])
+    for section in started["manifest"]:
+        filled = client.call(
+            "dataset_fill_part",
+            skeleton_id=skeleton_id,
+            section=section["id"],
+            content=content_for(section, golden),
+        )
+        assert filled.ok, f"{section['id']}: {filled.rules()}"
+    submitted = payload(client.call("dataset_submit", skeleton_id=skeleton_id), "dataset")
+    return str(submitted["id"])
+
+
+def test_the_sync_client_drives_a_real_stdio_subprocess(tmp_path: Path) -> None:
+    """``connect`` against a **process**, not an in-memory server object.
+
+    Every other test in this file hands ``connect`` the ``MCPServer`` instance.
+    That is a real MCP session over the real server and store (ruling R-16) and
+    it satisfies the acceptance clause - but it is the one target for which the
+    blocking portal's whole reason for existing is invisible, because there is
+    no process to re-spawn. So this drives the same ``connect`` against
+    ``StdioServerParameters``: ``python -m agentprops.server --transport stdio``,
+    over a real pipe, from a **synchronous** test function.
+
+    What that adds over `test_transports.py`, which already spawns this process:
+    that file drives it with a raw ``mcp.Client`` in an ``async`` test. This
+    drives it with the *client library*, synchronously, which is the
+    combination a user of `agent-props-client` actually has - and the one where
+    a mistake in the portal's lifecycle shows up as
+    ``RuntimeError: Attempted to exit cancel scope in a different task`` rather
+    than as a failed assertion.
+
+    **What it does not prove, stated.** "One session for the whole block, not
+    one per call" is structural - :func:`connect` enters
+    ``portal.wrap_async_context_manager(Client(target))`` exactly once - and no
+    assertion here can observe the spawn count, because the subprocess's state
+    lives in a SQLite *file* that would survive being re-spawned. What this does
+    show is that the claim is being made about a target where it costs
+    something: eleven calls here would be eleven process launches under a
+    per-call session, and the whole authoring flow plus a run walk completes on
+    one.
+
+    Marked ``integration`` with the rest of this file, and it is the only test
+    outside `test_transports.py` that spawns a process - CLAUDE.md's "no
+    subprocesses in unit tests" is why it lives here.
+    """
+    database = tmp_path / "stdio-client.db"
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "agentprops.server", "--transport", "stdio", "--store", str(database)],
+    )
+    golden = load_document(DATASET_FIXTURE)
+
+    with connect(parameters, agent_id=AGENT) as client:
+        assert client.run_id, "the client generated no run id"
+        dataset_id = author_synchronously(client, golden)
+
+        started = client.run_start(SELECTOR)
+        assert started.dataset_id == dataset_id, "the label query pinned another dataset"
+        assert started.blueprint_version == BLUEPRINT_VERSION
+
+        assert client.fetch_step(node_id="receive_request").warnings == ()
+        early = client.fetch_step(tool_name=REPEATED_TOOL)
+        assert early.resolved_node_id == "fetch_store_profile"
+        client.fetch_step(node_id="check_docs")
+        for iteration in range(POOL_LENGTH):
+            assert client.fetch_step(node_id=POOL_NODE, iteration=iteration).warnings == ()
+        assert client.fetch_step(tool_name=REPEATED_TOOL).resolved_node_id == "recheck_store"
+
+        exhausted = client.fetch_step(node_id=POOL_NODE, iteration=POOL_LENGTH)
+        assert [item.code for item in exhausted.warnings] == [WARNING_POOL_EXHAUSTED]
+
+        replayed = client.fetch_step(node_id="fetch_store_profile")
+        assert json.dumps(replayed.fixture) == json.dumps(early.fixture), (
+            "the re-fetch is not byte-identical over a pipe"
+        )
+
+        client.record_step(early.output, node_id="fetch_store_profile")
+        run = client.run_finish(EXPECTED_FINAL)
+        assert run["status"] == STATUS_FINISHED
+        assert grade(DECLARED_COMPARISON, EXPECTED_FINAL, run["outcome"]).ok
+
+    assert database.exists(), "the subprocess never created its store, so nothing above ran"
