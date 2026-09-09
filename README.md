@@ -28,12 +28,14 @@ registry and a declarative rejection corpus — the M3 `Store` Protocol and SQLi
 `src/agentprops/service/skeletons.py`, the five `SK-*` rules, and `Seeded.uuid()` in
 `src/agentprops/expansion/seeded.py`, and the M6 runtime read path — `run_start`, `fetch_step`,
 `run_get` and `run_find` in `src/agentprops/service/runs.py`, with step identity resolution in
-`src/agentprops/service/resolution.py`. Twenty tools. `export/` is an empty module waiting on M7,
-and `expansion/` holds `uuid()` only.
+`src/agentprops/service/resolution.py`, and the M7 backends and promotion path: the Postgres and
+Mongo adapters in `src/agentprops/storage/`, `Dockerfile` and `docker-compose.yml`, and
+`dataset_expand`, `dataset_export` and `dataset_import`. **Twenty-three tools, three backends.**
+`export/` is an empty module waiting on M10.
 
-Not yet built: expansion beyond ids and export/import (M7), the Python client and `record_step`
-(M8), and the web app (M9). `tests/unit/test_tool_surface.py` lists exactly which documented tools
-are still deferred, and to which milestone.
+Not yet built: the Python client and `record_step` (M8), the web app (M9), the evidence bundle
+(M10). `tests/unit/test_tool_surface.py` lists exactly which documented tools are still deferred,
+and to which milestone.
 
 ## Author a dataset
 
@@ -117,10 +119,15 @@ for the three rules that are existence checks — so `validation/` stays pure an
 
 ## Store a document
 
-```python
-from agentprops.storage import SqlStore, create_schema, sqlite_url
+Three backends, one Protocol, one conformance suite.
 
-store = SqlStore.from_url(sqlite_url("agentprops.db"))  # or: alembic upgrade head
+```python
+from agentprops.storage import MongoStore, SqlStore, create_schema, sqlite_url
+
+store = SqlStore.from_url(sqlite_url("agentprops.db"))  # containerless, what CI uses
+store = SqlStore.from_url("postgresql://user:pw@host/agentprops")  # shared; migrate it first
+store = MongoStore.from_url("mongodb://localhost:27017/agentprops")  # local authoring
+
 store.put_blueprint(blueprint, publish=True)
 version_1 = store.put_dataset(dataset)  # the store allocates the version
 version_2 = store.put_dataset(edited)  # copy-on-write; version 1 stays readable
@@ -129,22 +136,37 @@ store.set_archived(str(dataset.id), True)  # a flag, never a delete
 
 Everything above `storage/` goes through the `Store` Protocol in
 [`src/agentprops/storage/base.py`](src/agentprops/storage/base.py), never through an adapter
-directly. It has no `delete_*` method and never will: archive is a flag, a dataset edit is
-copy-on-write, and two tests hold the line — one on the Protocol's shape, one on the AST of every
+directly. That is what let the conformance suite be written once at M3 and gain two backends at M7
+**without a line of it changing** — `tests/integration/test_store_conformance.py` names no adapter
+and knows no dialect. It has no `delete_*` method and never will: archive is a flag, a dataset edit
+is copy-on-write, and two tests hold the line — one on the Protocol's shape, one on the AST of every
 module in the package.
+
+`storage/common.py` holds what the adapters must answer *identically* — the `q` case fold, the
+semver ordering, every record-to-model mapper — in one place, because a second copy of the fold is
+the divergence the substring contract exists to prevent. A Postgres database is **migrated**
+(`alembic upgrade head`) and never created by the adapter; a Mongo deployment declares its indexes
+on startup, because `create_index` is idempotent and there is no Alembic for a document store.
 
 ## Serve the tools
 
 ```bash
-uv run python -m agentprops.server --store agentprops.db                     # stdio
+uv run python -m agentprops.server --store agentprops.db                     # stdio, SQLite file
 uv run python -m agentprops.server --store agentprops.db --transport http    # streamable HTTP
+uv run python -m agentprops.server --store mongodb://localhost:27017/agentprops
+uv run python -m agentprops.server --store postgresql://user:pw@host/agentprops
 ```
 
-Twenty tools. Blueprint: `blueprint_upsert`, `blueprint_get`, `blueprint_list`,
+`--store` takes a SQLite file path or a `sqlite://` / `postgresql://` / `mongodb://` URL, and every
+argument also reads an `AGENTPROPS_*` environment variable, which is how the containers are
+configured. A SQLite file is created if absent and Mongo's indexes are declared on startup; a
+Postgres database is neither, because it is migrated.
+
+Twenty-three tools. Blueprint: `blueprint_upsert`, `blueprint_get`, `blueprint_list`,
 `blueprint_validate`, `blueprint_diff`. Dataset: `dataset_skeleton`, `dataset_fill_part`,
 `dataset_submit`, `dataset_validate`, `dataset_find`, `dataset_get`, `dataset_archive`,
-`dataset_restore`. Run: `run_start`, `fetch_step`, `run_get`, `run_find`. Admin: `store_status`,
-`label_vocabulary`, `agent_list`.
+`dataset_restore`, `dataset_expand`, `dataset_export`, `dataset_import`. Run: `run_start`,
+`fetch_step`, `run_get`, `run_find`. Admin: `store_status`, `label_vocabulary`, `agent_list`.
 
 Every tool answers one of the two envelopes in [`docs/contracts.md`](docs/contracts.md) section 1,
 and never raises for anything that reaches it — a malformed argument, an unknown id, a rule
@@ -191,18 +213,54 @@ uv sync
 This creates `.venv/` and installs both the service dependencies and the dev tools (`pytest`,
 `ruff`, `mypy`).
 
+## Run in a container
+
+```bash
+docker compose --profile local up      # service + Mongo, for a developer authoring
+docker compose --profile shared up     # service + Postgres, for a team
+```
+
+Two profiles, and they are alternatives rather than layers — both publish the service on 8000. The
+`local` profile is one command because Mongo needs no migration; the `shared` profile runs
+`alembic upgrade head` before it serves, because a SQL database is migrated and by nothing else.
+A third mode has no compose file at all: `--store ./agentprops.db` runs against a SQLite file with
+no container, and that is what CI uses.
+
+The two databases publish their native ports, so the conformance suite can run from the host
+against a container started here. Set `AGENTPROPS_POSTGRES_PORT` / `AGENTPROPS_MONGO_PORT` if
+something already holds one — on Windows a host Postgres bound to `0.0.0.0:5432` wins the race for
+IPv4 over Docker's port proxy, and every connection then lands on the wrong server.
+
+## Promote a dataset
+
+```python
+bundle = call("dataset_export", agent_id="location-onboarding")["bundle"]
+# ... move the file to the shared instance ...
+call("dataset_import", bundle=bundle)
+```
+
+The bundle is `{format, format_version, agent_id, blueprints, datasets}` and carries the blueprint
+versions its datasets reference, because DS-001 requires an existing published blueprint. Import
+re-runs the **whole** catalogue against the receiving store — DS-001 and DS-031 are existence
+checks only it can answer — and writes nothing until all of it passes. Version numbers are
+allocated by the receiving store; `created_at` is authored content and survives, which is what
+keeps `dataset_find`'s ordering identical on both sides.
+
 ## Run the checks
 
 ```bash
 uv run ruff check          # lint
 uv run ruff format --check # formatting
-uv run mypy src            # types, strict
+uv run mypy                # types, strict, over src/ and tests/
 uv run pytest              # tests
-uv run pytest -m integration --store sqlite   # integration tests, once a backend exists
+uv run pytest -m integration                    # integration, SQLite
+uv run pytest -m integration --store postgres   # ...and against a real Postgres
+uv run pytest -m integration --store mongo      # ...and against a real MongoDB
 ```
 
-The first four must pass before any commit. The integration run is opt-in: it needs a storage
-backend, which arrives at M3.
+The first four must pass before any commit. `--store postgres` and `--store mongo` need a server;
+each **skips with a reason naming the URL** when there is none, so a run that could not reach one
+says so rather than reporting green on nothing.
 
 ## Regenerate the JSON Schemas
 
@@ -225,5 +283,6 @@ tests/            unit/, integration/, and fixtures/ (blueprints, datasets, brok
 docs/             the specification (PRD, build handoff, contracts, worked example)
 ```
 
-`client/python`, `client/typescript`, `web/`, and the container files arrive with the milestones
-that own them (M8, M11, M9, M7 respectively) — they are not part of the M0 scaffold.
+`Dockerfile`, `docker-compose.yml` and `.dockerignore` sit beside them at the repository root.
+`client/python`, `client/typescript` and `web/` arrive with the milestones that own them (M8, M11,
+M9).

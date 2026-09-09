@@ -3,8 +3,8 @@
 Schemas, tool signatures, validation rule catalogue, storage interface and DDL.
 Companion to `docs/build-handoff.md`. Read that first.
 
-Revision: 1.1
-Date: 2026-09-08
+Revision: 1.2
+Date: 2026-09-09
 
 ---
 
@@ -325,7 +325,9 @@ Warnings, attached to both the response and the stored run, never blocking:
 | `pool_exhausted` | A loop drew past pool length. Last entry repeated |
 | `dataset_archived` | The pinned dataset has since been archived. Served anyway |
 
-Warning codes are an open vocabulary (ruling R-22), so a tool may add one. M4 added `blueprint_version_missing`, attached by `blueprint_diff` when a version it was asked to compare does not exist — because that tool is informational and never a failure signal. M6 added two. `dataset_selection_ambiguous`, attached by `run_start` when a `{labels}` selector matched more than one dataset: selection is *assignment* rather than reservation (PRD 5.6 point 2), so several matches is not an error, and the warning names how many matched and which one was assigned (ruling R-54(a)). And `run_start_mismatch`, attached when `run_start` names a run id that already exists with arguments that do not match it — a different `agent_id`, or a selector that resolves to a different pin or to nothing at all. Ruling R-53: the run keeps its pin and is returned unchanged, because a retried request must neither create a second run nor fail, and the divergence is reported rather than ignored. Its detail carries `diverged`, `pinned` and `requested`. Each addition is a constant in the module that attaches it rather than in `models/errors.py`, whose `RUNTIME_WARNING_CODES` stays exactly the three codes tabulated above; `tests/unit/test_validation_drift.py` asserts both halves of that arrangement.
+Warning codes are an open vocabulary (ruling R-22), so a tool may add one. M4 added `blueprint_version_missing`, attached by `blueprint_diff` when a version it was asked to compare does not exist — because that tool is informational and never a failure signal. M6 added two. `dataset_selection_ambiguous`, attached by `run_start` when a `{labels}` selector matched more than one dataset: selection is *assignment* rather than reservation (PRD 5.6 point 2), so several matches is not an error, and the warning names how many matched and which one was assigned (ruling R-54(a)). And `run_start_mismatch`, attached when `run_start` names a run id that already exists with arguments that do not match it — a different `agent_id`, or a selector that resolves to a different pin or to nothing at all. Ruling R-53: the run keeps its pin and is returned unchanged, because a retried request must neither create a second run nor fail, and the divergence is reported rather than ignored. Its detail carries `diverged`, `pinned` and `requested`. M7 added one more. `expansion_added_nothing`, attached by `dataset_expand` when `count` is zero (or negative, and clamped to zero): the argument is well formed, the service does not refuse well-formed requests, and writing a byte-identical new version would put a meaningless entry in a lineage a reviewer reads — so the caller gets the unchanged dataset and is told that nothing was added. Its detail carries `dataset_id`, `node_id` and `requested`.
+
+Each addition is a constant in the module that attaches it rather than in `models/errors.py`, whose `RUNTIME_WARNING_CODES` stays exactly the three codes tabulated above; `tests/unit/test_validation_drift.py` asserts both halves of that arrangement.
 
 ### 3.5 Boundary codes
 
@@ -369,9 +371,9 @@ Every list-returning tool has a **total** order, stated in its row: a partial or
 | `dataset_get` | `dataset_id: str`, `version?: int` | Full dataset. Latest version when omitted. Returns archived datasets by explicit id |
 | `dataset_archive` | `dataset_id: str` | Updated summary |
 | `dataset_restore` | `dataset_id: str` | Updated summary |
-| `dataset_expand` | `dataset_id: str`, `node_id: str`, `count: int` | Seeded deterministic pool expansion |
-| `dataset_export` | `agent_id: str`, `dataset_ids?: str[]` | Portable bundle: blueprint version plus datasets |
-| `dataset_import` | `bundle: object` | Re-validates fully on arrival, then stores |
+| `dataset_expand` | `dataset_id: str`, `node_id: str`, `count: int` | Seeded deterministic pool expansion, stored as a **new version** of the same lineage. Each new entry is a deterministically chosen copy of one of the node's authored fixtures with its `latency_hint_ms` varied, addressed by its position in the pool — expansion fills volume (PRD 4) and does not invent fixture content, because a conforming instance of an arbitrary `output_schema` would need a model and ground rule 4 forbids one. Seeded from the dataset's own `seed` and `expand:<node_id>:<index>`. An expansion past a loop node's `max_iterations` is **DS-023** and stores nothing, with both numbers in the finding's `context` (ruling R-56); a `count` above 10000 in one call is `AP-001` naming that maximum, because R-56 forbids silently serving a smaller expansion than was asked for; a `count` of zero returns the dataset unchanged with an `expansion_added_nothing` warning. A node with no authored pool is answered by the catalogue — DS-018 or DS-019 — rather than by a boundary code |
+| `dataset_export` | `agent_id: str`, `dataset_ids?: str[]` | Portable bundle: blueprint version plus datasets. `{format: "agentprops.bundle", format_version: 1, agent_id, blueprints[], datasets[]}`, with the keys in that order and the documents written `exclude_unset` — so two exports of one store are byte-identical and an export/import/export cycle returns the same bytes. Only the blueprint versions the exported datasets reference are carried, and they have to be: DS-001 requires a dataset to name an existing *published* blueprint. `dataset_ids` omitted exports every **discoverable** dataset at its latest version in `dataset_find` order; given, it exports those lineages at their latest version, archived or not, in the order asked for, and an id naming nothing or belonging to another agent is `AP-004` rather than a silent omission |
+| `dataset_import` | `bundle: object` | Re-validates fully on arrival, then stores. Every blueprint through the whole `BP-*` catalogue and every dataset through the whole `DS-*` catalogue, against **this** store — DS-001 and DS-031 are existence checks the receiving store can answer differently, which is the whole point. **Nothing is written until all of it passes**: the dataset pass runs against a resolver that answers from the store *plus this bundle*, so a rejected import cannot leave behind a published blueprint version that BP-016 has made immutable. `format` and `format_version` are checked first and are `AP-001`, so a caller who passed the wrong object is told that rather than handed the catalogue's opinion of it. Findings are re-pointed into the bundle (`/datasets/2/provenance/title`). Versions are allocated by the receiving store, so an import into an empty store starts at 1; `created_at` is authored content and survives, which is what keeps `dataset_find`'s ordering identical on both sides (ruling R-09) |
 
 ### Run
 
@@ -468,7 +470,11 @@ class Store(Protocol):
 
 ## 7. SQL DDL
 
-Postgres shown. SQLite is the same with `JSONB` as `JSON` and `TIMESTAMPTZ` as `TEXT`. Two Postgres-only indexes have no SQLite equivalent: `datasets_labels_gin` and `datasets_search`. SQLite falls back to a scan with `LIKE` for the `q` filter and JSON extraction for labels, which is fine at the volumes a local authoring instance sees. Mongo uses a text index on `{title, intent}` and a multikey index on `labels`. The conformance suite asserts identical results across all three, never identical query plans.
+Postgres shown. SQLite is the same with `JSONB` as `JSON` and `TIMESTAMPTZ` as `TEXT`. **One** Postgres-only index has no SQLite equivalent: `datasets_labels_gin`. SQLite falls back to JSON extraction for labels, which is fine at the volumes a local authoring instance sees. Mongo uses a **wildcard** index on `labels.$**`. The conformance suite asserts identical results across all three, never identical query plans.
+
+`datasets_search` was the second Postgres-only index and **M7 dropped it**, which this revision records. It was declared as a `to_tsvector` GIN index; ruling R-36 superseded that by making `q` substring matching *by contract*, and ruling R-39(a) then moved both the case fold and the match into Python because no query expression folds case identically on all three backends. So `find_datasets` emits no text match in SQL at all, and the index served nothing while costing every write. R-36 offers a `pg_trgm` GIN index instead and it is dead for the same reason — there is no `LIKE` for it to accelerate. R-36 also names `ILIKE`, and an `ILIKE` prefilter was **measured and rejected**: a prefilter is only safe if it matches a superset of the Python fold, and `str.casefold` folds `ß` to `ss` while Postgres does not, so against Postgres 17 (UTF8, `en_US.utf8`) `'Straße operator' ILIKE '%strasse%'` is false where Python matches — in both directions. A prefilter that drops rows the contract promises is worse than a scan. Mongo likewise uses no text index, for the same reason: `$regex` with `i` is a third answer to case folding.
+
+One further Postgres-only detail, added at M7 and not visible in the DDL below: a `TEXT` **tie-break** in an `ORDER BY` is emitted as `COLLATE "C"` on Postgres. Ruling R-35 requires every list ordering to be total so that identical inputs give byte-identical output on every backend, and a locale collation is not that — a Postgres created with `en_US.utf8` orders `'runa'` before `'run-b'`, while SQLite (`BINARY`) and Mongo (byte-wise) both order `'run-b'` first. Measured, and covered by `test_find_runs_breaks_a_tie_by_byte_order` in the conformance suite. It applies to `runs.id` in `find_runs` and `run_steps.node_id` in `get_run`; `datasets.id` needs nothing, because a `UUID` column is not collated.
 
 ```sql
 CREATE TABLE blueprints (
@@ -506,11 +512,11 @@ CREATE TABLE datasets (
 CREATE INDEX datasets_labels_gin ON datasets USING gin (labels);
 CREATE INDEX datasets_lookup ON datasets (agent_id, bp_version, archived);
 CREATE INDEX datasets_author ON datasets (author_handle);
--- superseded by ruling R-36: `q` is substring matching by contract, which a
--- to_tsvector index cannot serve. At M7 this becomes a pg_trgm GIN index, or is
--- dropped where the extension is unavailable - the conformance suite asserts
--- identical results, never identical query plans
-CREATE INDEX datasets_search ON datasets USING gin (to_tsvector('english', title || ' ' || intent));
+-- There is no datasets_search. It was a to_tsvector GIN index here until M7,
+-- superseded by ruling R-36 (`q` is substring matching by contract) and then
+-- made dead by R-39(a), which moved the fold and the match into Python on every
+-- backend. R-36's pg_trgm alternative is dead for the same reason. See the
+-- prose above for the measurement that closes the ILIKE option.
 
 CREATE TABLE skeletons (
   id            UUID        PRIMARY KEY,
@@ -566,9 +572,21 @@ Note what the run tables do **not** contain: any copy of the fixtures. `served` 
 
 ## 8. Mongo collections
 
-Same logical model. `blueprints` keyed by `{agent_id, version}`, `datasets` keyed by `{id, version}` with a compound index on `{agent_id, bp_version, archived}` and a multikey index on `labels`, `skeletons` keyed by `id`, `runs` keyed by `id`, and `run_steps` with unique compound indexes on `{run_id, node_id, iteration}` (the idempotency key) and on `{run_id, seq}` (ruling R-37, what makes `seq` allocation sound).
+Same logical model. `blueprints` keyed by `{agent_id, version}`, `datasets` keyed by `{id, version}` with a compound index on `{agent_id, bp_version, archived}` and an index over `labels`, `skeletons` keyed by `id`, `runs` keyed by `id`, and `run_steps` with unique compound indexes on `{run_id, node_id, iteration}` (the idempotency key) and on `{run_id, seq}` (ruling R-37, what makes `seq` allocation sound).
+
+Each natural key **is** the `_id`, so uniqueness is the server's rather than a second index that could be missing — and an `ObjectId` the driver generated would embed a client clock and a per-process random value, which ground rule 9 forbids in `storage/`.
 
 Mongo has no foreign keys. The conformance suite tests referential behaviour through the service layer, not the storage layer, so this asymmetry does not change the tests.
+
+Four things M7 settled while building the adapter, recorded here because they are contract-level rather than implementation detail.
+
+**Object keys are escaped.** Two of ruling R-06's five section ids are `nodes.core` and `nodes.branches`, `Skeleton.parts` is keyed by section id, and Mongo reads `parts.nodes.core` as two levels of nesting. Every authored document this service stores — a fixture's `output`, an entity's `state`, a step's `served` — is arbitrary caller JSON with the same hazard, plus a leading `$` that looks like an operator. So every opaque JSON value is stored with its object keys percent-escaped (`%` → `%25`, `.` → `%2E`, `$` → `%24`, in that order, which is what makes it reversible) and decoded on read. Only keys are transformed; a *value* that looks like an escape comes back exactly as written. The promoted, queryable fields are stored natively, and `labels` is queried through the same escape so a label dimension containing a dot is filterable rather than unreachable.
+
+**The `labels` index is a wildcard index, not a multikey one.** "Multikey" describes an index over an array-valued field; `labels` is an object, and a plain index on it serves only whole-object equality. `labels.$**` is what accelerates `labels.tier == "regional"`, which is the query `find_datasets` issues.
+
+**There is no text index on `{title, intent}`.** Ruling R-36 makes `q` substring matching by contract and R-39(a) puts the fold in Python; a text index does stemming, so it would serve a query nobody issues. See section 7.
+
+**The clock is the server's.** Mongo has no column defaults, so where the SQL adapter relies on `DEFAULT now()` or `func.now()` — `blueprints.created_at`, `run_steps.fetched_at`, `set_step_actual`'s `recorded_at` — the Mongo adapter reads `localTime` from the `hello` command. That is a database clock, which ruling R-09 sanctions and R-39(d) reads as "whether a column default or an explicit `func.now()`", and it keeps `storage/` free of any Python clock read. An aggregation-pipeline update using `$$NOW` would have saved the round trip and was rejected: in a pipeline update every literal is an *expression*, so a stored value that happened to be the string `"$total"` would resolve as a field path — a hole in exactly the place, authored fixture content, where values are least predictable.
 
 ## 9. Seeded expansion
 
@@ -576,14 +594,22 @@ Mongo has no foreign keys. The conformance suite tests referential behaviour thr
 
 ```python
 class Seeded:
-    def __init__(self, seed: int, salt: str) -> None: ...
-    def int(self, lo: int, hi: int) -> int: ...
+    def __init__(self, seed: int, salt: str = "") -> None: ...
+    def uuid(self, salt: str) -> UUID: ...       # deterministic, replaces uuid4
+    def int(self, lo: int, hi: int) -> int: ...  # inclusive at both ends
     def choice(self, xs: Sequence[T]) -> T: ...
     def shuffled(self, xs: Sequence[T]) -> list[T]: ...
-    def id(self, prefix: str) -> str: ...        # deterministic, replaces uuid4
     def timestamp(self, base: datetime, drift_s: int) -> datetime: ...
 ```
 
-`salt` is the node id or field path, so two fields expanded from one seed do not correlate. A `hypothesis` property test asserts that identical `(seed, salt)` always yields identical output across processes, and that differing seeds usually diverge.
+`uuid()` replaces the `id(prefix) -> str` this section listed until M7: ruling R-10 requires an RFC 4122-shaped `UUID` matching the golden fixture's hand-built deterministic id, and the column type is `UUID`, so the return type and the argument are the ruling's rather than this section's. Ruling R-46 shipped it at M5 with the other four deferred to M7, which is where they are.
+
+`salt` is the node id or field path, so two fields expanded from one seed do not correlate.
+
+**The two modes are different on purpose.** `uuid()` is *addressed*: a pure function of `(seed, self.salt, salt)` with no hidden state, because R-10 makes an id re-derivable from its seed and R-46 pins the derivation with a literal test — an id that depended on how many other values had been drawn first would not be re-derivable at all. The four value generators are a *stream*: this section gives them no salt parameter and expansion needs *N* distinct draws, so each draw advances a per-instance counter that is mixed into the digest. Two fresh `Seeded(seed, salt)` instances therefore produce identical sequences while one instance does not repeat itself.
+
+`int()` is the only method that hashes for a value; `choice()`, `shuffled()` and `timestamp()` are written in terms of it, so there is one derivation to pin and one place a bias could hide. It is inclusive at both ends, and it draws by rejection sampling against the largest multiple of the span that fits in 64 bits — `drawn % span` over-represents the first `2**64 % span` values, and a generator whose whole job is reproducible fixtures should not also be quietly skewed. `timestamp()` drifts **forward** by 0 to `drift_s` seconds: a dataset encodes a timeline ordered by `after_node` and read by DS-010, so a drift that could move a derived timestamp *before* its base is the one direction that can make an expanded timeline incoherent; a caller wanting a symmetric jitter of `d` writes `timestamp(base - timedelta(seconds=d), 2 * d)`.
+
+A `hypothesis` property test asserts that identical `(seed, salt)` always yields identical output, and that differing seeds usually diverge — *usually*, because two seeds drawing from a narrow range collide by construction and a test asserting inequality on one draw would be flaky by design. Stability **across processes** is a separate test, with real subprocesses under differing `PYTHONHASHSEED` values, because that is the only way to see it: `hash()` is randomised per process, so a `hash()`-derived generator agrees with itself perfectly for the life of one interpreter.
 
 Nothing else in `src/` may import `random`, `uuid`, or call `datetime.now()` inside a generation or expansion path. Enforce with a ruff custom rule or a test that greps the tree.

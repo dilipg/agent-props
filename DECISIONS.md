@@ -2929,3 +2929,475 @@ and it is stated rather than resolved: at authoring volumes the scan is free; at
 the remedy is a counting method on the Protocol, or a selection strategy that takes a page rather
 than a row — which is the phase-2 work PRD 5.6 already assigns. `label_vocabulary` made the same
 choice at M4 for the same reason ("a count over the first 50 rows is not a count") and records it.
+
+---
+
+## [M7] `storage/common.py`: what two adapters must answer identically lives in one place
+The `q` case fold, the semver ordering, `canonical()`, the retry budgets, `stored_document()` and
+every record-to-model mapper moved out of `sql.py` into a new `storage/common.py`, which `mongo.py`
+also imports. `sql.py` converts a `Row` to a plain `dict` (`_fields`) and hands it over;
+`mongo.py` hands over the decoded document.
+Reason: ruling R-39(a) put the fold in Python *because* no query expression folds case identically
+across the three backends, and R-36 makes substring semantics the contract. A second copy of that
+fold inside `mongo.py` would be exactly the divergence those rulings exist to prevent, and it would
+have drifted silently — every fixture in the suite is ASCII except one `q` case, so the two
+implementations could disagree for a year without a red test. The same argument applies to
+`semver_key` (`1.10.0` after `1.9.0`) and to `DatasetSummary`'s 200-character narrative excerpt: a
+second implementation could satisfy `mypy --strict` and still return a different answer than its
+sibling, and "the conformance suite asserts identical results" would then be asserting a
+coincidence.
+Alternative rejected: `mongo.py` importing `sql.py` for the helpers. It works and it is one fewer
+module, but it makes a Mongo-only deployment import SQLAlchemy for a case fold, and it puts the
+shared code in the file whose docstring is about dialects.
+
+## [M7] Postgres needed no adapter, and three fixes only a real server could show
+M3's report said "there is no second adapter class" and that was right: `SqlStore.from_url` plus
+one dependency. What it could not predict were three things that need a server to observe.
+**1. `datasets_search` is dropped, not replaced.** Ruling R-36 offers "a `pg_trgm` GIN index, or it
+is dropped where the extension is unavailable", and the answer is *dropped* on a stronger ground
+than availability: R-39(a) moved both the fold and the match into Python, so `find_datasets` emits
+no SQL text match at all and neither a `to_tsvector` nor a `pg_trgm` index has a query to serve.
+**And an `ILIKE` prefilter is not available either**, which is worth recording because R-36 names
+`ILIKE` explicitly. A prefilter is only sound if it matches a *superset* of the Python fold.
+Measured against Postgres 17 (UTF8, `en_US.utf8`):
+
+```
+title                  term         pg ILIKE   pg lower   python casefold
+Straße operator        strasse      False      False      True
+strasse operator       Straße       False      False      True
+BENGALURU              bengaluru    True       True       True
+```
+
+`str.casefold` folds `ß` to `ss` and no SQL fold does, in **both** directions. A prefilter that
+drops rows the contract promises is worse than a scan. R-39(a)'s named remedy — a pre-folded
+`title || intent` search column computed in Python at write time — remains the answer if this is
+ever measured as a problem, and it says "do not build it now".
+**2. A `TEXT` tie-break needs `COLLATE "C"` on Postgres.** New `SqlStore._byte_ordered`. Ruling
+R-35 requires every list ordering to be total so that "identical inputs give byte-identical output
+on every backend", and `ORDER BY` on a `TEXT` column does not deliver that: SQLite compares with
+`BINARY`, Mongo compares byte-wise, and Postgres uses `LC_COLLATE`. Measured: `SELECT 'run-b' <
+'runa'` is **false** on `en_US.utf8` and true on the other two, because a locale collation weights
+punctuation below letters. So two runs sharing a `started_at` came back in a different order on
+Postgres. Applied to `runs.id` in `find_runs`, where it decides real cases, and to
+`run_steps.node_id` in `get_run`, where `UNIQUE (run_id, seq)` means it never does — kept there
+because R-37 put those keys in the order precisely for the case where the constraint has not held,
+and an ordering that is only total when nothing has gone wrong is not what R-37 asked for.
+`datasets.id` needs nothing: a `UUID` column is not collated, and BSON binary subtype 4 sorts by
+bytes, which is the same order.
+`test_find_runs_breaks_a_tie_by_byte_order` was verified to fail without the fix, returning
+`['runa', 'run-b']` on Postgres and `['run-b', 'runa']` on SQLite.
+**3. `create_engine_for` names the psycopg 3 driver.** See its own entry below.
+Alternative rejected for (2): sorting the tie-break in Python. It works and needs no dialect
+branch, but it gives up `LIMIT`/`OFFSET` pushdown for every `find_runs` call to fix an ordering
+that one backend gets wrong.
+
+## [M7] M3's two open notes, both closed by asking a real Postgres 17
+Recorded because M3 flagged both as suspicions rather than facts and asked M7 to determine which.
+**`runs_lookup` is *not* an `alembic check` false positive.** `METADATA` declares
+`desc(runs.c.started_at)` while the migration writes `sa.text("started_at DESC")`, and autogenerate
+cannot reliably reflect or compare an expression index column — so the suspicion was reasonable. In
+practice `alembic upgrade head` creates `btree (agent_id, run_class, started_at DESC)` and
+`alembic check` reports "No new upgrade operations detected". Nothing needed fixing, so nothing was
+changed; `test_the_migrations_schema_matches_sql_py` now runs on both dialects and
+`test_the_runs_index_keeps_its_descending_column` reads the reflected `indexdef` on Postgres, which
+is where a lost `DESC` would show and a column list would not.
+**The `sa.text("'{}'")` / `"'[]'"` server defaults do coerce.** Verified only as compiled SQL at M3.
+Against a live Postgres 17 they land as `'{}'::jsonb`, `'[]'::jsonb` and `'dev'::text`, and
+`test_the_json_and_boolean_defaults_execute_on_this_dialect` now *executes* an insert that omits
+them rather than compiling the DDL — which is the difference between the claim and the check.
+
+## [M7] Mongo: object keys are percent-escaped, and only keys
+Every opaque JSON value stored by `mongo.py` passes through `encode_keys`, which escapes `%` to
+`%25`, `.` to `%2E` and `$` to `%24` in that order, and `decode_keys` reverses it in the opposite
+order. Values are untouched.
+Reason: two of ruling R-06's five section ids are `nodes.core` and `nodes.branches`, `Skeleton.parts`
+is keyed by section id, and Mongo reads `parts.nodes.core` as two levels of nesting — M3 put a
+dotted key in the conformance suite precisely so this landed in the adapter. The same hazard applies
+to every *authored* document: a fixture's `output`, an entity's `state` and a step's `served` are
+arbitrary caller JSON whose keys this adapter does not get to constrain, and a leading `$` looks
+like an operator. The promoted, queryable fields stay native, and `labels` is *queried* through the
+same escape so a label dimension containing a dot is filterable rather than a silent no-match.
+The order is what makes it reversible: every literal `%` becomes `%25` before the other two
+introduce any `%`, so a literal `%2E` survives as `%252E`, which contains no `%2E` substring.
+`tests/unit/test_mongo_key_codec.py` is a `hypothesis` property test over an alphabet made almost
+entirely of the escape characters, asserting both the round trip and injectivity — because "provably
+injective" in a docstring is worth nothing next to a test of the losing side.
+Alternatives rejected: **storing the blob as a JSON string**, which is simpler and lossless but
+makes `labels` unqueryable, so `find_datasets`'s label filter would become a full scan and a decode
+per row. **Replacing the dot with a lookalike** (`U+FF0E`), which is not injective — a key that
+already contained the lookalike collides.
+Residue, stated: an **empty** object key (`""`) is legal JSON and is escaped to `""`, and MongoDB's
+own tolerance for empty field names has varied by version. No fixture, schema or authored document
+in this project has one, and the codec cannot fix it without a prefix scheme that changes every
+stored key. If it ever matters, the fix is to prefix every encoded key with a sentinel character.
+
+## [M7] Mongo: the clock is the server's, read with `hello`, not `$$NOW` in a pipeline
+`MongoStore._server_now()` runs `db.command("hello")` and takes `localTime`. Used in exactly three
+writes — `put_blueprint`'s insert (`created_at`), `upsert_step`'s `fetched_at` fallback, and
+`set_step_actual`'s `recorded_at` — which are the three places the SQL adapter relies on
+`DEFAULT now()` or `func.now()`.
+Reason: ruling R-09 allows a timestamp from "a DB column default, the client, authored content, or
+`Seeded.timestamp()`", and R-39(d) reads the first as "a database clock, whether a column default
+or an explicit `func.now()`". Mongo has neither column defaults nor a `now()` function in a plain
+update, so a command that returns the server's clock is the only mechanism in that category — and it
+keeps `storage/` free of any Python clock read, which `tests/unit/test_layering.py` asserts. `hello`
+is the connection handshake: no privileges, no version floor worth stating. `serverStatus`,
+`hostInfo` and `$collStats` all need an admin action; `$documents` needs 5.1+.
+**Rejected: an aggregation-pipeline update using `$$NOW`.** It costs no extra round trip and it was
+the first implementation. In a pipeline update every literal is an *expression*, so a stored value
+that happened to be the string `"$total"` would silently resolve as a field path, and a `$literal`
+wrapper would have to be remembered at every site. A codec that escapes keys next to a pipeline that
+reinterprets values leaves exactly one hole, in the one place — authored fixture content — where the
+values are least predictable. Three round trips on three rare writes is the cheaper price.
+Cost, stated: one extra round trip per blueprint insert and per *first* fetch of a step.
+
+## [M7] Mongo: the natural key is the `_id`, and the `labels` index is a wildcard index
+**`_id`.** `blueprints._id` is `{agent_id, version}`, `datasets._id` is `{id, version}`,
+`run_steps._id` is `{run_id, node_id, iteration}`, and `skeletons`/`runs` use their own id.
+Reason: contracts section 8 says each collection is "keyed by" exactly these, so making the natural
+key the `_id` gets uniqueness from the server rather than from a second index that could be missing
+— which matters most for `run_steps`, where that key *is* `upsert_step`'s idempotency. And a
+driver-generated `ObjectId` embeds a client clock plus a per-process random value, which ground rule
+9 forbids in this package. A subdocument `_id` matches by exact field order, so each one is built by
+a single function and never spelled inline.
+**The `labels` index.** Contracts section 8 says "a multikey index on `labels`" and this is a
+wildcard index on `labels.$**` instead. "Multikey" describes an index over an array-valued field;
+`labels` is an object, and a plain index on it serves only whole-object equality. A wildcard index
+is what actually accelerates `labels.tier == "regional"`, which is the query `find_datasets` issues.
+Recorded as a deviation rather than silently, and amended into contracts section 8.
+**No text index on `{title, intent}`**, which section 8 also asked for. Same reason as
+`datasets_search`: R-36 makes `q` substring matching and R-39(a) puts the fold in Python, so a
+stemming index would serve a query nobody issues. `$regex` with `i` is a third answer to case
+folding and would be the divergence R-36 forbids.
+
+## [M7] The exception-mapping strategy across three drivers
+The three backends raise three different things for one condition, and the strategy is: **one
+pattern per condition, translated at the adapter, never at the service.**
+- **duplicate key**: `IntegrityError` on both SQL dialects, `DuplicateKeyError` on Mongo. Every
+  retry in both adapters is the same bounded-retry-on-duplicate-key shape, with the budgets in
+  `common.py` — because the *guard* is a unique key on all three backends, which is what rulings
+  R-37 and R-39 both turn on. Each adapter catches its own driver's type and re-raises anything that
+  is not the race, so a real fault is not buried under eight attempts.
+- **failed CAS**: not an exception on any backend. `mark_skeleton_submitted` compares `rowcount`
+  (SQL) or `matched_count` (Mongo) from a *conditional* write, so the server decides once. Ruling
+  R-47's requirement survives unchanged on both.
+- **write-once refusal**: `set_step_actual` is the same single-decision-site loop in both adapters,
+  with `WHERE actual IS NULL` / `{"actual": None}` in the filter. M3's fix round 2 got this wrong
+  once by checking that *some* actual was stored rather than that it was *this* one; the shape was
+  copied to Mongo along with the reason.
+- **oversized integer**: `OverflowError` from pysqlite, `DataError` from psycopg, `OverflowError`
+  from bson. **None of them is translated**, deliberately: ruling R-50 bounds the value at the
+  *boundary*, where `AP-001` is the answer, and `test_bounded_integers.py` asserts the envelope
+  there. The new conformance test `test_an_oversized_seed_is_never_silently_truncated` asserts the
+  property underneath instead of the type — "round-trips exactly, or is not stored at all" — because
+  a Protocol-level test that named a driver exception would be asserting the thing that differs.
+- **store unreachable**: `SQLAlchemyError` / `PyMongoError`, both caught by `health()`, which never
+  raises. Mongo needs a short `serverSelectionTimeoutMS` for that to be a prompt "no" rather than a
+  thirty-second one.
+Every `except` clause in `sql.py` was reviewed against this list, and the outcome is that none of
+them needed widening: the ones that catch `IntegrityError` are about a unique key, and Mongo's
+equivalent is a different class in a different module.
+
+## [M7] The bundle format
+`{format: "agentprops.bundle", format_version: 1, agent_id, blueprints[], datasets[]}`, keys in that
+order, documents dumped `exclude_unset`.
+Reason for each part. **The blueprints travel** because contracts section 4 says "blueprint version
+plus datasets" and because DS-001 requires a dataset to name an existing *published* blueprint — a
+bundle of datasets alone fails its own validation on arrival anywhere that has not already seen the
+blueprint. Only the referenced versions are carried: an export is a bundle of *those datasets*, not
+a backup of the agent. **`exclude_unset`** is ruling R-08's round-trip criterion, and it is what
+makes an export/import/export cycle return the same bytes rather than a document with eleven
+reintroduced `null`s. **The key order is fixed in one function** because a bundle is a file a human
+diffs, and a dict assembled in two places is a dict that eventually differs. **`format` and
+`format_version` are checked before any rule runs**, and are `AP-001`: a caller who passed the wrong
+object should be told that once rather than handed the catalogue's opinion of a document that was
+never a dataset.
+Alternatives rejected: **a bare array of datasets** (fails DS-001 on arrival, and says nothing about
+what produced it); **a tarball or JSONL** (a bundle has to be a *tool argument*, and the MCP surface
+takes objects); **carrying every published version of the agent's blueprint** (an export of two
+datasets would drag in six blueprint versions nothing references).
+Two behaviours worth knowing. **A version number does not travel** — `put_dataset` allocates, so a
+dataset exported at version 2 arrives at version 1 in an empty store; `created_at` does travel,
+because it is authored content, which is the whole of ruling R-09 and what keeps `dataset_find`'s
+ordering identical across the crossing. Both ends of that are now tested. **An import is not atomic
+against a crash**: there is no transaction across the `Store` Protocol, so the residue is a partial
+import, visible in `dataset_find`, and re-importing the same bundle is safe because an identical
+re-publish is a no-op (R-29) and a re-imported dataset becomes a new version.
+
+## [M7] `_BundleResolver`: import validates against the store *plus* the bundle
+`import_bundle` validates the blueprints against the plain store resolver, then validates the
+datasets against a resolver that answers `get_published_blueprint` and `dataset_exists` from the
+receiving store **plus this bundle**, and only then writes anything.
+Reason: DS-001 asks whether the dataset's blueprint is published *in this store*, and for a new
+agent it is not until the bundle's blueprints are written. So the obvious implementation is publish
+first, validate second — and a bundle whose datasets then fail leaves behind a published blueprint
+version that BP-016 has made **immutable forever**. A failed import that permanently changed the
+store it was rejecting is a worse failure than the one it was reporting. The overlay is not a
+different answer to the two lookups; it is the answer they will give once the import finishes, which
+is the question worth asking before writing. Staging the bundle's dataset ids for DS-031 falls out
+of the same argument: a bundle that exports a superseding pair has to be importable into a fresh
+store, or the rejection names a lineage the same bundle supplies.
+There is no case where the store and the overlay can disagree: blueprint validation runs against the
+plain resolver first, so a bundle version that differs from a published one fires BP-016 and the
+import stops before the overlay is consulted.
+Verified both ways. `test_a_refused_import_publishes_no_blueprint` is the guard, and removing the
+overlay was checked to fail the *happy path* with DS-001 — so the overlay is load-bearing rather
+than defensive.
+Alternative rejected: publishing first and accepting the orphan. It is simpler, and R-29 makes an
+orphaned published version inert rather than corrupt — but "nothing is written until all of it
+passes" is a sentence worth being able to write truthfully, and this is what it costs.
+
+## [M7] What `dataset_expand` seeds from, and what an expanded entry is
+**Seeds from** the dataset's own `seed`, salted `expand:<node_id>:<index>` where `index` is the
+entry's final position in the pool. One `Seeded` per position, not one stream per batch.
+Reason: design principle 3 is "same seed plus same blueprint version yields the same dataset", so a
+per-call seed argument would make one dataset's pool depend on which call grew it — and the dataset
+already carries the value everything else about it was derived from (DS-020 owns it). Addressing by
+position rather than drawing from a batch stream is what makes the entries at positions already
+written **stable across versions**: expanding version 2 leaves version 1's entries byte-identical,
+which is the property a reviewer reading a lineage depends on.
+**An expanded entry is a deterministically chosen copy of an authored fixture**, with
+`latency_hint_ms` jittered when the template carries one. Not invented content, and that is a
+constraint rather than a shortcut: DS-019 validates every pool fixture against the node's
+`output_schema`, the schema is user-supplied JSON Schema, and generating a conforming instance of an
+arbitrary schema is a model's job — which ground rule 4 forbids anywhere in this service. PRD
+section 4 says the same from the other side: "deterministic expansion from `seed` fills volume,
+repeated rows and pool entries". Repetition is the feature. `latency_hint_ms` is the one field
+varied because it is the one field on a `NodeFixture` that no schema constrains and that the entity
+timeline does not depend on.
+**Correction, found by the test that was written to assert the opposite.** The first version of
+`expansion.py` claimed in its docstring that expanding by 5 equals expanding by 2 then 3. It does
+not: a new entry is chosen from the pool it is being added to, and after the first call that pool is
+longer, so the second call is expanding a *different dataset* and a draw over five entries is not a
+draw over two. Measured: the two agree up to position 4 and differ at 5. The guarantee is narrower
+and is now what is asserted — the prefix is preserved, the continuation may differ — and
+`test_a_split_expansion_keeps_the_prefix_and_may_diverge_after_it` pins both halves so the residue
+is a stated trade rather than a surprise. Making them agree would need the store to remember which
+entries were *authored* as against generated, and nothing does.
+`MAX_EXPAND_COUNT = 10000` is a **stated** bound reported as `AP-001` naming the maximum, never a
+clamp. R-56 forbids silently serving a smaller expansion than was asked for, and DS-023 cannot be
+the only bound: it caps a *loop* node, ruling R-51 allows a `pool: true` node that is not a loop
+node, and R-23 requires the document be built before it is validated — so nothing in the catalogue
+stops `count = 2**62` from being *attempted*, and that is an out-of-memory rather than a validation
+failure. Ten thousand because PRD section 4 names "a 10,000-row load-test dataset" as the volume
+expansion exists for.
+
+## [M7] `create_engine_for` names the psycopg 3 driver, at the one seam
+A plain `postgresql://` URL selects SQLAlchemy's default Postgres driver, which is psycopg2 — not a
+dependency of this project. `create_engine_for` normalises through `postgres_url()`.
+Reason, and it is a bug this found rather than a precaution: `context_for` normalised and
+`migrations/env.py` did not, so `docker compose --profile shared up` started, ran
+`alembic -x url="postgresql://..." upgrade head` and died on
+`ModuleNotFoundError: No module named 'psycopg2'` — while the *service* half of the very same URL
+would have worked. Found by running the compose profile, not by reasoning about it.
+Fixed at the seam rather than at the second caller. `create_engine_for` is the one place a SQL URL
+becomes an engine, so it is the one place that can be the answer for every caller — and
+`context_for`'s own call was removed, because two normalisations are two places to forget. This is
+the M3 implementer's rule applied again: the defect sits in the one place a working pattern was not
+reused.
+A URL that already names a driver is left alone, so `postgresql+asyncpg://` is not silently
+rewritten to something else. `test_a_plain_postgres_url_names_the_installed_driver` needs no server
+— `create_engine` resolves and imports the DBAPI without connecting, which is the step that was
+failing — and it was verified to fail against the pre-fix code.
+
+## [M7] `context_for`: one store target, three backends, and three answers about the schema
+`service/context.py` gains `context_for(target)`, dispatching on the URL prefix: Mongo, Postgres,
+SQLite URL, or a bare filesystem path as the fall-through. `server/__main__.py` calls it with
+`--store` / `AGENTPROPS_STORE`.
+The dispatch itself is unremarkable; **who creates the schema** is the decision. A SQLite file is
+created if absent, which is the containerless throwaway CLAUDE.md describes and what `--store
+./agentprops.db` has meant since M4. Mongo's indexes are **declared on startup**, because contracts
+section 8 gives collections and indexes rather than DDL, there is no Alembic for a document store,
+and `create_index` is idempotent — so a startup declaration is the only mechanism available and a
+safe one. Two of those indexes are load-bearing rather than cosmetic: the unique `{run_id, seq}`
+index is what makes `seq` allocation sound (R-37), and a process that skipped the declaration would
+serve every read correctly while losing that guarantee silently.
+A **Postgres** URL creates nothing, which is the warning `server/__main__.py` recorded at M4 before
+this function existed: "a URL argument that silently ran `create_schema` against a migrated Postgres
+database would be worse than not having one". `docker-compose.yml`'s `shared` profile runs
+`alembic upgrade head` before it serves, for exactly that reason.
+The fall-through is the bare path rather than an error, because that is the spelling a human types
+without thinking about schemes.
+
+## [M7] `docker-compose.yml`: two services behind one anchor, and overridable host ports
+The service is defined once in an `x-service` anchor and used twice, so the only difference between
+the `local` and `shared` profiles is the store URL. A copied-and-edited block is where two
+deployments quietly diverge.
+The `shared` service has a `command` and the `local` one does not, and the asymmetry is the schema
+decision above: Postgres is migrated, Mongo declares its indexes on startup, so `--profile local up`
+is genuinely one command.
+Both databases declare a healthcheck and both services wait on `condition: service_healthy`, which
+is what makes `up` a single command rather than a race the service loses on a cold start.
+`pg_isready` names the user and the database, because the bare command answers for the *default*
+database and reports ready while the init scripts are still creating this one.
+**The three published host ports are overridable** (`AGENTPROPS_SERVICE_PORT`,
+`AGENTPROPS_POSTGRES_PORT`, `AGENTPROPS_MONGO_PORT`), and that is not speculative generality. On
+Windows a host Postgres bound to `0.0.0.0:5432` wins the race for IPv4 over Docker's port proxy, so
+the container is created, healthy and listening while every connection lands on the other server and
+is told "password authentication failed for user agentprops" — for a role it has never heard of.
+Diagnosed by `Get-NetTCPConnection -LocalPort 5432`, which showed two listeners. The whole M7
+Postgres verification ran on 5433 for that reason.
+The image healthcheck is a **TCP connect**, not an HTTP request: the MCP streamable HTTP transport
+answers `/mcp` only for a POST carrying a protocol handshake, so a `GET /` check would report
+unhealthy on a working server. It also keeps `curl` out of the image.
+`tests/unit/test_containers.py` is the drift guard, and it tests the one thing a running container
+cannot: whether the compose file and the Python it starts still agree about the environment variable
+names, the URL schemes `context_for` dispatches, and the health dependency. Rename a variable on
+either side and the container starts, serves, and silently uses a SQLite file inside itself that is
+discarded on the next `up`.
+
+## [M7] `Seeded` has two modes, and `int()` is the only one that hashes for a value
+`uuid()` is **addressed** — a pure function of `(seed, self.salt, salt)` with no hidden state. The
+four value generators are a **stream** — each draw advances a per-instance counter that is mixed
+into the digest.
+Reason: ruling R-10 makes an id re-derivable from its seed and R-46 pins the derivation with a
+literal test, so an id that depended on how many other values had been drawn first would not be
+re-derivable at all. Meanwhile contracts section 9 gives `int`, `choice`, `shuffled` and `timestamp`
+**no salt parameter**, and expansion needs *N* distinct draws — so a counter is the only way to read
+that signature honestly. Two fresh `Seeded(seed, salt)` instances produce identical sequences, which
+is the determinism guarantee; one instance does not repeat itself.
+`int()` is the only method that hashes for a value; the other three are written in terms of it.
+Four independent derivations would be four things to pin, four places for a bias to hide, and four
+ways for an edit to change one method's output without changing the others'.
+`int()` draws by **rejection sampling** against the largest multiple of the span that fits in 64
+bits. `drawn % span` over-represents the first `2**64 % span` values; the bias is tiny but it is a
+bias, and a generator whose whole job is reproducible fixtures should not also be quietly skewed.
+The loop has exactly one exit and terminates because the acceptance probability is never below one
+half.
+`timestamp()` drifts **forward** by 0 to `drift_s` seconds rather than symmetrically. Contracts
+section 9 gives the signature and not the direction; a dataset encodes a timeline ordered by
+`after_node` and read by DS-010, so a drift that could move a derived timestamp *before* its base is
+the one direction that can make an expanded timeline incoherent. A caller wanting a symmetric jitter
+of `d` writes `timestamp(base - timedelta(seconds=d), 2 * d)`, which is explicit about it.
+`_Int = int` exists because `Seeded.int` shadows the builtin inside the class scope, so an
+annotation on a member declared after it resolves to the *method* and `mypy --strict` reports
+"Function ... is not valid as a type". Renaming the method would diverge from the contract, so the
+type got the second name.
+
+## [M7] The layering guard traded a bare `choice` suffix for an import ban
+`tests/unit/test_layering.py`'s random-source check no longer matches the bare suffix `choice`. In
+its place: `random.choice` and `secrets.choice` are matched by their **dotted** names, and
+`random`/`secrets` may not be **imported** in any of the six guarded layers.
+Reason: ground rule 9 is "all randomness inside the service flows through `Seeded`", contracts
+section 9 names `Seeded.choice` as one of its methods, and `service/expansion.py` calls it — so the
+guard reported the module for doing exactly what the ground rule requires. A bare-suffix match
+cannot tell `source.choice(templates)` from `random.choice(templates)`.
+**Strictly stronger than what it replaced, not weaker.** `random.choice` cannot be reached without
+naming `random`: either as `import random`, and then the call is dotted and caught, or as
+`from random import choice`, and then the import is caught. The import ban also fails on the line
+that made the mistake possible rather than on the line that made it, and it sees a route this file
+has not thought of.
+Verified in both directions, because a fix that defangs its own guard has happened three times in
+this build. A planted `import random` plus `random.choice(...)` in `service/expansion.py` fails
+**both** halves — `['line 277: random.choice()']` from the call guard and the import from the new one
+— and `Seeded(1).choice([1, 2])` fails neither. `test_the_import_guard_would_catch_a_random_source_imported_by_name`
+carries the second half as a permanent assertion.
+`shuffle` stayed on the suffix list and does not collide: the seeded method is `shuffled`.
+
+## [M7] Three guards widened because M7 would otherwise have slipped past them
+**The no-delete guard learned pymongo's spellings.** `DELETING_CALLS` was
+`{delete, delete_all, bulk_delete, truncate}` — and **not one** of `delete_one`, `delete_many`,
+`find_one_and_delete`, `drop` or `drop_database` matches any of them. The set that guarded `sql.py`
+perfectly would have said nothing about an adapter that emptied a collection on every write.
+`test_no_adapter_declares_a_delete_method` is now parameterised over both adapters, because "the
+adapter" stopped being singular.
+**`test_put_dataset_has_exactly_one_call_site` became an enumeration of three.** M7 added two
+legitimate dataset writers — `dataset_expand` and `dataset_import`, both the authoring flow — so
+"one call site" stopped being the invariant while "every call site is a named authoring writer" still
+is. Kept as an enumeration rather than relaxed to "anything in `service/`", because the thing worth
+noticing is a *fourth* writer appearing: adding one now means adding a row and saying which tool it
+serves. `test_no_runtime_entry_point_reaches_a_world_write` is unchanged and still asserts the other
+half over the call graph.
+**The bounded-integer enumeration found `dataset_expand.count`, as designed.** It answers a *third*
+way, which is why `limits.py` needed three names rather than two: above `2**63` it is `AP-001` like
+`seed` (a count is not an identifier, but "make 2**63 entries" and "make 2**63 - 1" are both
+impossible rather than equivalent), above the per-call maximum it is also `AP-001` naming that
+maximum (R-56 forbids silently serving less), and only a *negative* count is clamped.
+
+## [M7] Three conformance tests added, none changed
+The gate is that the suite passes "identically against SQLite, Postgres and Mongo", and it does with
+**not a line of `test_store_conformance.py` changed** — which was the point of writing it against
+the Protocol at M3. `tests/conftest.py` gained two URLs and `tests/integration/conftest.py` gained
+two fixture branches, exactly as M3's report predicted.
+Three tests were **added** at the end, for properties that only became checkable once three servers
+could disagree, and each names the measurement it came from rather than the intuition:
+`test_find_runs_breaks_a_tie_by_byte_order` (a locale-collated Postgres returns the other order),
+`test_find_q_folds_the_way_python_does_and_not_the_way_sql_does` (the `ß`/`ss` case, which the
+existing accented-vowel test does *not* catch because Postgres folds that one correctly), and
+`test_an_oversized_seed_is_never_silently_truncated`. The third asserts a *property* rather than an
+exception type — "round-trips exactly, or is not stored at all" — because three drivers raise three
+different classes for one condition and a Protocol-level test that named one would be asserting the
+thing that differs.
+Recorded as an addition rather than presented as "nothing changed": the brief asked for a finding if
+a conformance test needed touching, and these are the findings. What did not happen is a test being
+relaxed to make a backend pass.
+
+## [M7] Postgres and Mongo isolation in the suite: reset, not recreate
+The `store` fixture gives every test an **empty** store, because half the conformance suite counts
+rows. SQLite gets a new file per test. Postgres gets `METADATA.drop_all` then `create_all`; Mongo
+gets `drop_database` then the index declarations. The engine and the client are **session-scoped**.
+Reason: a per-test connection to Postgres is most of the wall clock of a run this size, and the
+reset is a handful of statements. Dropping first rather than after means a run interrupted mid-test
+leaves nothing for the next one to trip over. Dropping a *table* is DDL on a throwaway database
+rather than the deletion of a row anyone authored, so ground rule 6 is untouched — the same
+reasoning `test_the_migration_is_reversible` already recorded for `downgrade base`.
+The Mongo database name is a constant in the fixture (`agentprops_conformance`) and is deliberately
+**not** taken from the URL's path: this fixture drops the database, and a URL is the wrong place to
+take that decision from.
+
+## [M7] `tests/integration/test_backend_selection.py`: the guard against a green run over nothing
+A `--store postgres` run that collects nothing, or collects everything and skips it, reports green —
+and so does a run where the `store` fixture silently fell back to SQLite. Both are the milestone gate
+being claimed without being met, and neither leaves a mark in the summary line anyone reads.
+Four properties. `STORE_BACKENDS == IMPLEMENTED_STORE_BACKENDS`, which inverts the state M3
+deliberately left, in the same way M5 inverted the test that pinned the absence of the `SK-*` rules.
+The default is SQLite alone, because CI has no Docker. Every conformance test takes `store`
+**directly**, which is what `pytest_generate_tests` keys off — a test that reached a store through
+`published` or `pinned` alone would run once instead of once per backend and nothing else would
+notice. And the sharpest one: the store must report `backend` equal to the id that was selected, so a
+fixture that fell through to SQLite fails here and only here, because SQLite passes every conformance
+test correctly.
+
+## [M7] `test_migrations.py` is parameterised over the two SQL dialects, not the three backends
+Mongo is absent because there is no Alembic for a document store — contracts section 8 gives
+collections and indexes rather than DDL, and `MongoStore.create_schema()` declares them, which the
+conformance suite exercises on every test.
+Adding the Postgres parameter is what closes M3's two open notes and keeps them closed, and it needs
+the schema dropped and recreated per test: a shared database carrying a previous run's tables would
+satisfy `test_the_migration_creates_every_table` without the migration having done anything.
+The Postgres fixture hands alembic the **plain** `postgresql://` URL rather than a driver-qualified
+one, deliberately — that is what a compose file and an environment variable carry, and it is
+therefore what exercises the normalisation in `create_engine_for` that
+`docker compose --profile shared up` needs.
+
+## [M7] Revision `0001` amended a third time
+The `datasets_search` index was removed from the initial revision rather than dropped by a `0002`.
+Ratifying R-39(c) for the third time and for its own reason: this is the initial schema of an
+unreleased milestone on an unmerged branch, no database outside a temporary test database has ever
+been migrated by it, and a follow-up revision would make every future deployment create an index
+and then drop it. **Migrations become append-only the moment this branch merges.**
+Stated because the brief asked which was done and why: amended, and this is the last milestone that
+can.
+
+## Questions for the owner — M7
+1. **Is `expansion_added_nothing` the right answer to `count = 0`?** The alternative is `AP-001`
+   ("count must be at least 1"). The warning was chosen because the argument is well formed and
+   ground rule 3 is about not refusing well-formed requests, and because writing a byte-identical
+   new version would put a meaningless entry in a lineage a reviewer reads. If a refusal is
+   preferred it is one predicate.
+2. **`MAX_EXPAND_COUNT = 10000` is invented.** No document gives a per-call bound and DS-023 cannot
+   be one for a non-loop pool node (R-51). Ten thousand is PRD section 4's own load-test figure. A
+   caller who wants more makes a second call and gets the same entries either way, because an entry
+   is addressed by its position.
+3. **Should a split expansion equal a single one?** It does not, and the residue is recorded above
+   with the measurement. Making it hold would need the store to distinguish authored entries from
+   generated ones — a column, or a marker inside the fixture that DS-019 would then have to exempt.
+   The narrower guarantee (the prefix never moves) seems like the one that matters for a reviewer
+   reading a lineage, but this is a product question.
+4. **`bundle` is `format_version: 1` with no migration path.** An older service reading a future
+   bundle answers `AP-001` naming the version it expects, which is the honest failure. If bundles
+   are ever expected to be forward-compatible, the shape needs a "unknown keys are ignored" rule
+   stated now rather than discovered later.
+5. **An empty object key is not addressable in Mongo**, and the codec cannot make it so without a
+   prefix scheme that changes every stored key. Nothing in this project produces one. Flagged rather
+   than fixed.
