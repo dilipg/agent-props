@@ -95,6 +95,11 @@ Available from M0 onward, once `pyproject.toml` exists.
 - `--store <path>` — a SQLite file, the containerless mode and what CI uses. `--store` also takes a
   `sqlite://` / `postgresql://` / `mongodb://` URL, and every argument reads an `AGENTPROPS_*`
   environment variable
+- **Concurrent runs are safe.** Each session creates its own `agentprops_conformance_<pid>_<random>`
+  database and drops it on exit — ruling R-63, because the per-test reset is destructive and a
+  shared name made two overlapping runs delete each other's rows mid-test, which reads as a
+  plausible *failure* count rather than an error. A run that is *killed* leaves one behind; the
+  sweep is in `tests/integration/conftest.py`'s module docstring
 
 ## Testing
 

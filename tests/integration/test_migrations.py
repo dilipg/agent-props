@@ -60,7 +60,7 @@ from agentprops.storage.sql import (
     runs,
     skeletons,
 )
-from conftest import postgres_test_url
+from conftest import postgres_session_url
 from integration.conftest import make_run
 
 pytestmark = pytest.mark.integration
@@ -116,7 +116,11 @@ def migrated(request: pytest.FixtureRequest, tmp_path: Path) -> str:
     # The **plain** URL, with no driver named, which is what a compose file and
     # an environment variable carry - so this exercises the normalisation in
     # `create_engine_for` that `docker compose --profile shared up` needs.
-    url = postgres_test_url()
+    #
+    # This session's database rather than the server's (ruling R-63), which is
+    # what makes the `DROP SCHEMA public CASCADE` below a local act: before
+    # R-63 it emptied a database a concurrent run was mid-test against.
+    url = postgres_session_url()
     with engine.begin() as connection:
         connection.execute(text("DROP SCHEMA public CASCADE"))
         connection.execute(text("CREATE SCHEMA public"))

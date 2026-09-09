@@ -28,10 +28,12 @@ milestone has to invent it.
 
 import json
 import os
+import re
+import secrets
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 
@@ -92,13 +94,72 @@ DEFAULT_TEST_MONGO_URL = "mongodb://localhost:27117"
 
 
 def postgres_test_url() -> str:
-    """The Postgres the integration suite should use."""
+    """The Postgres **server** the integration suite should use.
+
+    The *server*, not the database the suite writes to: the path names the
+    database this connects to in order to create :data:`TEST_DATABASE_NAME`,
+    and :func:`postgres_session_url` is where the tests are pointed. See
+    :data:`TEST_DATABASE_NAME`.
+    """
     return os.environ.get(POSTGRES_URL_ENV_VAR) or DEFAULT_TEST_POSTGRES_URL
 
 
 def mongo_test_url() -> str:
     """The Mongo the integration suite should use."""
     return os.environ.get(MONGO_URL_ENV_VAR) or DEFAULT_TEST_MONGO_URL
+
+
+#: The stem every test database this suite creates is named from. A sweep looks
+#: for exactly this prefix, so it lives in one place and the guard in
+#: `tests/unit/test_session_database.py` asserts no test file spells it alone.
+TEST_DATABASE_PREFIX: Final = "agentprops_conformance"
+
+#: **This pytest session's own** test database, on whichever backend needs one.
+#:
+#: Computed once at import, so it is constant for the life of a process and
+#: different in any other process. That is ruling R-63, and it replaces a
+#: documented convention - "one pytest process at a time" - with a structure.
+#:
+#: Why the convention was not enough. The ``store`` fixture **drops this
+#: database before every test**, because half the conformance suite counts rows.
+#: With a shared name, two concurrent runs delete each other's data mid-test,
+#: and the result is not an error anyone would recognise: it is a plausible
+#: **failure count** made of row-count and latest-version assertions. M7 hit it
+#: while measuring and nearly reported a 14-failure Mongo run as a real result.
+#: R-60 had just been ruled for the same shape one layer out - a documented
+#: convention about *which server* to talk to, violated three times - and this
+#: one is worse, because the wrong-server case at least produced suspiciously
+#: *passing* results, which is the easier thing to notice.
+#:
+#: The pid is in the name on purpose, and it is the useful half. Concurrent
+#: processes always have distinct pids, so no two live sessions can collide; and
+#: a *stray* database from a killed run is triageable, because a developer can
+#: ask whether that pid is still running. The random suffix is what stops a
+#: recycled pid from silently adopting an older run's leftovers.
+#:
+#: Dropped on session exit by whichever fixture created it. A run killed
+#: mid-suite leaves one behind - see the sweep in
+#: `tests/integration/conftest.py`, which the prefix above exists for.
+TEST_DATABASE_NAME: Final = f"{TEST_DATABASE_PREFIX}_{os.getpid()}_{secrets.token_hex(4)}"
+
+#: What a name has to look like to be legal as *both* a MongoDB database and an
+#: unquoted Postgres identifier: lowercase, no dots, no dollars, no spaces, and
+#: comfortably inside Postgres's 63-byte identifier limit. Asserted rather than
+#: assumed, because :data:`TEST_DATABASE_NAME` is interpolated into a
+#: ``CREATE DATABASE`` statement.
+LEGAL_DATABASE_NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,62}")
+
+
+def postgres_session_url() -> str:
+    """:func:`postgres_test_url` with its path replaced by this session's database.
+
+    The **plain** URL, with no driver named, because that is what a compose file
+    and an environment variable carry and `test_migrations.py` deliberately
+    feeds it to alembic unnormalised.
+    """
+    server, _, query = postgres_test_url().partition("?")
+    base, _, _database = server.rstrip("/").rpartition("/")
+    return f"{base}/{TEST_DATABASE_NAME}" + (f"?{query}" if query else "")
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

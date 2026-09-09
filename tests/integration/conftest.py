@@ -32,14 +32,70 @@ per-test file, so they are reset instead: ``METADATA.drop_all`` then
 Mongo. The engine and the client are **session-scoped**, so the reset is a
 handful of statements rather than a reconnect - a per-test connection to
 Postgres is most of the wall clock of a run this size.
+
+Isolation, per **run** (ruling R-63)
+------------------------------------
+
+Those resets are destructive, so a shared database name gives two concurrent
+runs no isolation from each other at all: each drops the other's data mid-test.
+The result is not a recognisable error. It is a plausible **failure count** -
+`14 failed, 118 passed`, every failure a row count or a latest-version
+assertion - and M7 came within one paste of reporting exactly that as a real
+result.
+
+So the database is named per process: :data:`conftest.TEST_DATABASE_NAME`,
+``agentprops_conformance_<pid>_<random>``, computed once at import. Postgres
+gets a real ``CREATE DATABASE`` of that name and Mongo simply uses it; both are
+dropped on session exit. :func:`conftest.postgres_test_url` is now the
+*server* - the database this connects to in order to create the session's own -
+and :func:`conftest.postgres_session_url` is what the tests and alembic get.
+
+Sweeping stragglers
+-------------------
+
+A run killed mid-suite cannot run its own teardown, so it leaves one named
+database behind. That is R-63's stated cost, and the prefix is a constant so a
+shell pattern can find them. The pid in each name is the triage: if no such
+process is running, that database is certainly stale.
+
+Both halves below were run against the compose containers - the Postgres one
+after its first version silently dropped nothing, because ``format()`` without
+a trailing semicolon hands ``psql`` two statements glued into one.
+
+To list::
+
+    docker compose exec -T mongo mongosh --quiet --eval \\
+      'db.adminCommand({listDatabases:1}).databases
+         .filter(d => d.name.startsWith("agentprops_conformance_"))
+         .forEach(d => print(d.name))'
+
+    docker compose exec -T postgres psql -U agentprops -d agentprops -Atc \\
+      "select datname from pg_database where datname like 'agentprops\\_conformance\\_%'"
+
+To drop every one of them::
+
+    docker compose exec -T mongo mongosh --quiet --eval \\
+      'db.adminCommand({listDatabases:1}).databases
+         .filter(d => d.name.startsWith("agentprops_conformance_"))
+         .forEach(d => db.getSiblingDB(d.name).dropDatabase())'
+
+    docker compose exec -T postgres psql -U agentprops -d agentprops -Atc \\
+      "select format('drop database %I with (force);', datname) from pg_database
+       where datname like 'agentprops\\_conformance\\_%'" \\
+      | docker compose exec -T postgres psql -U agentprops -d agentprops -q -f -
+
+The ``\\_`` is not a typo: ``_`` is a single-character wildcard in SQL ``LIKE``,
+and Postgres treats a backslash as the escape by default. Unescaped, the pattern
+also matches names that merely resemble ours.
 """
 
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import pytest
@@ -62,28 +118,53 @@ from conftest import (
     FIXTURES_DIR,
     FROZEN_NOW,
     IMPLEMENTED_STORE_BACKENDS,
+    LEGAL_DATABASE_NAME,
+    TEST_DATABASE_NAME,
+    TEST_DATABASE_PREFIX,
     mongo_test_url,
+    postgres_session_url,
     postgres_test_url,
     selected_store_backends,
 )
 
 __all__ = ["FROZEN_NOW"]
 
-#: The database the Mongo branch creates, drops and recreates. Named for what it
-#: is, so nobody points ``AGENTPROPS_TEST_MONGO_URL`` at a database they wanted
-#: to keep and loses it: the name is **not** taken from the URL's path.
+#: The database the Mongo branch creates, drops and recreates: **this session's
+#: own**, from :data:`conftest.TEST_DATABASE_NAME`.
 #:
-#: That is not a hypothetical. This machine had a **second** MongoDB already
-#: listening on 27017, holding an unrelated production database, and the default
-#: URL reached it - so an M7 run created and dropped this database on a server
-#: nobody meant to test. Taking the name from the URL's path would have made the
-#: same run drop that one.
+#: Two separate properties are riding on this one name, and they were added for
+#: two different failures.
 #:
-#: Ruling R-60 has since moved the default port to 27117 so the *reach* is gone
-#: too, but this constant stays and stays load-bearing: an override can still
-#: point the suite anywhere, and the thing that must never be possible is
-#: dropping a database whose name came from the URL someone typed.
-MONGO_TEST_DATABASE = "agentprops_conformance"
+#: **It is not taken from the URL's path** (the original reason). This fixture
+#: drops the database, and a URL is the wrong place to take that decision from.
+#: Not hypothetical: this machine had a second MongoDB on 27017 holding an
+#: unrelated production database, and the default URL reached it, so an M7 run
+#: created and dropped a database on a server nobody meant to test. Had the name
+#: come from the URL's path, that run would have dropped *theirs*. Ruling R-60
+#: has since moved the default port so the reach is gone too, but an override
+#: can still point the suite anywhere, so this half stays load-bearing.
+#:
+#: **It is unique per process** (ruling R-63). See
+#: :data:`conftest.TEST_DATABASE_NAME` for why a shared name was worse than it
+#: looks: the drop happens *before every test*, so two concurrent runs produce a
+#: plausible failure count rather than an obvious error.
+MONGO_TEST_DATABASE: Final = TEST_DATABASE_NAME
+
+#: What to tell a developer whose run was killed before it could tidy up.
+#:
+#: Ruling R-63's stated cost: a session-scoped name leaves a stray database if a
+#: run dies mid-suite. Both fixtures drop theirs on the way out, and neither can
+#: run at all if the process is killed - hence the sweep in this module's
+#: docstring, and hence :data:`conftest.TEST_DATABASE_PREFIX` being a constant a
+#: shell pattern can match.
+#:
+#: Short on purpose. It names the database and points at the recipe rather than
+#: carrying a compound shell pipeline through three levels of quoting, where a
+#: mistake would be a command a developer pastes and a warning nobody can trust.
+SWEEP_HINT: Final = (
+    f"Sweep stragglers with the recipe in tests/integration/conftest.py's module "
+    f"docstring; they are all named {TEST_DATABASE_PREFIX}_<pid>_<random>."
+)
 
 #: The skip reason for a server that has already been shown to be unreachable,
 #: remembered so it is *shown* to be unreachable exactly once per run.
@@ -130,33 +211,80 @@ def _with_connect_timeout(url: str) -> str:
 
 @pytest.fixture(scope="session")
 def postgres_engine() -> Iterator[Engine]:
-    """One engine for the whole session, or a skip naming the URL that failed.
+    """An engine on **this session's own** database, or a skip naming the URL that failed.
 
-    Session-scoped because the reset below is cheap and a connection is not:
+    Session-scoped because the per-test reset is cheap and a connection is not:
     reconnecting per test is most of the wall clock of a run this size. The
     connection is *proved* here rather than at first use, so an unreachable
     server produces one clear skip reason on every test instead of a
     ``ConnectionRefusedError`` inside whichever assertion happened to run first.
+
+    Two connections, to two different databases, and the difference matters.
+    :func:`conftest.postgres_test_url` names the database this **connects** to
+    in order to run ``CREATE DATABASE``; :data:`conftest.TEST_DATABASE_NAME` is
+    the one the tests then use and the one dropped on the way out. Ruling R-63:
+    a per-session name is what makes two concurrent runs harmless, where before
+    they silently deleted each other's rows mid-test.
+
+    ``CREATE DATABASE`` cannot run inside a transaction, hence ``AUTOCOMMIT``.
+    The name is asserted against :data:`conftest.LEGAL_DATABASE_NAME` first,
+    because it is interpolated into DDL rather than bound as a parameter - a
+    parameter is not permitted there.
     """
     if "postgres" in _UNREACHABLE:
         pytest.skip(_UNREACHABLE["postgres"])
-    url = _with_connect_timeout(postgres_test_url())
-    engine = create_engine_for(url)
+    server_url = _with_connect_timeout(postgres_test_url())
+    server = create_engine_for(server_url)
     try:
-        with engine.connect() as connection:
+        with server.connect() as connection:
             connection.exec_driver_sql("SELECT 1")
     except SQLAlchemyError as exc:
-        engine.dispose()
+        server.dispose()
         _UNREACHABLE["postgres"] = (
-            f"no Postgres at {url}: {type(exc).__name__}. Start one with "
+            f"no Postgres at {server_url}: {type(exc).__name__}. Start one with "
             f"`docker compose --profile shared up -d postgres`, or set "
             f"AGENTPROPS_TEST_POSTGRES_URL."
         )
         pytest.skip(_UNREACHABLE["postgres"])
+
+    assert LEGAL_DATABASE_NAME.fullmatch(TEST_DATABASE_NAME), TEST_DATABASE_NAME
     try:
-        yield engine
+        with server.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.exec_driver_sql(f'CREATE DATABASE "{TEST_DATABASE_NAME}"')
+        engine = create_engine_for(_with_connect_timeout(postgres_session_url()))
+        try:
+            yield engine
+        finally:
+            engine.dispose()
+            _drop_postgres_database(server)
     finally:
-        engine.dispose()
+        server.dispose()
+
+
+def _drop_postgres_database(server: Engine) -> None:
+    """Drop this session's database, or warn with the name and the sweep.
+
+    A failure here is not the suite's verdict, so it does not raise: a green run
+    that could not tidy up is still a green run, and turning cleanup into an
+    error would make the count depend on the tidying - which is the class of
+    problem R-60 and R-63 both exist to remove. It does not go quiet either. The
+    warning carries the exact database name, which is the whole reason the name
+    is greppable.
+
+    ``WITH (FORCE)`` terminates any leftover backend rather than failing on one;
+    it needs Postgres 13 or newer, which `docker-compose.yml` pins well past.
+    """
+    try:
+        with server.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.exec_driver_sql(
+                f'DROP DATABASE IF EXISTS "{TEST_DATABASE_NAME}" WITH (FORCE)'
+            )
+    except SQLAlchemyError as exc:  # pragma: no cover - needs a server that refuses a drop
+        warnings.warn(
+            f"could not drop the Postgres test database {TEST_DATABASE_NAME}: "
+            f"{type(exc).__name__}: {exc}. {SWEEP_HINT}",
+            stacklevel=1,
+        )
 
 
 @pytest.fixture(scope="session")
@@ -181,7 +309,24 @@ def mongo_client() -> Iterator[MongoClient[dict[str, Any]]]:
     try:
         yield client
     finally:
+        _drop_mongo_database(client)
         client.close()
+
+
+def _drop_mongo_database(client: MongoClient[dict[str, Any]]) -> None:
+    """Drop this session's database, or warn with the name and the sweep.
+
+    Same contract as :func:`_drop_postgres_database`: cleanup never decides the
+    suite's verdict, and never goes quiet either.
+    """
+    try:
+        client.drop_database(MONGO_TEST_DATABASE)
+    except PyMongoError as exc:  # pragma: no cover - needs a server that refuses a drop
+        warnings.warn(
+            f"could not drop the Mongo test database {MONGO_TEST_DATABASE}: "
+            f"{type(exc).__name__}: {exc}. {SWEEP_HINT}",
+            stacklevel=1,
+        )
 
 
 @pytest.fixture
