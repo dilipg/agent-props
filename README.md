@@ -42,6 +42,151 @@ Not yet built: the evidence bundle (M10), which is where phase 1 ends — ruling
 the TypeScript client, by owner decision. `tests/unit/test_tool_surface.py` lists exactly which
 documented tools are still deferred, and to which milestone.
 
+## Use it against your own agent repo
+
+Both repos on one machine. Every command below was run end to end; the closing
+example is a real agent process talking to a real service over a real MCP session.
+
+**What Claude does and does not do here.** `blueprint_infer` is phase 1.5 and **is not
+built**, so nothing reads your repo and emits a blueprint automatically. What works today
+is Claude Code *authoring* one: it reads your agent's code, writes the blueprint, and
+submits it through the tool surface — where the validator rejects anything incoherent. The
+rejection messages are the point. `worked-example.md` section 8 puts it plainly: "use
+Claude Code itself as the ingestion LLM… that loop is the product demonstrating itself."
+
+### 1. Give Claude Code the tools, inside your agent repo
+
+There is no CLI — an explicit non-goal — so authoring happens over MCP. In **your agent
+repo**, add `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "agent-props": {
+      "command": "uv",
+      "args": [
+        "run", "--directory", "c:/Users/Dilip/Documents/GitHub/agent-props",
+        "python", "-m", "agentprops.server",
+        "--transport", "stdio",
+        "--store", "c:/Users/Dilip/Documents/GitHub/agent-props/demo.db"
+      ]
+    }
+  }
+}
+```
+
+`--directory` is what lets the service run from your repo's cwd against its own
+environment. Verify it answers before relying on it:
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
+  | uv run --directory c:/Users/Dilip/Documents/GitHub/agent-props \
+      python -m agentprops.server --transport stdio --store demo.db | head -c 80
+```
+
+### 2. Have Claude author the blueprint
+
+Restart Claude Code in your agent repo so it picks up the server, then ask it to read the
+agent and model it. A prompt that works:
+
+> Read this repo's agent and author an agent-props blueprint for it. One node per step the
+> agent takes, with `tool_name` set to the tool it actually calls. Mark branch points
+> `kind: decision`, retry loops `kind: loop` with `max_iterations` and `pool: true`, and
+> terminal states `kind: terminal`. Declare an entity per domain noun that persists across
+> steps, and a `label_schema` covering the dimensions I'd filter datasets by. Call
+> `blueprint_validate` and fix every rule id it reports before calling `blueprint_upsert`
+> with `publish: true`.
+
+Insist on the `blueprint_validate` loop. Nineteen `BP-*` rules will catch an unreachable
+node, a cycle with no loop node, a `var` path that no output schema declares, and two nodes
+sharing a `tool_name` where position cannot disambiguate them — that last one (BP-014) is
+the mistake that makes an agent untestable, and it is cheaper to hear now.
+
+### 3. Have Claude fill datasets
+
+Then, per scenario you want covered:
+
+> Call `dataset_skeleton` for `<agent_id>` at `<version>` with labels `{…}` and a seed.
+> Fill the five sections in manifest order — provenance, entities, nodes.core,
+> nodes.branches, expected — with `dataset_fill_part`, then `dataset_submit`. `narrative`
+> is what happens in the world; `intent` is why this dataset exists in the suite. They must
+> not be the same text. If submit reports rule ids, re-fill only the section each one is
+> scoped to.
+
+The section scoping is the part that makes this cheap — a rejection names the one section
+to redo, not the whole dataset.
+
+### 4. Point your agent at the fixtures
+
+Install the client into your agent repo. Its `pyproject.toml`:
+
+```toml
+[project]
+dependencies = ["agent-props-client"]
+
+[tool.uv.sources]
+agent-props-client = { path = "c:/Users/Dilip/Documents/GitHub/agent-props/client/python" }
+```
+
+```bash
+uv sync
+```
+
+The client does **not** pull in the service package — `importlib.util.find_spec("agentprops")`
+is `None` in a consumer project, which is the separation ground rule 2 requires.
+
+Start the service over HTTP (`--transport http --port 8000`), then replace each of your
+agent's tool calls with a `fetch_step`. This ran against the worked example:
+
+```python
+from agentprops_client import compare, connect
+
+with connect("http://127.0.0.1:8000/mcp", agent_id="location-onboarding") as props:
+    start = props.run_start({"labels": {"scenario": "missing-documents"}})
+    print("pinned", start.pin)
+
+    props.fetch_step(node_id="receive_request")
+    profile = props.fetch_step(tool_name="delightree.stores.get")  # resolves by position
+    for i in (0, 1, 2):
+        drawn = props.fetch_step(node_id="request_docs", iteration=i)
+        print(i, [w.code for w in drawn.warnings])
+
+    # R-33: an actual cannot be recorded for a step that was never served.
+    props.fetch_step(node_id="complete")
+    outcome = {"onboarding_status": "completed", "outstanding_tasks": 0, "extra": "ignored"}
+    props.record_step(outcome, node_id="complete")
+    props.run_finish(outcome)
+
+    verdict = compare.subset({"onboarding_status": "completed", "outstanding_tasks": 0}, outcome)
+    print("PASS" if verdict.ok else verdict.mismatches)
+```
+
+```text
+pinned {'dataset_id': '3f8c1a20-...-0001', 'dataset_version': 1, 'blueprint_version': '1.0.0'}
+0 []
+1 []
+2 ['pool_exhausted']
+PASS
+```
+
+Three things that example demonstrates rather than asserts. `fetch_store_profile` resolved
+from a **tool name** — position disambiguates two nodes that share it. `pool_exhausted`
+arrived at **iteration 2**, not 3, because the pool holds two entries (ruling R-52 corrects
+the published script here). And the run was graded **in the client**: the service stores the
+expectation and hands back evidence, and never compares.
+
+### Rough edges, so you meet them here and not mid-session
+
+- **`blueprint_infer` does not exist.** Claude authors; nothing infers.
+- **`run_evidence` is M10 and unbuilt.** Grade the outcome you recorded, as above, rather
+  than asking the service for a bundle.
+- **Warnings never block.** A DS-027 warning — intent duplicating narrative — stores
+  anyway. That is ground rule 3, not a bug.
+- **Fetch before you record.** `record_step` on an unserved step is `AP-004`, by design.
+- **Warnings are typed objects**, so `w.code`, not `w["code"]`.
+- **One store, one process at a time** for SQLite. Point the service and Claude Code at the
+  same `--store` file, not two copies.
+
 ## Author a dataset
 
 ```python
