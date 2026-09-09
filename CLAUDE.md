@@ -29,8 +29,6 @@ path.
 | [docs/prd.md](docs/prd.md) | Product rationale, and the reasoning behind every decision | Before proposing any behaviour change |
 | [docs/competitive-analysis.md](docs/competitive-analysis.md), [docs/landscape-research.md](docs/landscape-research.md) | Market context | Rarely |
 
-The docs cross-reference each other as `claude/<file>.md`; the files actually live in `docs/`.
-
 ## Invariants
 
 A change that violates one of these is a bug, however convenient.

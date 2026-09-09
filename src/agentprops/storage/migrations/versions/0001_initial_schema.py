@@ -26,7 +26,8 @@ five places, each of which is a place autogenerate cannot know the intent:
    comparison by env.py, so neither dialect reports drift over it.
 
    Contracts section 7 declared a second one, ``datasets_search``, as a
-   ``to_tsvector`` GIN index. **M7 dropped it.** Ruling R-36 made ``q``
+   ``to_tsvector`` GIN index. **M7 dropped it, and ruling R-57 ratified
+   that.** Ruling R-36 made ``q``
    substring matching by contract, R-39(a) then moved the fold and the match
    into Python because no SQL expression folds case identically across the
    three backends, and ``find_datasets`` therefore emits no SQL text match at

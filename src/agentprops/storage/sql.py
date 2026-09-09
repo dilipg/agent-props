@@ -44,15 +44,17 @@ codebase for two dialects is that the list stays short and known.
    byte-identical output on every backend", and a locale-aware tie-break is not
    that. See the method.
 
-Nothing else in this module asks what dialect it is talking to, and the
-``q`` filter is the reason that list is short by one: case folding is the place
-SQL *cannot* agree across backends - SQLite's ``lower()`` is ASCII-only,
+The ``q`` filter is the reason that list is short by one: case folding is the
+place SQL *cannot* agree across backends - SQLite's ``lower()`` is ASCII-only,
 Postgres's is locale-aware, Mongo's ``$regex`` is a third answer - so the fold
 and the substring match both happen in Python, once, in
-:meth:`SqlStore.find_datasets`. Ruling R-36 makes substring semantics the
-contract, so M7's Postgres adapter accelerates that query with ``pg_trgm``
-rather than replacing it with full-text search. The conformance suite asserts
-identical *results* across backends, never identical query plans.
+:func:`~agentprops.storage.common.q_matches`. Ruling R-36 makes substring
+semantics the contract; **ruling R-57 struck its instruction to implement that
+with ``ILIKE``**, because R-39(a) had already moved the match out of SQL and
+because ``ILIKE`` is not a superset of ``str.casefold`` - measured, see
+:data:`POSTGRES_ONLY_INDEXES`. There is no SQL text predicate here for any index
+or operator to accelerate. The conformance suite asserts identical *results*
+across backends, never identical query plans.
 
 What lives in `common.py` instead, and why
 ------------------------------------------
@@ -261,11 +263,14 @@ JsonDocument = JSON(none_as_null=True).with_variant(
 #: Postgres does not propose dropping them - **verified clean against a real
 #: Postgres 17 at M7**, which is what the M3 report asked M7 to check first.
 #:
-#: ``datasets_search`` **was** the second entry and is gone. Contracts section 7
-#: declared it as a ``to_tsvector`` GIN index; ruling R-36 superseded that by
-#: making ``q`` substring matching by contract, and ruling R-39(a) then moved
-#: the fold and the match into Python because no SQL expression folds case
-#: identically across the three backends. So ``find_datasets`` emits no SQL
+#: ``datasets_search`` **was** the second entry and is gone, by **ruling
+#: R-57**. Contracts section 7 declared it as a ``to_tsvector`` GIN index;
+#: ruling R-36 superseded that by making ``q`` substring matching by contract,
+#: and ruling R-39(a) then moved the fold and the match into Python because no
+#: SQL expression folds case identically across the three backends.
+#: R-57 struck R-36's remaining implementation instruction on exactly that
+#: ground - a ruling naming an implementation can be invalidated by a later
+#: ruling changing the mechanism it named. So ``find_datasets`` emits no SQL
 #: text match of any kind, and an index for a query nothing issues is dead
 #: weight on every write. R-36 offers ``pg_trgm`` as the alternative and it
 #: would be equally dead for the same reason: it accelerates ``LIKE``, and
@@ -780,10 +785,11 @@ class SqlStore:
         which is the asymmetry a pinned run depends on.
 
         The ``q`` filter is applied in Python, after the SQL filters and the
-        ordering - see :func:`_folded` for why that is the only implementation
-        that returns identical rows on all three backends. Pagination follows
-        it, for the same reason the archive exclusion precedes it: a filter that
-        runs after ``LIMIT`` returns short pages.
+        ordering - see :func:`~agentprops.storage.common.folded` for why that is
+        the only implementation that returns identical rows on all three
+        backends. Pagination follows it, for the same reason the archive
+        exclusion precedes it: a filter that runs after ``LIMIT`` returns short
+        pages.
         """
         newer = datasets.alias("newer")
         latest_version = (
@@ -1409,9 +1415,12 @@ class SqlStore:
         """``column``, ordered by **byte value** on every backend.
 
         The fifth dialect-specific thing in this module, and the only one M3 did
-        not predict. Ruling R-35 requires every list ordering to be total so
-        that identical inputs give byte-identical output on *every* backend, and
-        ``ORDER BY`` on a ``TEXT`` column does not satisfy that by itself:
+        not predict. **Ruling R-58** extends R-35 to say it: an ordering must be
+        total *and collation-stable*, and any ``TEXT`` column used as a sort key
+        or a tie-break carries an explicit, locale-independent collation. R-35
+        alone required only totality - which answers "are two rows ever tied?"
+        and not "do the three backends agree which comes first?" - and
+        ``ORDER BY`` on a ``TEXT`` column does not satisfy the second:
 
         - SQLite compares with ``BINARY``, which is ``memcmp`` over UTF-8;
         - Mongo compares strings byte-wise by default;
@@ -1453,21 +1462,30 @@ class SqlStore:
         which is ``DatasetQuery.labels``'s documented meaning. The Postgres GIN
         index accelerates that expression without changing it.
 
-        **``q`` is deliberately absent from this method.** It is a case-folded
-        substring match (ruling R-36 makes substring semantics the contract, so
-        M7's Postgres adapter uses ``ILIKE`` or a ``pg_trgm`` index, never
-        full-text search) - and there is no *SQL* expression that folds case
-        identically on all three backends. M3 shipped
+        **``q`` is deliberately absent from this method**, and no SQL prefilter
+        may be added for it. It is a case-folded substring match - ruling R-36
+        makes substring semantics the contract - and there is no *SQL*
+        expression that folds case identically on all three backends. M3 shipped
         ``LOWER(title) LIKE '%term%'`` against a term folded by Python, which is
         two different fold functions in one comparison. So the fold and the
-        match both live in Python now, in :meth:`find_datasets`, where one
-        implementation serves every backend. See :func:`_folded`.
+        match both live in Python now, in
+        :func:`~agentprops.storage.common.q_matches`, where one implementation
+        serves every backend. See
+        :func:`~agentprops.storage.common.folded`.
 
-        M7 may add an ``ILIKE``/``pg_trgm`` prefilter on Postgres purely for
-        speed, provided it matches a *superset* of what the Python fold matches;
-        Postgres's ``lower()`` and Python's ``casefold()`` are close enough for
-        that to hold, and the conformance suite - which asserts results, never
-        plans - is what would catch it if it did not.
+        **Do not add an ``ILIKE`` or ``pg_trgm`` prefilter here.** This
+        docstring used to say M7 might, "provided it matches a *superset* of
+        what the Python fold matches; Postgres's ``lower()`` and Python's
+        ``casefold()`` are close enough for that to hold". They are not, and
+        **ruling R-57 struck the instruction that said so**: ``str.casefold``
+        folds ``ß`` to ``ss`` and no SQL fold does, so measured against Postgres
+        17 (UTF8, ``en_US.utf8``) ``'Straße operator' ILIKE '%strasse%'`` is
+        **false** where Python matches - in both directions. A prefilter that
+        drops rows the contract promises is worse than a scan.
+        ``test_find_q_folds_the_way_python_does_and_not_the_way_sql_does`` is the
+        conformance test that would catch it, and R-39(a)'s named remedy - a
+        pre-folded search column computed in Python at write time - is the one
+        that would actually work.
         """
         if q.agent_id is not None:
             statement = statement.where(datasets.c.agent_id == q.agent_id)

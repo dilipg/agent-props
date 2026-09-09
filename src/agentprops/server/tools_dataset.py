@@ -202,10 +202,13 @@ def dataset_expand(dataset_id: TextArg, node_id: TextArg, count: RequiredIntArg)
     """Add `count` deterministic entries to a pool node, as a new dataset version.
 
     Seeded from the dataset's own `seed` and the entry's position in the pool,
-    so the same request always produces the same entries and expanding by 5
-    equals expanding by 2 then 3. Each new entry is a copy of one of the
-    node's authored fixtures with its `latency_hint_ms` varied; expansion fills
-    volume, it does not invent fixture content.
+    so the same request against the same dataset always produces the same
+    entries, and an entry already written keeps its content when the pool is
+    expanded again. Expanding in two calls is *not* the same as expanding in
+    one: a new entry is drawn from the pool it is added to, and the second call
+    sees a longer pool. Each new entry is a copy of one of the node's authored
+    fixtures with its `latency_hint_ms` varied; expansion fills volume, it does
+    not invent fixture content.
 
     Copy-on-write, like every dataset edit: the pre-expansion version stays
     readable. An expansion that would push a loop node's pool past
