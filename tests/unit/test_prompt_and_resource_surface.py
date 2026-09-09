@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -319,22 +320,78 @@ async def test_no_resource_body_is_an_envelope(context: ServiceContext, uri: str
     )
 
 
+@pytest.mark.parametrize("template", TEMPLATES, ids=lambda row: str(row.uri_template))
+async def test_no_template_body_is_an_envelope(
+    context: ServiceContext, template: RegisteredTemplate
+) -> None:
+    """The same for the templates, asserted rather than inferred.
+
+    The template bodies come from the same two ``service/examples.py`` functions
+    the static resources use, so the property holds by construction today - and
+    "by construction" is the kind of reasoning this build has repeatedly found to
+    be one refactor out of date. One parametrised assertion costs nothing.
+    """
+    parsed = UriTemplate.parse(template.uri_template)
+    uri = parsed.expand(dict.fromkeys(parsed.variable_names, "probe"))
+    body = await read_json(context, uri)
+    offences = ENVELOPE_KEYS & set(body)
+    assert not offences, f"{uri} carries envelope keys {sorted(offences)}"
+
+
 @pytest.mark.parametrize("prompt", PROMPTS, ids=lambda prompt: str(prompt.name))
-async def test_no_prompt_message_is_an_envelope(
+async def test_every_prompt_serves_prose_and_not_a_serialised_document(
     context: ServiceContext, prompt: RegisteredPrompt
 ) -> None:
-    """The same for ``prompts/get``: text, not a serialised envelope."""
+    """``prompts/get`` answers with text a model reads, not with a document.
+
+    The **positive** half, and the one that actually asserts something today.
+    An earlier version of this file had only the negative half below, which
+    ``continue``s past any message that does not parse as JSON - so against all
+    four current prompts it asserted nothing at all while reading as coverage.
+    That is the vacuous-guard shape ruling R-77(e) is about, caught in review
+    rather than by running it, which is worse.
+    """
     async with connected(context) as client:
         result = await client.get_prompt(prompt.name, minimal_arguments(prompt))
     for message in result.messages:
         text = getattr(message.content, "text", "")
-        try:
-            parsed = json.loads(text)
-        except ValueError:
+        assert as_json_object(text) is None, (
+            f"{prompt.name} served a JSON object rather than prompt text; prompts/get has no "
+            f"envelope and its content is prose (ruling R-43(b))"
+        )
+
+
+@pytest.mark.parametrize("prompt", PROMPTS, ids=lambda prompt: str(prompt.name))
+async def test_no_prompt_message_is_an_envelope(
+    context: ServiceContext, prompt: RegisteredPrompt
+) -> None:
+    """Ruling R-43(b) for ``prompts/get``, and **dormant while every prompt is prose**.
+
+    Stated rather than implied: the test above asserts no current prompt returns
+    a JSON object, so this one's body does not execute for any of the four. It is
+    a tripwire for the day a prompt legitimately serves a structured message -
+    then it starts asserting that the structure is not a ``SuccessEnvelope``. It
+    is *not* evidence about today's surface, and the previous docstring let it
+    read as if it were.
+    """
+    async with connected(context) as client:
+        result = await client.get_prompt(prompt.name, minimal_arguments(prompt))
+    for message in result.messages:
+        parsed = as_json_object(getattr(message.content, "text", ""))
+        if parsed is None:
             continue
-        assert not isinstance(parsed, dict) or not (ENVELOPE_KEYS & set(parsed)), (
+        assert not (ENVELOPE_KEYS & set(parsed)), (
             f"{prompt.name} returned a serialised envelope instead of prompt text"
         )
+
+
+def as_json_object(text: str) -> dict[str, Any] | None:
+    """``text`` parsed, if it is a JSON object; ``None`` otherwise."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 async def read_json(context: ServiceContext, uri: str) -> dict[str, Any]:
@@ -390,22 +447,111 @@ def test_every_registered_resource_has_a_dedicated_test() -> None:
     )
 
 
+def templates_matching(uri: str, templates: Sequence[str] = TEMPLATE_URIS) -> list[str]:
+    """Every template in ``templates`` whose pattern accepts ``uri``.
+
+    ``templates`` is a parameter so the crediting rule below can be unit-tested
+    against a *hypothetical* over-broad template without registering one on the
+    live server, which would leak into every other test in the process.
+    """
+    return [
+        template for template in templates if UriTemplate.parse(template).match(uri) is not None
+    ]
+
+
+def credits(uri: str, template: str, templates: Sequence[str] = TEMPLATE_URIS) -> bool:
+    """Whether a test that reads ``uri`` counts as covering ``template``.
+
+    The crediting rule, in one place so the guard and its control apply the
+    same one. A URI credits a template only when the resource manager would
+    actually route it there: not when a **static** resource claims it (concrete
+    resources are checked first), and not when **another** template also
+    matches it (the manager routes it to whichever registered first, leaving the
+    other untested).
+    """
+    return uri not in RESOURCE_URIS and templates_matching(uri, templates) == [template]
+
+
 def test_every_registered_resource_template_has_a_dedicated_test() -> None:
-    """A template is covered by a test that reads a URI the template serves.
+    """A template is covered by a test that reads a URI **only that template** serves.
 
     Matched with the SDK's own RFC 6570 matcher rather than by string prefix, so
     the guard agrees with the resource manager about which template answers a
-    URI - which is the only definition of "covered" that means anything here.
+    URI - the only definition of "covered" that means anything here.
+
+    Two exclusions close the breadth hole, which is the mirror image of the
+    prefix hazard :data:`~agentprops.service.examples.AGENT_EXAMPLE_DATASET_URI_TEMPLATE`'s
+    segment order was chosen to avoid. A template broad enough to accept a URI
+    something else already serves would otherwise be credited for free:
+
+    - a **static** resource's own URI does not credit a template, because the
+      resource manager checks concrete resources first and would never route
+      that URI to the template at all;
+    - a URI matching **more than one** template credits neither, because the
+      manager routes it to whichever comes first in registration order and the
+      other one is untested.
+
+    So ``agentprops://{a}/{b}`` cannot ride on the existing tests, which
+    :func:`test_the_crediting_rule_rejects_the_ways_a_template_could_ride_free`
+    proves rather than asserts in prose.
+
+    **One case this rule cannot decide**, named so a reader knows the boundary
+    rather than assuming there is none: a URI that a *miss* test asserts is
+    unroutable - ``agentprops://catalogue/no-such-thing`` - would be routed to an
+    over-broad template if one were registered, and would credit it. That is
+    caught by the miss test failing (the read would succeed and report no error),
+    not by this guard. Two guards, one property, failing at different moments.
     """
     tested = resource_uris_in_test_sources()
     uncovered = [
-        template
-        for template in TEMPLATE_URIS
-        if not any(UriTemplate.parse(template).match(uri) is not None for uri in tested)
+        template for template in TEMPLATE_URIS if not any(credits(uri, template) for uri in tested)
     ]
     assert not uncovered, (
-        f"no test reads a URI served by these templates: {uncovered}; a template covered "
-        f"only by a synthesised probe inside this file is covered by its own guard"
+        f"no test reads a URI served by these templates alone: {uncovered}; a template covered "
+        f"only by a synthesised probe inside this file, by a static resource's URI, or by a URI "
+        f"another template also matches is covered by nothing"
+    )
+
+
+def test_the_crediting_rule_rejects_the_ways_a_template_could_ride_free() -> None:
+    """:func:`credits`, unit-tested against a hypothetical over-broad template.
+
+    ``agentprops://{a}/{b}`` is the mirror image of the prefix hazard the
+    per-agent template's segment order was chosen to avoid: broad enough to
+    accept URIs other things already serve. Three assertions for the three ways
+    it could be credited, and a fourth so the rule is not vacuously strict -
+    without that last one, a ``credits`` that always returned ``False`` would
+    pass this test and fail every template forever.
+
+    The hypothetical template is passed in rather than registered, because
+    registering one on the module-level ``mcp`` instance would leak into every
+    other test in the process.
+    """
+    two = "agentprops://{a}/{b}"
+    three = "agentprops://{a}/{b}/{c}"
+    hypothetical = (*TEMPLATE_URIS, two, three)
+
+    static = examples.EXAMPLE_BLUEPRINT_URI
+    assert static in RESOURCE_URIS
+    assert UriTemplate.parse(two).match(static) is not None, "the control URI is not accepted"
+    assert not credits(static, two, hypothetical), (
+        "a static resource's URI credited a template; the resource manager checks concrete "
+        "resources first and would never route it there"
+    )
+
+    shared = examples.blueprint_uri("location-onboarding", "1.0.0")
+    assert set(templates_matching(shared, hypothetical)) == {
+        three,
+        examples.BLUEPRINT_URI_TEMPLATE,
+    }, "the ambiguity control does not actually collide with a registered template"
+    assert not credits(shared, three, hypothetical), "an ambiguous URI credited a template"
+    assert not credits(shared, examples.BLUEPRINT_URI_TEMPLATE, hypothetical), (
+        "an ambiguous URI credited the template that happens to be registered first, which is "
+        "an ordering dependency rather than coverage"
+    )
+
+    assert credits("agentprops://only/broad", two, hypothetical), (
+        "the rule credits nothing at all, so every template would fail its coverage test"
     )
 
 

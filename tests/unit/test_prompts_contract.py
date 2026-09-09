@@ -244,6 +244,55 @@ async def test_fill_a_dataset_honours_an_explicit_version(seeded: ServiceContext
     assert "at version `9.9.9`" in missing
 
 
+async def test_fill_a_dataset_refuses_a_draft_version(
+    context: ServiceContext, blueprint_document: dict[str, Any]
+) -> None:
+    """The "whatever its status" bug, at its second site. Fix round 1.
+
+    ``Store.get_blueprint`` returns an exact version whatever its status, so an
+    explicit **draft** version resolved and this prompt told a caller to author
+    datasets against it - which ``dataset_skeleton`` refuses and DS-001 rejects
+    regardless. The same call's not-found branch already said "no **published**
+    blueprint", so the two branches contradicted each other.
+
+    Three assertions, because the third is what stops this passing for the wrong
+    reason: the prompt refuses, it says "published", and ``blueprint_get`` still
+    returns the draft - so the difference is a decision rather than the blueprint
+    having gone missing.
+    """
+    draft = json.loads(json.dumps(blueprint_document))
+    draft["version"] = "2.0.0"
+    blueprints.upsert(context, blueprint_document, publish=True)
+    blueprints.upsert(context, draft, publish=False)
+
+    text = await prompt_text(context, "fill-a-dataset", agent_id=AGENT, version="2.0.0")
+    assert "no published agent-props blueprint" in text
+    assert "at version `2.0.0`" in text
+    assert "dataset_skeleton" not in text, "the prompt gave fill instructions for a draft"
+
+    served = (await invoke(context, "blueprint_get", agent_id=AGENT, version="2.0.0"))["data"]
+    assert served["blueprint"]["status"] == "draft", (
+        "blueprint_get no longer returns the draft, so this test proves nothing"
+    )
+
+
+async def test_fill_a_dataset_substitutes_no_agent_when_given_none(
+    seeded: ServiceContext,
+) -> None:
+    """An empty ``agent_id`` is a miss, not "the store's example agent".
+
+    ``examples.published_blueprint`` deliberately has no sentinel; only
+    ``example_blueprint`` fills one in, and only because "the example" is what
+    it was asked for. Routing this prompt through the sentinel would have made
+    an empty argument silently answer about ``location-onboarding`` - which is a
+    plausible answer to a question nobody asked, and the class of defect this
+    milestone is about.
+    """
+    text = await prompt_text(seeded, "fill-a-dataset", agent_id="")
+    assert "no published agent-props blueprint" in text
+    assert AGENT not in text, "an empty agent_id was answered with the store's example agent"
+
+
 async def test_fill_a_dataset_promises_nothing_in_an_empty_store(
     context: ServiceContext,
 ) -> None:
@@ -347,11 +396,88 @@ async def test_cover_the_label_space_says_so_when_nothing_is_stored(
     assert "`scenario=missing-documents`" in text
 
 
+async def test_cover_the_label_space_reports_a_draft_with_a_caveat(
+    context: ServiceContext, blueprint_document: dict[str, Any]
+) -> None:
+    """This prompt keeps the raw lookup, and says what a draft cannot do. Fix round 1.
+
+    It mirrors ``label_vocabulary``, which reports a draft version's vocabulary
+    quite correctly - a read with a real answer. What a draft cannot do is
+    receive a dataset (DS-001), so the coverage advice would be unactionable
+    without the caveat. Both halves: the vocabulary still arrives, and the
+    caveat names the blocker and the fix.
+    """
+    draft = json.loads(json.dumps(blueprint_document))
+    draft["version"] = "2.0.0"
+    blueprints.upsert(context, draft, publish=False)
+
+    text = await prompt_text(context, "cover-the-label-space", agent_id=AGENT, version="2.0.0")
+    assert "`2.0.0` is a draft" in text
+    assert "DS-001" in text
+    assert "blueprint_upsert(publish: true)" in text
+    assert "`scenario=missing-documents`" in text, "the coverage list went missing with it"
+
+    vocabulary = (await invoke(context, "label_vocabulary", agent_id=AGENT, version="2.0.0"))[
+        "data"
+    ]["vocabulary"]
+    assert vocabulary["version"] == "2.0.0", (
+        "label_vocabulary no longer answers for a draft, so this prompt should stop too"
+    )
+
+
+async def test_the_two_prompts_word_a_miss_differently_on_purpose(
+    seeded: ServiceContext,
+) -> None:
+    """One sentence, two truths, and the parameter that stops it saying the wrong one.
+
+    ``fill-a-dataset`` resolves published-only, so its miss really is "no
+    *published* version". ``cover-the-label-space`` mirrors ``label_vocabulary``'s
+    raw lookup, so a draft is a hit there and claiming "published" would
+    contradict the branch beside it. Fix round 1 found the shared wording
+    asserting the second thing about the first.
+    """
+    filling = await prompt_text(seeded, "fill-a-dataset", agent_id="ghost")
+    covering = await prompt_text(seeded, "cover-the-label-space", agent_id="ghost")
+    assert "no published agent-props blueprint for `ghost`" in filling
+    assert "no agent-props blueprint for `ghost`" in covering
+    assert "no published" not in covering, (
+        "cover-the-label-space claims published while resolving any status"
+    )
+
+
+async def test_cover_the_label_space_counts_one_dataset_in_the_singular_path(
+    context: ServiceContext,
+    blueprint_document: dict[str, Any],
+    dataset_document: dict[str, Any],
+) -> None:
+    """The one-dataset case: zero and two were asserted and one was not.
+
+    It is the only input that exercises the single-tuple branch of
+    ``_present_tuples`` with a real count beside it, and the count formatting is
+    the kind of thing that reads fine and is wrong.
+    """
+    blueprints.upsert(context, blueprint_document, publish=True)
+    context.store.put_dataset(Dataset.model_validate(dataset_document))
+    text = await prompt_text(context, "cover-the-label-space", agent_id=AGENT)
+    assert "This store holds 1 dataset(s)" in text
+    tuples = [
+        line for line in text.splitlines() if line.startswith("- `") and ", scenario=" in line
+    ]
+    assert tuples == [
+        "- `persona=multi-unit-operator, scenario=missing-documents, tier=regional, "
+        "outcome=success, edge_case=none` (1)"
+    ], f"expected exactly one present tuple with a count of 1, got {tuples}"
+    assert "`scenario=compliance-overdue`" in text, (
+        "the other dataset's scenario should now read as an empty value"
+    )
+
+
 async def test_cover_the_label_space_promises_nothing_in_an_empty_store(
     context: ServiceContext,
 ) -> None:
     text = await prompt_text(context, "cover-the-label-space", agent_id=AGENT)
-    assert "no published agent-props blueprint" in text
+    assert "no agent-props blueprint" in text
+    assert "no published" not in text, "the wording split is not being tested"
     assert "label space is covered" not in text
 
 
@@ -390,9 +516,9 @@ async def test_wire_an_agent_carries_the_seam_and_the_three_gotchas(
         "environment variable",
         "AP-004",
         "w.code",
-        "run id is generated by the client",
+        "the run id belongs to the client",
         "compare.grade",
-        "never compares",
+        "the comparison is yours",
     ):
         assert fact in text, f"wire-an-agent does not carry {fact}"
 

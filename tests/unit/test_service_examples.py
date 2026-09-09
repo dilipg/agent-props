@@ -109,6 +109,34 @@ def test_a_draft_is_never_the_example(
     assert context.store.get_blueprint(AGENT, "1.0.0") is not None
 
 
+def test_published_blueprint_substitutes_no_agent_and_no_status(
+    seeded: ServiceContext, blueprint_document: dict[str, Any]
+) -> None:
+    """The sentinel-free half, added in fix round 1 when a second caller needed it.
+
+    :func:`examples.published_blueprint` is where the status check lives and
+    :func:`examples.example_blueprint` is the only thing that fills in an agent.
+    Keeping those separate is what lets ``fill-a-dataset`` resolve published-only
+    *without* silently answering about the store's example agent when it is given
+    an empty ``agent_id`` - a plausible answer to a question nobody asked.
+
+    Three assertions, one per substitution that must not happen, plus the
+    positive case so the function is not just returning ``None``.
+    """
+    draft = copy.deepcopy(blueprint_document)
+    draft["version"] = "2.0.0"
+    blueprints.upsert(seeded, draft, publish=False)
+
+    assert examples.published_blueprint(seeded, "", "") is None, "an empty agent_id was filled in"
+    assert examples.published_blueprint(seeded, AGENT, "2.0.0") is None, "a draft was returned"
+    assert examples.published_blueprint(seeded, "ghost", "") is None
+    found = examples.published_blueprint(seeded, AGENT, "")
+    assert found is not None and found.version == "1.0.0"
+    assert examples.example_blueprint(seeded, "", "") is not None, (
+        "example_blueprint must still fill in an agent; that is its whole job"
+    )
+
+
 def test_a_published_agent_id_with_no_such_version_is_a_miss(
     seeded: ServiceContext,
 ) -> None:
