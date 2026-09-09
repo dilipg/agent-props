@@ -1233,14 +1233,28 @@ def test_mark_run_finished_writes_three_columns_and_nothing_else(
 
     M6 narrowed the warning write because ``put_run`` would revert the
     lifecycle. The lifecycle write has the same exposure with the columns
-    swapped: built on ``put_run`` it would revert ``warnings``, and under load
-    that means a ``run_finish`` erasing the ``pool_exhausted`` warning a
-    concurrent ``fetch_step`` had just merged in.
+    swapped: it must not revert ``warnings``, and under load that would mean a
+    ``run_finish`` erasing the ``pool_exhausted`` warning a concurrent
+    ``fetch_step`` had just merged in. So the run is written with its warnings,
+    its model, its declared version and a step with an actual first, and every
+    one of them has to survive a close that knows nothing about them.
 
-    So the run is written with its warnings, its model and its declared version
-    first, and every one of them has to survive a close that knows nothing about
-    them. The steps are asserted too: ``put_run`` re-upserts every step it is
-    handed, and this must not.
+    **What this test does not catch, stated because the reverse claim would be
+    the M6 finding a third time.** It was verified against a planted
+    ``mark_run_finished`` built on ``put_run`` - and a planted version that
+    *re-reads the run first* **passes**, because a fresh read carries the
+    warnings and writing every column writes them back unchanged. Only the
+    variant that writes the warnings column from a supplied or stale model fails
+    here (verified: ``assert [] == ['pool_exhausted']``).
+
+    That is not a gap in the guard so much as a fact about where staleness can
+    live: this method takes no run *model*, so nothing at this layer can be
+    stale, and a read-then-write is observably identical until two writers
+    overlap. The test with teeth against the fresh-read variant is one layer up,
+    where the stale snapshot exists -
+    `tests/unit/test_service_run_writes.py::test_a_stale_finish_cannot_revert_the_runs_warnings`,
+    which was verified to fail against **both** planted variants. This one holds
+    the column list; that one holds the race.
     """
     run = store.put_run(
         make_run(
