@@ -60,8 +60,15 @@ TESTS_DIR: Final[Path] = Path(__file__).parents[1]
 #: Tools `docs/contracts.md` documents that this milestone deliberately does
 #: not register, each with the milestone that owns it. M5 landed the three
 #: skeleton tools by deleting their entries, M6 removed the four run tools, M7
-#: removed ``dataset_expand``, ``dataset_export`` and ``dataset_import``, and M8
-#: removed ``record_step`` and ``run_finish`` - the mechanism working four times.
+#: removed ``dataset_expand``, ``dataset_export`` and ``dataset_import``, M8
+#: removed ``record_step`` and ``run_finish``, and M10 removed the last two,
+#: ``run_evidence`` and ``run_export`` - the mechanism working five times.
+#:
+#: **One entry left, and it is the one with no milestone.** Every deferral this
+#: list was created to hold has now been landed by deleting it, which is the
+#: property that made it worth having: at no point did a tool exist on the
+#: surface without a contract, or sit in a contract without either being
+#: registered or being named here with a reason.
 #: **Delete an entry when you land it** -
 #: :func:`test_no_deferral_is_stale` fails if a deferred tool is registered
 #: anyway, and :func:`test_every_documented_tool_is_registered_or_deferred`
@@ -71,8 +78,6 @@ TESTS_DIR: Final[Path] = Path(__file__).parents[1]
 #: tags it *(phase 1.5)* and says "Not in phase 1".
 DEFERRED: Final[dict[str, str]] = {
     "blueprint_infer": "phase 1.5; contracts section 4 says 'Not in phase 1'",
-    "run_evidence": "M10, the evidence bundle (ruling R-15)",
-    "run_export": "M10, the evidence bundle (ruling R-15)",
 }
 
 #: The two tools whose documented return is ``{ok, errors}`` rather than
@@ -111,9 +116,9 @@ def test_the_server_registered_its_tools() -> None:
     Every test below would pass vacuously against an empty surface, and would
     blame the wrong thing while doing it.
     """
-    assert len(TOOL_NAMES) == 25, (
+    assert len(TOOL_NAMES) == 27, (
         f"expected M4's thirteen tools plus M5's three plus M6's four plus M7's three plus "
-        f"M8's two, got {TOOL_NAMES}"
+        f"M8's two plus M10's two, got {TOOL_NAMES}"
     )
 
 

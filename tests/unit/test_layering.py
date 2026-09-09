@@ -40,6 +40,16 @@ mechanical enforcement CLAUDE.md's layering rule has:
   port, used only in `service/`"). Without this, "a single injected clock" is a
   sentence in a docstring.
 
+M10 adds `export/`, and its rule is the strictest here: it may import
+**nothing** sideways, `models/` included. That is the milestone's design
+decision made mechanical - `export/otel.py` takes the ``run_evidence`` bundle
+rather than a ``Run``, so a trace and the evidence a grader read are the same
+document and cannot drift. It also joins the no-clock, no-random guard, where
+both halves are load-bearing: every span timestamp comes from the recorded run,
+and every trace and span id is a digest of the run id, so a ``datetime.now()``
+would date an old run to today and a ``uuid4()`` would make two exports of one
+run two unrelated traces.
+
 Everything is checked against the parsed AST rather than by grepping text, so
 docstrings that discuss ``min_length``, ``uuid4()`` or ``datetime.now()`` - and
 this file does - cannot trip it.
@@ -54,6 +64,7 @@ from pathlib import Path
 import pytest
 
 import agentprops.expansion
+import agentprops.export
 import agentprops.models
 import agentprops.server
 import agentprops.service
@@ -73,6 +84,9 @@ STORAGE_FILES = sorted(STORAGE_DIR.rglob("*.py"))
 
 EXPANSION_DIR = Path(agentprops.expansion.__file__).resolve().parent
 EXPANSION_FILES = sorted(EXPANSION_DIR.glob("*.py"))
+
+EXPORT_DIR = Path(agentprops.export.__file__).resolve().parent
+EXPORT_FILES = sorted(EXPORT_DIR.glob("*.py"))
 
 SERVICE_DIR = Path(agentprops.service.__file__).resolve().parent
 SERVICE_FILES = sorted(SERVICE_DIR.glob("*.py"))
@@ -121,6 +135,16 @@ FORBIDDEN_LAYERS_FOR_STORAGE = frozenset({"validation", "service", "server", "ex
 #: Ground rule 9 and contracts section 9 both ask for exactly this ("enforce
 #: with a ruff custom rule or a test that greps the tree").
 FORBIDDEN_LAYERS_FOR_EXPANSION = frozenset({"validation", "storage", "service", "server", "export"})
+
+#: `export/` may import **nothing** sideways - not even `models/`, which every
+#: other layer here may reach. M10's whole design decision made mechanical:
+#: `export/otel.py` takes the ``run_evidence`` bundle, a plain mapping, so a
+#: trace cannot be a second projection of a run that drifts from the first. The
+#: entry that carries the weight is ``models``, because taking a ``Run`` is the
+#: obvious way to write this module and it is the one this rule forbids.
+FORBIDDEN_LAYERS_FOR_EXPORT = frozenset(
+    {"models", "validation", "storage", "service", "server", "expansion"}
+)
 
 #: `service/` may reach every layer below it - that is its job - and may not
 #: reach the layer above. One entry, and it is the one that matters: a service
@@ -519,12 +543,18 @@ def test_the_expansion_guard_would_catch_a_random_source(tmp_path: Path) -> None
     assert offences == ["random.choice", "uuid.uuid4", "datetime.now"]
 
 
-#: Every module the two random-source guards cover. All six layers, because
-#: ground rule 9 is stated absolutely - no bare ``random``, ``uuid4()`` or
+#: Every module the two random-source guards cover. All seven layers - `export/`
+#: joined at M10 - because ground rule 9 is stated absolutely - no bare ``random``, ``uuid4()`` or
 #: ``datetime.now()`` in any generation or expansion path - and "which modules
 #: are a generation path" is not a question a guard should have to answer.
 GUARDED_FILES = (
-    MODEL_FILES + VALIDATION_FILES + STORAGE_FILES + EXPANSION_FILES + SERVICE_FILES + SERVER_FILES
+    MODEL_FILES
+    + VALIDATION_FILES
+    + STORAGE_FILES
+    + EXPANSION_FILES
+    + EXPORT_FILES
+    + SERVICE_FILES
+    + SERVER_FILES
 )
 
 
@@ -613,6 +643,121 @@ def test_the_import_guard_would_catch_a_random_source_imported_by_name(tmp_path:
         )
     ]
     assert reported == [], "Seeded.choice is reported as an unseeded random source"
+
+
+def test_the_export_file_table_is_not_empty() -> None:
+    assert len(EXPORT_FILES) > 2, f"no export modules found under {EXPORT_DIR}"
+
+
+@pytest.mark.parametrize("path", EXPORT_FILES, ids=lambda p: p.name)
+def test_export_imports_no_sibling_layer_at_all(path: Path) -> None:
+    """`export/` reaches **nothing** of this package, `models/` included.
+
+    Every other layer here may import `models/`; this one may not, and that is
+    M10's design decision rather than an accident of what it happened to need.
+    `export/otel.py` takes the ``run_evidence`` bundle - a plain mapping - so
+    the trace and the evidence are the *same document* and cannot drift apart.
+    Taking a ``Run`` would have been the obvious implementation and would have
+    made the trace a second projection of the run, free to disagree with the
+    first.
+
+    The two modules in this package may of course import each other, which
+    :data:`FORBIDDEN_LAYERS_FOR_EXPORT` allows by not naming ``export``.
+    """
+    offences = sibling_import_offences(path, FORBIDDEN_LAYERS_FOR_EXPORT)
+    assert not offences, f"{path.name} imports a sibling layer: {offences}"
+
+
+def _written(path: Path, source: str) -> Path:
+    """``source`` at ``path``. A helper, so a control can feed two modules."""
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def test_the_export_import_guard_would_catch_a_model_import(tmp_path: Path) -> None:
+    """The guard above, run against the thing it forbids. Ruling R-77(e).
+
+    ``from agentprops.models import Run`` is the exact line this rule exists to
+    stop, so it is the line the guard is fed. Without this, the parametrised
+    test would pass identically against a rule that forbade nothing - which is
+    how three vacuous guards shipped in this build.
+    """
+    offending = tmp_path / "tempting.py"
+    offending.write_text(
+        "from agentprops.models import Run\n"
+        "from agentprops.service.runs import get\n"
+        "from agentprops.export.otel import trace_of\n"
+        "\n"
+        "def spans(run: Run) -> object:\n"
+        "    return trace_of(run)\n",
+        encoding="utf-8",
+    )
+    offences = sibling_import_offences(offending, FORBIDDEN_LAYERS_FOR_EXPORT)
+    assert sorted(offences) == [
+        "line 1: from agentprops.models",
+        "line 2: from agentprops.service.runs",
+    ], offences
+    allowed = _written(tmp_path / "allowed.py", "from agentprops.export.otel import trace_of\n")
+    assert not sibling_import_offences(allowed, FORBIDDEN_LAYERS_FOR_EXPORT), (
+        "the guard rejects the one import this package is allowed"
+    )
+
+
+@pytest.mark.parametrize("path", EXPORT_FILES, ids=lambda p: p.name)
+def test_export_reads_no_clock_and_no_random_source(path: Path) -> None:
+    """A trace is a **replay** of a recorded run, not a record of its export.
+
+    Every timestamp on every span comes from the run - ``started_at``,
+    ``finished_at``, ``fetched_at``, ``recorded_at`` - so a ``datetime.now()``
+    here would silently date a two-year-old run to this afternoon, and the whole
+    point of the export would be lost while every other test still passed.
+
+    The random half matters for a different reason: the trace id and every span
+    id are ``blake2b`` digests of the run id, which is what makes an export
+    idempotent and its ``external_ref`` reproducible. A ``uuid4()`` or a
+    ``getrandbits`` here would make two exports of one run two unrelated traces.
+    A digest is not a random source, so nothing in this package needs
+    ``Seeded``: ground rule 9 routes *randomness*, and there is none.
+    """
+    offences: list[str] = []
+    for node in ast.walk(parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        name = dotted(node.func)
+        if not name or name.startswith("self."):
+            continue
+        if name in FORBIDDEN_CALLS or name.rsplit(".", 1)[-1] in FORBIDDEN_CALLS:
+            offences.append(f"line {node.lineno}: {name}()")
+    assert not offences, f"{path.name} calls a clock or a random source: {offences}"
+
+
+def test_the_export_clock_guard_would_catch_a_stamped_span(tmp_path: Path) -> None:
+    """The guard above, against the two calls that would defeat the module.
+
+    ``datetime.now()`` for a span time and ``uuid4()`` for a trace id - the two
+    things a reasonable author reaches for when writing an exporter, and the two
+    this package must never do.
+    """
+    offending = tmp_path / "stamped.py"
+    offending.write_text(
+        "import uuid\n"
+        "from datetime import datetime\n"
+        "\n"
+        "def span() -> object:\n"
+        "    return (datetime.now(), uuid.uuid4())\n",
+        encoding="utf-8",
+    )
+    offences = [
+        dotted(node.func)
+        for node in ast.walk(parse(offending))
+        if isinstance(node, ast.Call)
+        and dotted(node.func)
+        and (
+            dotted(node.func) in FORBIDDEN_CALLS
+            or dotted(node.func).rsplit(".", 1)[-1] in FORBIDDEN_CALLS
+        )
+    ]
+    assert offences == ["datetime.now", "uuid.uuid4"], offences
 
 
 def test_the_storage_file_table_is_not_empty() -> None:

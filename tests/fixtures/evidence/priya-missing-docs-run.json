@@ -1,0 +1,564 @@
+{
+  "actual": {
+    "assigned_modules": [
+      "pos-refresher",
+      "local-compliance-bengaluru"
+    ],
+    "onboarding_status": "complete",
+    "outstanding_tasks": 0
+  },
+  "comparison": "subset",
+  "dataset": {
+    "archived": false,
+    "author": {
+      "agent": "human",
+      "handle": "pnair",
+      "name": "Priya Nair"
+    },
+    "id": "3f8c1a20-0000-4000-8000-000000000001",
+    "intent": "Pins the single-iteration loop path for a franchisee who already operates a location. Training assignment must be the reduced two-module set, not the full onboarding set. Added after the agent assigned all six modules to a repeat operator, which is the behaviour this dataset exists to catch if it regresses.",
+    "labels": {
+      "edge_case": "none",
+      "outcome": "success",
+      "persona": "multi-unit-operator",
+      "scenario": "missing-documents",
+      "tier": "regional"
+    },
+    "narrative": "Priya Raman already runs one outlet in Indiranagar and is opening her second in Koramangala. Her intake is clean except for a missing FSSAI licence, so the agent has to chase exactly one document before onboarding can proceed. Once it arrives the store flips to documents_complete, training is assigned at the reduced count appropriate for an operator who has done this before, compliance passes, and onboarding completes with nothing outstanding.",
+    "title": "Multi-unit operator missing one FSSAI licence",
+    "version": 1
+  },
+  "expected": {
+    "comparison": "subset",
+    "expected_path": [
+      "receive_request",
+      "fetch_store_profile",
+      "check_docs",
+      "request_docs",
+      "recheck_store",
+      "check_docs",
+      "assign_training",
+      "verify_compliance",
+      "complete"
+    ],
+    "final": {
+      "assigned_modules": [
+        "pos-refresher",
+        "local-compliance-bengaluru"
+      ],
+      "onboarding_status": "complete",
+      "outstanding_tasks": 0
+    },
+    "node_expectations": {
+      "escalate": {
+        "args_match": null,
+        "called": false
+      },
+      "request_docs": {
+        "args_match": {
+          "==": [
+            {
+              "var": "doc_type"
+            },
+            "fssai"
+          ]
+        },
+        "called": true
+      }
+    },
+    "rationale": "One document is outstanding, so the agent must loop through request_docs exactly once, re-read the store, then proceed. Compliance passes, so escalate must never be called."
+  },
+  "nodes": [
+    {
+      "actual": {
+        "franchisee": {
+          "existing_locations": 1,
+          "id": "FR-2210",
+          "name": "Priya Raman"
+        },
+        "store_id": "ST-4471"
+      },
+      "expected": {
+        "franchisee": {
+          "existing_locations": 1,
+          "id": "FR-2210",
+          "name": "Priya Raman"
+        },
+        "store_id": "ST-4471"
+      },
+      "fault": null,
+      "fetched_at": "2026-09-08T12:00:00Z",
+      "iteration": 0,
+      "kind": "tool_call",
+      "node_expectation": null,
+      "node_id": "receive_request",
+      "recorded": true,
+      "recorded_at": "2026-09-08T12:00:01Z",
+      "seq": 1,
+      "served": {
+        "entity_refs": [
+          "franchisee"
+        ],
+        "input": {
+          "request_id": "REQ-88120"
+        },
+        "latency_hint_ms": 90,
+        "output": {
+          "franchisee": {
+            "existing_locations": 1,
+            "id": "FR-2210",
+            "name": "Priya Raman"
+          },
+          "store_id": "ST-4471"
+        }
+      },
+      "tool_name": "delightree.onboarding.intake"
+    },
+    {
+      "actual": {
+        "store": {
+          "city": "Bengaluru",
+          "id": "ST-4471",
+          "name": "Koramangala 2",
+          "status": "pending_documents"
+        }
+      },
+      "expected": {
+        "store": {
+          "city": "Bengaluru",
+          "id": "ST-4471",
+          "name": "Koramangala 2",
+          "status": "pending_documents"
+        }
+      },
+      "fault": null,
+      "fetched_at": "2026-09-08T12:00:00Z",
+      "iteration": 0,
+      "kind": "tool_call",
+      "node_expectation": null,
+      "node_id": "fetch_store_profile",
+      "recorded": true,
+      "recorded_at": "2026-09-08T12:00:01Z",
+      "seq": 2,
+      "served": {
+        "entity_refs": [
+          "store"
+        ],
+        "input": {
+          "store_id": "ST-4471"
+        },
+        "latency_hint_ms": 120,
+        "output": {
+          "store": {
+            "city": "Bengaluru",
+            "id": "ST-4471",
+            "name": "Koramangala 2",
+            "status": "pending_documents"
+          }
+        }
+      },
+      "tool_name": "delightree.stores.get"
+    },
+    {
+      "actual": null,
+      "expected": {
+        "documents_complete": false,
+        "outstanding": [
+          "fssai"
+        ]
+      },
+      "fault": null,
+      "fetched_at": "2026-09-08T12:00:00Z",
+      "iteration": 0,
+      "kind": "decision",
+      "node_expectation": null,
+      "node_id": "check_docs",
+      "recorded": false,
+      "recorded_at": null,
+      "seq": 3,
+      "served": {
+        "entity_refs": [
+          "store"
+        ],
+        "input": {
+          "store": {
+            "city": "Bengaluru",
+            "id": "ST-4471",
+            "name": "Koramangala 2",
+            "status": "pending_documents"
+          }
+        },
+        "output": {
+          "documents_complete": false,
+          "outstanding": [
+            "fssai"
+          ]
+        }
+      },
+      "tool_name": null
+    },
+    {
+      "actual": {
+        "received": [],
+        "requested": [
+          "fssai"
+        ]
+      },
+      "expected": {
+        "received": [],
+        "requested": [
+          "fssai"
+        ]
+      },
+      "fault": null,
+      "fetched_at": "2026-09-08T12:00:00Z",
+      "iteration": 0,
+      "kind": "loop",
+      "node_expectation": {
+        "args_match": {
+          "==": [
+            {
+              "var": "doc_type"
+            },
+            "fssai"
+          ]
+        },
+        "called": true
+      },
+      "node_id": "request_docs",
+      "recorded": true,
+      "recorded_at": "2026-09-08T12:00:01Z",
+      "seq": 4,
+      "served": {
+        "entity_refs": [],
+        "output": {
+          "received": [],
+          "requested": [
+            "fssai"
+          ]
+        }
+      },
+      "tool_name": "delightree.docs.request"
+    },
+    {
+      "actual": {
+        "received": [
+          "fssai"
+        ],
+        "requested": [
+          "fssai"
+        ]
+      },
+      "expected": {
+        "received": [
+          "fssai"
+        ],
+        "requested": [
+          "fssai"
+        ]
+      },
+      "fault": null,
+      "fetched_at": "2026-09-08T12:00:00Z",
+      "iteration": 1,
+      "kind": "loop",
+      "node_expectation": {
+        "args_match": {
+          "==": [
+            {
+              "var": "doc_type"
+            },
+            "fssai"
+          ]
+        },
+        "called": true
+      },
+      "node_id": "request_docs",
+      "recorded": true,
+      "recorded_at": "2026-09-08T12:00:01Z",
+      "seq": 5,
+      "served": {
+        "entity_refs": [],
+        "output": {
+          "received": [
+            "fssai"
+          ],
+          "requested": [
+            "fssai"
+          ]
+        }
+      },
+      "tool_name": "delightree.docs.request"
+    },
+    {
+      "actual": {
+        "store": {
+          "city": "Bengaluru",
+          "id": "ST-4471",
+          "name": "Koramangala 2",
+          "status": "documents_complete"
+        }
+      },
+      "expected": {
+        "store": {
+          "city": "Bengaluru",
+          "id": "ST-4471",
+          "name": "Koramangala 2",
+          "status": "documents_complete"
+        }
+      },
+      "fault": null,
+      "fetched_at": "2026-09-08T12:00:00Z",
+      "iteration": 0,
+      "kind": "tool_call",
+      "node_expectation": null,
+      "node_id": "recheck_store",
+      "recorded": true,
+      "recorded_at": "2026-09-08T12:00:01Z",
+      "seq": 6,
+      "served": {
+        "entity_refs": [
+          "store@after_docs"
+        ],
+        "input": {
+          "store_id": "ST-4471"
+        },
+        "latency_hint_ms": 115,
+        "output": {
+          "store": {
+            "city": "Bengaluru",
+            "id": "ST-4471",
+            "name": "Koramangala 2",
+            "status": "documents_complete"
+          }
+        }
+      },
+      "tool_name": "delightree.stores.get"
+    },
+    {
+      "actual": {
+        "assigned_modules": [
+          "pos-refresher",
+          "local-compliance-bengaluru"
+        ]
+      },
+      "expected": {
+        "assigned_modules": [
+          "pos-refresher",
+          "local-compliance-bengaluru"
+        ]
+      },
+      "fault": null,
+      "fetched_at": "2026-09-08T12:00:00Z",
+      "iteration": 0,
+      "kind": "tool_call",
+      "node_expectation": null,
+      "node_id": "assign_training",
+      "recorded": true,
+      "recorded_at": "2026-09-08T12:00:01Z",
+      "seq": 7,
+      "served": {
+        "entity_refs": [
+          "store@after_docs",
+          "franchisee"
+        ],
+        "input": {
+          "franchisee_id": "FR-2210",
+          "store_id": "ST-4471"
+        },
+        "latency_hint_ms": 200,
+        "output": {
+          "assigned_modules": [
+            "pos-refresher",
+            "local-compliance-bengaluru"
+          ]
+        }
+      },
+      "tool_name": "delightree.training.assign"
+    },
+    {
+      "actual": {
+        "compliant": true,
+        "findings": []
+      },
+      "expected": {
+        "compliant": true,
+        "findings": []
+      },
+      "fault": null,
+      "fetched_at": "2026-09-08T12:00:00Z",
+      "iteration": 0,
+      "kind": "tool_call",
+      "node_expectation": null,
+      "node_id": "verify_compliance",
+      "recorded": true,
+      "recorded_at": "2026-09-08T12:00:01Z",
+      "seq": 8,
+      "served": {
+        "entity_refs": [
+          "store@after_docs"
+        ],
+        "input": {
+          "store_id": "ST-4471"
+        },
+        "latency_hint_ms": 340,
+        "output": {
+          "compliant": true,
+          "findings": []
+        }
+      },
+      "tool_name": "delightree.compliance.check"
+    },
+    {
+      "actual": {
+        "onboarding_status": "complete"
+      },
+      "expected": {
+        "onboarding_status": "complete"
+      },
+      "fault": null,
+      "fetched_at": "2026-09-08T12:00:00Z",
+      "iteration": 0,
+      "kind": "terminal",
+      "node_expectation": null,
+      "node_id": "complete",
+      "recorded": true,
+      "recorded_at": "2026-09-08T12:00:01Z",
+      "seq": 9,
+      "served": {
+        "entity_refs": [],
+        "output": {
+          "onboarding_status": "complete"
+        }
+      },
+      "tool_name": null
+    }
+  ],
+  "outcome_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "assigned_modules": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "onboarding_status": {
+        "enum": [
+          "complete",
+          "escalated"
+        ],
+        "type": "string"
+      },
+      "outstanding_tasks": {
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "onboarding_status",
+      "outstanding_tasks"
+    ],
+    "type": "object"
+  },
+  "path": {
+    "actual": [
+      "receive_request",
+      "fetch_store_profile",
+      "check_docs",
+      "request_docs",
+      "request_docs",
+      "recheck_store",
+      "assign_training",
+      "verify_compliance",
+      "complete"
+    ],
+    "expected": [
+      "receive_request",
+      "fetch_store_profile",
+      "check_docs",
+      "request_docs",
+      "recheck_store",
+      "check_docs",
+      "assign_training",
+      "verify_compliance",
+      "complete"
+    ],
+    "traversed": [
+      {
+        "at": "2026-09-08T12:00:00Z",
+        "iteration": 0,
+        "node_id": "receive_request"
+      },
+      {
+        "at": "2026-09-08T12:00:00Z",
+        "iteration": 0,
+        "node_id": "fetch_store_profile"
+      },
+      {
+        "at": "2026-09-08T12:00:00Z",
+        "iteration": 0,
+        "node_id": "check_docs"
+      },
+      {
+        "at": "2026-09-08T12:00:00Z",
+        "iteration": 0,
+        "node_id": "request_docs"
+      },
+      {
+        "at": "2026-09-08T12:00:00Z",
+        "iteration": 1,
+        "node_id": "request_docs"
+      },
+      {
+        "at": "2026-09-08T12:00:00Z",
+        "iteration": 0,
+        "node_id": "recheck_store"
+      },
+      {
+        "at": "2026-09-08T12:00:00Z",
+        "iteration": 0,
+        "node_id": "assign_training"
+      },
+      {
+        "at": "2026-09-08T12:00:00Z",
+        "iteration": 0,
+        "node_id": "verify_compliance"
+      },
+      {
+        "at": "2026-09-08T12:00:00Z",
+        "iteration": 0,
+        "node_id": "complete"
+      }
+    ]
+  },
+  "pin": {
+    "blueprint_version": "1.0.0",
+    "dataset_id": "3f8c1a20-0000-4000-8000-000000000001",
+    "dataset_version": 1
+  },
+  "run": {
+    "agent_id": "location-onboarding",
+    "declared_blueprint_version": "1.1.0",
+    "external_refs": {},
+    "finished_at": "2026-09-08T12:00:00Z",
+    "id": "m10-priya-evidence",
+    "model": {
+      "name": "claude-opus-5",
+      "provider": "anthropic",
+      "version": "20260401"
+    },
+    "run_class": "eval",
+    "started_at": "2026-09-08T12:00:00Z",
+    "status": "finished"
+  },
+  "warnings": [
+    {
+      "code": "blueprint_version_mismatch",
+      "detail": {
+        "dataset_id": "3f8c1a20-0000-4000-8000-000000000001",
+        "declared": "1.1.0",
+        "pinned": "1.0.0"
+      }
+    }
+  ]
+}

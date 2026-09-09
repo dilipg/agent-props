@@ -104,11 +104,19 @@ RUN_WRITES: Final[frozenset[str]] = frozenset(
     {"put_run", "upsert_step", "set_step_actual", "set_run_warnings", "mark_run_finished"}
 )
 
-#: Where the runtime starts. Every public function in `service/runs.py`, named
-#: as ``(module, function)`` pairs so the closure below is unambiguous about
-#: which ``get`` or ``find`` it means. M8's two writes are entry points like the
-#: other four: they write a *run*, and the claim being guarded is that nothing
-#: reachable from them writes anything else.
+#: Where the runtime starts. Every public function in `service/runs.py` and
+#: `service/evidence.py`, named as ``(module, function)`` pairs so the closure
+#: below is unambiguous about which ``get`` or ``find`` it means. M8's two writes
+#: are entry points like the other four: they write a *run*, and the claim being
+#: guarded is that nothing reachable from them writes anything else.
+#:
+#: M10's ``run_evidence`` and ``run_export`` join as reads. ``run_export`` is the
+#: first function in this service that talks to a third party, and the obvious
+#: thing to do after publishing a trace is to record that you did - so it is
+#: worth saying that it does not: the trace id is ``blake2b(run_id)``, already a
+#: function of the run, and adding a ``Store`` method at the last milestone of
+#: the phase would reopen three signed-off adapters (rulings R-33 and R-55, from
+#: the other direction). ``Run.external_refs`` therefore stays empty in phase 1.
 RUNTIME_ENTRY_POINTS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("runs.py", "start"),
@@ -117,6 +125,8 @@ RUNTIME_ENTRY_POINTS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("runs.py", "finish"),
         ("runs.py", "get"),
         ("runs.py", "find"),
+        ("evidence.py", "evidence"),
+        ("evidence.py", "export"),
     }
 )
 
