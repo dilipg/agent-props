@@ -2498,3 +2498,281 @@ what a caller depends on: rejected with the rule id, every finding naming `expec
 knows which part to regenerate, `remaining` empty after the one re-fill so it can tell it is ready,
 and the resubmitted dataset **byte-identical to the golden fixture at version 1** — which is what
 makes a re-fill a repair rather than a second draft.
+
+## [M6] `run_start` is idempotent on the run id, and never re-pins
+A second `run_start` for an existing run id returns the **stored** run and its pin unchanged, with
+no write: no re-resolution of the selector, no new `started_at`, no change to
+`declared_blueprint_version`, and the stored run's own warnings are what come back.
+Reason: PRD 5.6 says a run "pins a version at start and reads that version for its whole life", and
+the pin is only immutable if nothing re-writes it. The failing sequence is concrete and cheap to
+reach — start a run, serve a step from version 1, edit the dataset (copy-on-write makes version 2),
+then let a client retry `run_start` after a network timeout. A re-resolving implementation hands a
+run that has already been served from version 1 a pin to version 2, which is the exact incoherence
+copy-on-write exists to prevent, and nothing in the response would say so.
+Alternative rejected: refusing a second start, or reporting a conflict when the freshly resolved pin
+differs from the stored one. Both need a code the catalogue does not have, and both punish the one
+caller the run id was designed for — the retrying client. The shape chosen is BP-016's: an identical
+re-request is a no-op success. It differs from BP-016 in not erroring on a *differing* re-request,
+because "differing" here is a property of the store's current state rather than of the request, and
+a client cannot be told to fix an argument that was correct.
+Residue, recorded rather than hidden: a second `run_start` naming a *different* selector silently
+gets the first run. The response carries `pin`, so it is visible to anyone who looks, and
+`test_starting_an_existing_run_id_returns_it_unchanged_and_never_re_pins` pins the behaviour with a
+version 2 sitting in the store.
+Argument checks still run **before** the existence check, so a malformed request is refused whether
+or not the run exists — a bad request is a bad request.
+
+## [M6] The run path is reconstructed by the store and never re-sorted by the service
+`get_run` rebuilds `Run.path` from `run_steps` in `(seq, node_id, iteration)` order (ruling R-37) and
+`fetch_step` records one row per served `(node_id, iteration)`. `service/runs.py` reads
+`run.path[-1]` for resolution and `run_get` hands the store's list back untouched.
+Reason: PRD 5.4 point 2 — "the path is reconstructed, not declared ... the agent cannot lie about
+where it went". Any sort or filter in the service would be a second opinion about traversal order,
+and the one that resolution depends on. R-35's lesson applies directly: a partial order that happens
+to be stable on SQLite diverges on Postgres, and here it would surface as intermittently wrong
+tool-name resolution rather than as a wrong list.
+Alternative rejected: storing `path` as a column on `runs`. It would let an agent declare a path it
+did not take, and it would need to stay in agreement with `run_steps` forever.
+Consequence worth naming: `PathStep.at` comes from `run_steps.fetched_at`, which `fetch_step` sets
+from the injected `Clock` (ruling R-09). A step row with a null `fetched_at` contributes no path
+entry, which is why the column is `NOT NULL` with a `DEFAULT now()`.
+
+## [M6] `fetch_step` returns the *stored* served document, from one decision site
+`_serve` is the only place idempotency is decided, and **both** of its returns hand back a stored
+document. The replay branch reads `served` off the step already on the run; the fresh branch returns
+whatever `upsert_step` gives back, which is the existing row when a concurrent caller served the
+same key first.
+Reason: the M6 gate is "the same step key twice returns byte-identical fixtures and advances
+nothing". Returning the locally drawn fixture would satisfy a test that compares two `fetch_step`
+responses — the dataset is immutable, so two draws are equal — and would quietly stop being
+idempotent the moment anything made them differ. So the test is written the other way round:
+`test_a_repeated_fetch_returns_the_stored_document_not_a_fresh_draw` claims the step key first,
+through `upsert_step`, with a marker document the dataset does not contain, and asserts the marker
+comes back. Verified to fail against a `_serve` that returns the fresh draw.
+The race branch has its own test, forced the way `DECISIONS.md` records for M3's races: one internal
+read (`get_run`) is monkeypatched to return a run with no steps — exactly what the loser of two
+concurrent first fetches sees — and everything after it runs against the real store. Also verified
+to fail against the fresh-draw version.
+Alternative rejected: an explicit "does this step exist" store read before drawing. It is a third
+decision site for the same question and it would still race; `upsert_step`'s documented idempotency
+is the thing that actually settles it.
+
+## [M6] The served fixture is the authored `NodeFixture` document, `exclude_unset`, refs unresolved
+`fetch_step` serves `fixture.model_dump(mode="json", exclude_unset=True)` — the keys the author
+wrote, and only those. `entity_refs` is handed over as written; the service does not resolve
+`store@after_docs` into the entity's state.
+Reason: PRD design principle 2 is "hold the environment byte-identical", which is the basis of the
+product's drift claim, so the read path hands over what the author wrote and computes nothing. Under
+ruling R-08 the round trip is `model_validate(raw).model_dump(exclude_unset=True) == raw`, and the
+golden fixtures omit `input` on every pool entry and `latency_hint_ms` on several nodes — a full dump
+would hand the agent those keys as `null`, and
+`test_the_served_fixture_is_the_authored_document_byte_for_byte` compares against the fixture file to
+prove it does not.
+Alternative rejected: expanding `entity_refs` into their states as a convenience. It makes the served
+document something the service computed, which is the one thing PRD 5.6 point 4 says the runtime does
+not do ("the runtime does not compute the second state, it serves it"), and M10's evidence bundle is
+where a joined view belongs.
+
+## [M6] Selection by labels assigns the first row and warns when several matched
+`{labels}` goes through `find_datasets(agent_id, labels)` and takes `rows[0]` — the oldest match,
+since the order is `(created_at, id)` and ruling R-35 makes it total. More than one match attaches a
+`dataset_selection_ambiguous` warning naming how many matched, which one was assigned, and the
+strategy. No match is RT-E04.
+Reason: PRD 5.6 point 2 settles the hard half — "load testing needs *assignment*, choosing which
+dataset each execution gets, not *reservation* ... the phase 2 work is a selection strategy, not a
+locking scheme". So all that is left is which match to assign, and it has to be deterministic:
+identical inputs must give identical output on every backend, which round-robin (stateful) and random
+(seeded from what?) both break.
+The warning is the part that is a choice rather than a consequence. Ruling R-22 keeps `Warning.code`
+an open string precisely so a tool can add one, and M4 set the precedent with
+`blueprint_version_missing`. A label query broader than its author realised is otherwise invisible:
+the run just quietly gets a dataset. PRD 5.4's standard is "the developer is told loudly and decides
+for themselves".
+Alternative rejected: refusing an ambiguous selector. That is gating (ground rule 3), and it would
+break the load-test case the selector exists for, where many runs deliberately share one label query.
+The code is a module constant in `service/runs.py`, not in `models/errors.py`, so
+`RUNTIME_WARNING_CODES` stays exactly contracts 3.4's three; `contracts.md` section 3.4 documents it
+in prose, as M4's addition is, and `test_validation_drift.py` asserts both halves of that arrangement.
+
+## [M6] `run_start` and an archived dataset: explicit id serves, label query does not
+An explicit `{dataset_id}` starts the run and attaches `dataset_archived`. A `{labels}` selector never
+selects an archived dataset, because `find_datasets` excludes them in its `WHERE` clause. A dataset
+archived *after* a run started keeps serving every step, with the same warning.
+Reason: this is the asymmetry `dataset_get` and `dataset_find` already have, applied one layer up, and
+each half is load-bearing for a different reason. PRD 5.6 keeps an archived dataset "servable to any
+run holding a pin to it", and contracts 3.4 defines `dataset_archived` as "The pinned dataset has since
+been archived. Served anyway" — so the post-start case cannot refuse. But archiving is how an author
+*retires* a dataset from the suite, so discovery handing one out would make archive meaningless for the
+case it exists for.
+RT-E04's wording — "Dataset not found, or archived and not pinned by this run" — reads as if
+`run_start` should refuse an archived dataset, since the run has no pin yet. Read that way it would also
+make `dataset_get`'s deliberate asymmetry pointless, and it would leave no way to re-run an archived
+case on purpose. The reading taken is that the clause is about a *pinned* read, which is where the
+question can actually arise.
+Alternative rejected: warning on the label-query path and selecting the archived dataset anyway. It
+turns "retired" into "retired unless nothing else matches", which is a worse answer than no match.
+Also decided here, for the same reason: a dataset authored against a **different** `agent_id` than the
+one `run_start` names is RT-E04 rather than a started run. Its node ids come from another graph, so
+every `fetch_step` would report RT-E02 and the run would be unplayable — there is no dataset with that
+id *for this agent*, which is resolution rather than policy.
+
+## [M6] An unaddressable `iteration` is RT-E02, at both ends, and R-03 is untouched
+`iteration` is refused — never clamped — when it is negative or outside the signed 64-bit range a
+column can hold. Ruling R-03 assigns the negative case to RT-E02; the unstorable case gets the same
+code for the same reason.
+Reason: `iteration` is an *identifier* of a step within a run, and the M4 fix-round entry already put
+it in that class — "an identifier (`version`, and M6's `iteration`) is *not* clamped: a version
+outside the range is not a large version, it is no version". Clamping `2**63` to `2**63 - 1` would
+answer a question the caller did not ask, and leaving it unchecked reaches `upsert_step`, where
+pysqlite raises `OverflowError: Python int too large to convert to SQLite INTEGER` and the SDK turns
+it into a protocol error. That is the M4 and M5 blocker, on M6's new integer, and R-50's guard caught
+it before it shipped — the enumeration failed with `('fetch_step', 'iteration')`,
+`('run_find', 'limit')` and `('run_find', 'offset')` named, which is the guard working rather than a
+story about how it would have.
+This does not revive RT-E05 and does not cap anything. R-03's rule is unconditional for every
+*storable* index: `test_iterating_past_the_pool_is_never_an_error_however_far` asks for
+`MAX_STORED_INT` on a node whose `max_iterations` is 3 and asserts it **serves**, with
+`pool_exhausted`. What is refused is an argument that cannot name a step, not a loop that ran too far
+— and a value wider than 64 bits cannot be a loop that happened.
+Verified by removing the range check: the `above` case fails with the `OverflowError` above while the
+`below` case still passes, because `index < 0` short-circuits first. That is precisely the trap M5's
+guard hit — an earlier argument answering before the one under test is read — and it is why the case
+is parametrised over both ends rather than written once.
+
+## [M6] Step resolution's three tie-breaks, all of them the contract's
+Contracts section 5's pseudocode fixes three things silently and `service/resolution.py` implements
+them literally rather than improving them.
+**`node_id` wins when both arguments are given.** Step 1 is unconditional, so `tool_name` is not read
+at all. Refusing the pair as mutually exclusive — the way `dataset_validate` refuses `dataset` plus
+`dataset_json` — would be a redesign of a stated algorithm, and a caller that sent both has already
+said which node it means.
+**Neither argument given is RT-E02**, per step 3, not `AP-001`. It reads like a missing-argument
+boundary code and the algorithm says otherwise; the algorithm is the contract.
+**A narrowing that eliminates every candidate is RT-E01**, because step 2 tests
+`len(narrowed) == 1` and both zero and two-or-more fall through. That is also the *reachable* RT-E01:
+BP-014 rejects a blueprint where two nodes reachable in one step from the same node share a
+`tool_name`, so `len(narrowed) > 1` cannot occur for a stored blueprint, while `len(narrowed) == 0`
+happens the moment an agent asks for a repeated tool from a position where neither candidate is next.
+`test_bp_014_is_what_makes_the_narrowing_decisive` asserts that property of the golden blueprint, so
+the claim is checked rather than asserted in prose.
+The finding lists **every** candidate rather than the narrowed set, because the caller's next move is
+to retry with one of those node ids — and `test_the_named_candidates_are_a_working_retry` proves each
+named candidate actually resolves, so the recovery path is not a dead end dressed as one.
+Adjacency comes from `validation/graph.py` rather than a second implementation of one-hop
+reachability. `service/` may import `validation/`, that module is already total over edges naming
+nodes that do not exist, and four rules already depend on it agreeing with itself.
+
+## [M6] Warnings are merged onto the run only when the merge adds something
+`_flag` de-duplicates on the whole `(code, detail)` pair and issues `put_run` only if the merged list
+grew. A replayed fetch recomputes an identical warning, finds it recorded, and performs no write at
+all.
+Reason: contracts 3.4 requires a warning "attached to both the response and the stored run" and PRD
+5.2 says an exhausted pool "flags" the run, so the run has to carry them — but the M6 gate says a
+repeated fetch "advances nothing", and a warning appended on every replay is advancing something.
+De-duplicating on `(code, detail)` rather than on `code` alone is what keeps the two compatible while
+still recording *which* iterations were served short: iteration 2 and iteration 3 are different
+details and both are informative.
+`test_a_replayed_warning_writes_nothing_to_the_run` monkeypatches `put_run` to raise on the second
+fetch, so "no write" is asserted rather than described.
+Residue, accepted: the merge is a read-modify-write on a JSON column, so two concurrent fetches of
+the same exhausted iteration can both add the warning, and a lost update can drop one. Both are
+recoverable and neither is state — the response always carries the warning, and the step row proves
+the iteration was served past the pool, which is derivable from the run's steps and the pinned pool
+length. Ruling R-48's standard applies: this is the visible, self-correcting kind of loss, not the
+silent kind, and a CAS on an advisory list is not worth the third retry loop in this codebase.
+
+## [M6] `run_start`'s payload is `{run, pin}` under one named key
+`data` carries `{"start": {"run": ..., "pin": ...}}`; `fetch_step` carries
+`{"step": {"fixture": ..., "resolved_node_id": ...}}`; `run_get` and `run_find` carry `{"run": ...}`
+and `{"runs": [...]}`.
+Reason: contracts section 4 documents `run_start` as returning `{run, pin, warnings}`, and M4's
+convention is that `data` always holds the payload under **one named key** — the "Returns" column
+describes the payload, not where in the envelope it sits. `warnings` is the envelope's own list, so
+the payload is `{run, pin}`, and `dataset_skeleton`'s four-field payload under `"skeleton"` is the
+precedent for a compound one.
+`pin` is carried alongside the run as well as inside it. That is one duplicated object, and it is the
+field a caller reads to learn what it was given — the M8 client will want it without walking into the
+run document.
+
+## [M6] The run id's shape and the `run_class` vocabulary are checked at the boundary
+`run_start` reports `AP-001` for a run id outside contracts 2.3's "8 to 128 characters,
+`^[A-Za-z0-9_.:-]+$`" and for a `run_class` outside `{dev, eval, load}`. Argument findings are
+collected rather than short-circuited, so two bad arguments report twice.
+Reason: neither constraint has a rule id and neither belongs in the model (ruling R-04 keeps value
+constraints out of `models/`, and `Run.id` is a plain `str` there). `AP-001` — "a request argument is
+missing, of the wrong JSON type, or mutually exclusive with another" — is the only code that can own
+them, and the alternative is storing a run nobody can address. This is not gating: ground rule 3 is
+about refusing to *serve* because the data looked wrong, and the surface already answers `AP-004` for
+an unknown id and `AP-001` for a malformed one.
+Both ends of the length range are tested (7 and 8, 128 and 129), per the rule M4's fix round recorded:
+when an entry reasons about a boundary, test both ends of it.
+`selector` is refused unless it carries exactly one of `dataset_id` or `labels`, and an *unknown* key
+is refused rather than ignored — `{"label": {...}}` would otherwise be indistinguishable from an empty
+selector, and the caller would be told "give one of two keys" while looking at a selector that has one.
+
+## [M6] Clause 5 is three independent guards, and each was shown to fail
+`tests/unit/test_runtime_is_read_only.py` asserts "no write path from `fetch_step` to a dataset" three
+ways, because the milestone's reason to exist deserves better than one mechanism.
+1. **A call-graph walk.** Every function reachable from `run_start`, `fetch_step`, `run_get` and
+   `run_find` through `service/`, against a forbidden set **enumerated from the `Store` Protocol** —
+   every method whose name starts with a mutating verb, minus the three run writes. A mutator M7 or M9
+   adds is forbidden the day it appears on the Protocol, with no edit to the test. R-50's shape,
+   applied to a different invariant.
+2. **The one call site.** `put_dataset` is called from exactly one function in `src/`, in
+   `service/skeletons.py`, reachable from `submit` and from neither `skeleton` nor `fill_part` nor any
+   runtime entry point. That is ground rule 1's sentence as an assertion.
+3. **Behaviour.** A delegating `RunOnlyStore` refuses every non-run mutator and a full walk runs
+   against it. This is the half that catches what an AST cannot see.
+Verified, not assumed. A planted `context.store.put_dataset(dataset)` in `fetch_step` fails all four
+affected tests, each naming its own reason. A write planted as
+`getattr(context.store, "put_" + "dataset")(dataset)` passes both AST guards — they are blind to it,
+as their docstring says — and is caught by the wrapper and by the byte-identity check. That is the
+argument for having three rather than one, demonstrated rather than claimed.
+The wrapper is an explicit delegate rather than a `__getattr__` proxy so `mypy --strict` checks it
+against the Protocol: if the Protocol grows a method, the wrapper stops satisfying `Store` and the type
+checker says so instead of the guard silently narrowing.
+`server/` is deliberately out of scope: `test_layering.py` already asserts no module in `server/`
+imports `storage/` at all, so a tool function cannot reach a store method by any spelling. The guards
+compose, and duplicating one here would suggest they do not.
+Also mechanical, and cheap: `test_the_read_path_never_reads_max_iterations` asserts on the AST that
+neither `runs.py` nor `resolution.py` reads `max_iterations`. Ruling R-03 deleted RT-E05, so the read
+path has no iteration cap, and the way that regresses is somebody reading the field "just to check".
+
+## [M6] The page-defaulting decision moved into `limits.py` rather than being copied
+`service/limits.py` gains `DEFAULT_PAGE_LIMIT` and `page(limit, offset)`; `datasets.paginate` and
+`runs.paginate` both call it, and `datasets.DEFAULT_FIND_LIMIT` is now an alias bound by assignment.
+Reason: the M3 implementer's generalisation, adopted as build guidance and restated by R-50 — **the
+defect sits in the one place a working pattern was not reused.** `run_find` needs the same two
+decisions `dataset_find` makes (a default page size, and both ends of the clamp), and the way that
+goes wrong is a second copy that agrees today.
+Alternative rejected: importing `DEFAULT_FIND_LIMIT` from `service/datasets.py` into
+`service/runs.py`. It works, and it makes the runtime depend on the dataset read module for a number
+about paging.
+
+## [M6] Two guards that were already stale, fixed rather than worked around
+`tests/integration/test_transports.py` asserted `len(listed.tools) == 16` over HTTP, and the README's
+"Serve the tools" section still listed thirteen tools and omitted M5's three. Both were counts written
+down rather than derived.
+The transport assertion now compares the HTTP surface to the in-process server's
+(`{tool.name for tool in await mcp.list_tools()}`), which is the claim that test actually wants to make
+— "HTTP reports the same surface" rather than "HTTP reports the sixteen tools that existed the day this
+was written". It also now calls a `run_start` over HTTP, so the "one tool per module" property the
+docstring claims covers the new module too.
+The README count is a list rather than a number now, grouped by table, so a missing tool is visible.
+`test_the_server_registered_its_tools`'s `== 20` stays a literal on purpose: that one exists to fail
+when the surface changes without anyone noticing, which is the opposite requirement.
+
+## Questions for the owner — M6
+1. **`run_start` on an existing run id** returns the stored run unchanged, including when the second
+   call names a different selector (see the entry above). If a divergent re-start should be an error
+   instead, it needs a code — none of `RT-E01..04` or `AP-001..006` fits, and inventing one is a
+   product decision rather than an implementation choice.
+2. **`dataset_selection_ambiguous`** is a new warning code on `run_start`. It is informational and
+   R-22 permits it, but it is the second addition to a vocabulary the PRD wrote as three, so it is
+   worth a look.
+3. **Nothing reads `Run.status` at read time.** A `fetch_step` against a run that `run_finish` has
+   already marked `finished` still serves, because the service never gates. If a finished run should
+   stop serving, that is a policy decision and M8 is where it would land.
+4. **R-03's open question is still open** (the ruling records it too): nothing stops an agent looping
+   indefinitely against a pool. `max_iterations` is a *dataset* constraint (DS-023) and has no runtime
+   effect, and `test_the_read_path_never_reads_max_iterations` now enforces that.

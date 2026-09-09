@@ -325,7 +325,7 @@ Warnings, attached to both the response and the stored run, never blocking:
 | `pool_exhausted` | A loop drew past pool length. Last entry repeated |
 | `dataset_archived` | The pinned dataset has since been archived. Served anyway |
 
-Warning codes are an open vocabulary (ruling R-22), so a tool may add one. M4 added `blueprint_version_missing`, attached by `blueprint_diff` when a version it was asked to compare does not exist — because that tool is informational and never a failure signal.
+Warning codes are an open vocabulary (ruling R-22), so a tool may add one. M4 added `blueprint_version_missing`, attached by `blueprint_diff` when a version it was asked to compare does not exist — because that tool is informational and never a failure signal. M6 added `dataset_selection_ambiguous`, attached by `run_start` when a `{labels}` selector matched more than one dataset: selection is *assignment* rather than reservation (PRD 5.6 point 2), so several matches is not an error, and the warning names how many matched and which one was assigned. Each addition is a constant in the module that attaches it rather than in `models/errors.py`, whose `RUNTIME_WARNING_CODES` stays exactly the three codes tabulated above; `tests/unit/test_validation_drift.py` asserts both halves of that arrangement.
 
 ### 3.5 Boundary codes
 

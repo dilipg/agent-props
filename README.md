@@ -26,11 +26,13 @@ registry and a declarative rejection corpus — the M3 `Store` Protocol and SQLi
 `src/agentprops/server/`, over stdio and streamable HTTP — and the M5 skeleton pipeline:
 `dataset_skeleton`, `dataset_fill_part` and `dataset_submit` in
 `src/agentprops/service/skeletons.py`, the five `SK-*` rules, and `Seeded.uuid()` in
-`src/agentprops/expansion/seeded.py`. Sixteen tools. `export/` is an empty module waiting on M7,
+`src/agentprops/expansion/seeded.py`, and the M6 runtime read path — `run_start`, `fetch_step`,
+`run_get` and `run_find` in `src/agentprops/service/runs.py`, with step identity resolution in
+`src/agentprops/service/resolution.py`. Twenty tools. `export/` is an empty module waiting on M7,
 and `expansion/` holds `uuid()` only.
 
-Not yet built: the runtime (`run_start`, `fetch_step`, M6), expansion beyond ids and export/import
-(M7), and the web app (M9). `tests/unit/test_tool_surface.py` lists exactly which documented tools
+Not yet built: expansion beyond ids and export/import (M7), the Python client and `record_step`
+(M8), and the web app (M9). `tests/unit/test_tool_surface.py` lists exactly which documented tools
 are still deferred, and to which milestone.
 
 ## Author a dataset
@@ -60,6 +62,39 @@ dataset document, keyed by the top-level fields its `pointers` name. Re-filling 
 allowed and replaces it: a rejection carries the `section` to repair, so an LLM fixes one part
 rather than regenerating the whole dataset. `dataset_submit` runs every `DS-*` rule over the
 assembled document and stores it; a skeleton becomes exactly one dataset (SK-005).
+
+## Run an agent through a dataset
+
+```python
+started = call(
+    "run_start",
+    run_id=str(uuid4()),                      # the client generates it, before the first call
+    agent_id="location-onboarding",
+    selector={"labels": {"scenario": "missing-documents"}},   # or {"dataset_id": "..."}
+    declared_blueprint_version="1.0.0",
+)
+pin = started["data"]["start"]["pin"]         # {dataset_id, dataset_version, blueprint_version}
+
+call("fetch_step", run_id=run_id, node_id="receive_request")
+call("fetch_step", run_id=run_id, tool_name="delightree.stores.get")   # resolved by position
+call("fetch_step", run_id=run_id, node_id="request_docs", iteration=1) # a pool draw
+call("run_get", run_id=run_id)                # the run, its steps, and its reconstructed path
+```
+
+`run_start` pins one dataset version and one blueprint version, and the run reads that pin for its
+whole life. A `declared_blueprint_version` other than the pinned one warns and serves anyway;
+nothing on this path refuses to serve.
+
+Address a step by `node_id`, or by `tool_name` — a tool name several nodes declare is resolved
+against where the run currently is, and an ambiguity that position cannot settle comes back as
+`RT-E01` naming every candidate node id rather than a guess. `iteration` draws from a `pool: true`
+node's fixtures in order; past the end the last entry repeats with a `pool_exhausted` warning,
+which is deliberate — an agent that loops one extra time should not get a hard failure.
+
+`fetch_step` is idempotent on `(run_id, node_id, iteration)`: the same key returns the identical
+fixture and records nothing new, so a retry an hour later resolves to the same answer. It writes
+the served step **to the run** and never to a dataset;
+`tests/unit/test_runtime_is_read_only.py` enforces that on the call graph and behaviourally.
 
 ## Validate a document
 
@@ -103,9 +138,11 @@ uv run python -m agentprops.server --store agentprops.db                     # s
 uv run python -m agentprops.server --store agentprops.db --transport http    # streamable HTTP
 ```
 
-Thirteen tools: `blueprint_upsert`, `blueprint_get`, `blueprint_list`, `blueprint_validate`,
-`blueprint_diff`, `dataset_find`, `dataset_get`, `dataset_archive`, `dataset_restore`,
-`dataset_validate`, `store_status`, `label_vocabulary`, `agent_list`.
+Twenty tools. Blueprint: `blueprint_upsert`, `blueprint_get`, `blueprint_list`,
+`blueprint_validate`, `blueprint_diff`. Dataset: `dataset_skeleton`, `dataset_fill_part`,
+`dataset_submit`, `dataset_validate`, `dataset_find`, `dataset_get`, `dataset_archive`,
+`dataset_restore`. Run: `run_start`, `fetch_step`, `run_get`, `run_find`. Admin: `store_status`,
+`label_vocabulary`, `agent_list`.
 
 Every tool answers one of the two envelopes in [`docs/contracts.md`](docs/contracts.md) section 1,
 and never raises for anything that reaches it — a malformed argument, an unknown id, a rule
