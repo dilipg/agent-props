@@ -36,6 +36,13 @@ gitignored `.superpowers/` build reports - which quote prompt output at length,
 legitimately - are outside the comparison. A document that is not in the
 repository cannot drift with it.
 
+**Scope, as R-78 was amended:** documentation a caller reads for *instructions*
+- `README.md`, `CLAUDE.md` and `docs/`. `DECISIONS.md` is exempt by name, because
+an append-only record whose function is quotation is citing, not drifting. The
+reason lives at :data:`EXEMPT_DOCUMENTS` as well as in the ruling, and
+:func:`test_the_document_exemption_has_not_eaten_the_guard` is what stops the
+exemption growing into a deletion.
+
 What is subtracted, and why it is not a hole
 --------------------------------------------
 
@@ -84,6 +91,7 @@ from __future__ import annotations
 import asyncio
 import re
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
 
@@ -106,6 +114,30 @@ WINDOW: Final = 9
 #: puts them in. An entry here is a normalised nine-word string and must carry
 #: the reason it is not duplication.
 EXEMPT: Final[frozenset[str]] = frozenset()
+
+#: Documents the comparison **skips**, by repository-relative POSIX path. A
+#: different mechanism from :data:`EXEMPT`, which forgives one phrase everywhere;
+#: this forgives one *file* entirely, so an entry needs the stronger reason.
+#:
+#: ``DECISIONS.md`` is exempt because it is an **append-only record whose function
+#: is quotation** - it exists to preserve what was decided and, often, the exact
+#: text that was wrong. Overlap there is *citation*, not drift, and a guard that
+#: fights it converts a build log into a paraphrase, losing the thing that made
+#: the log worth keeping. This guard demonstrated that on itself: the
+#: ``[M9.5, fix round 1]`` entry recording it quoted its own failure output, the
+#: guard flagged that as duplication, and the evidence was clipped one word below
+#: the window to satisfy it. Ruling R-78 was amended for exactly that reason, and
+#: the evidence is back at full length.
+#:
+#: **The cost, recorded here rather than only in the ruling:** a genuinely
+#: duplicated *instruction* could hide in an exempt file. Accepted for this one,
+#: because nobody follows a build log - R-78's scope is documentation a caller
+#: reads for instructions, which is `README.md`, `CLAUDE.md` and `docs/`. An entry
+#: added here for a document anyone *acts* on would be deleting the guard by
+#: instalments, which is what R-78 forbids, and
+#: :func:`test_the_document_exemption_has_not_eaten_the_guard` is what makes that
+#: visible rather than gradual.
+EXEMPT_DOCUMENTS: Final[frozenset[str]] = frozenset({"DECISIONS.md"})
 
 #: How many overlapping shingles to print per offence, longest first. More than
 #: one because an offence is usually a fragment rather than a sentence, and the
@@ -131,8 +163,24 @@ def shingles(text: str) -> set[str]:
     return {" ".join(tokens[index : index + WINDOW]) for index in range(len(tokens) - WINDOW + 1)}
 
 
+def relative(path: Path) -> str:
+    """``path`` as a repository-relative POSIX string, which is how it is named."""
+    return path.relative_to(REPO_ROOT).as_posix()
+
+
+def compared_markdown() -> list[Path]:
+    """The tracked ``.md`` files this guard actually reads."""
+    return [path for path in tracked_markdown() if relative(path) not in EXEMPT_DOCUMENTS]
+
+
 def tracked_markdown() -> list[Path]:
-    """Every tracked ``.md`` file, asked of git rather than globbed."""
+    """Every tracked ``.md`` file, asked of git rather than globbed.
+
+    Unfiltered on purpose: :func:`compared_markdown` applies
+    :data:`EXEMPT_DOCUMENTS`, and keeping the two separate is what lets
+    :func:`test_the_document_exemption_has_not_eaten_the_guard` compare what git
+    found against what the guard reads.
+    """
     listed = subprocess.run(
         ["git", "ls-files", "-z", "*.md"],
         cwd=REPO_ROOT,
@@ -305,6 +353,36 @@ def test_the_markdown_listing_is_not_empty() -> None:
     assert all(path.exists() for path in listed), "git listed a .md file that is not on disk"
 
 
+def test_the_document_exemption_has_not_eaten_the_guard() -> None:
+    """:data:`EXEMPT_DOCUMENTS` skips a file; it must not skip the scope.
+
+    R-78's amended scope is "documentation a caller reads for **instructions**:
+    `README.md`, `CLAUDE.md`, and `docs/`". A per-file exemption is the mechanism
+    that could grow until the guard covers nothing, one honest-looking entry at a
+    time, so the four claims that stop it are asserted rather than trusted:
+
+    - every exempt name is a file git actually tracks, so an exemption cannot go
+      stale into a no-op that reads as protection - the same shape as
+      ``test_every_deferral_names_a_documented_tool``;
+    - the compared set still holds the two documents a caller is told to read;
+    - it still holds something under `docs/`, which R-78's scope names;
+    - each exempt file really is skipped, so the exemption does what it says.
+    """
+    tracked = {relative(path) for path in tracked_markdown()}
+    unknown = EXEMPT_DOCUMENTS - tracked
+    assert not unknown, f"EXEMPT_DOCUMENTS names files git does not track: {sorted(unknown)}"
+
+    compared = {relative(path) for path in compared_markdown()}
+    assert compared, "the exemption skipped every tracked document"
+    assert {"README.md", "CLAUDE.md"} <= compared, (
+        f"the exemption reaches a document a caller reads for instructions: {sorted(compared)}"
+    )
+    assert any(name.startswith("docs/") for name in compared), (
+        "no document under docs/ is compared; R-78's amended scope names it explicitly"
+    )
+    assert not (EXEMPT_DOCUMENTS & compared), "an exempt document is being compared anyway"
+
+
 def test_no_served_text_is_duplicated_in_a_tracked_document(seeded: ServiceContext) -> None:
     """Ruling R-78, and ruling R-76's named risk measured rather than proxied.
 
@@ -319,31 +397,80 @@ def test_no_served_text_is_duplicated_in_a_tracked_document(seeded: ServiceConte
     """
     rendered = asyncio.run(served_text(seeded))
     documents = {path: path.read_text(encoding="utf-8") for path in tracked_markdown()}
-    stored = store_content(seeded)
+    offences = duplications(rendered, documents, store_content(seeded))
+    assert not offences, (
+        "served text is duplicated in tracked documentation (ruling R-78). Move the text into "
+        "the prompt and leave the document explaining why it exists, or - if a shingle is a "
+        "shared rule id rather than duplication - widen WINDOW or add it to EXEMPT with a "
+        "reason, or - if the document is an append-only record rather than an "
+        "instruction - to EXEMPT_DOCUMENTS with the stronger reason R-78 asks for.\n"
+        + "\n".join(offences)
+    )
 
-    offences: list[tuple[int, str]] = []
+
+def duplications(
+    rendered: Mapping[str, str], documents: Mapping[Path, str], stored: list[list[str]]
+) -> list[str]:
+    """Every served-text/document overlap, worst first. The comparison itself.
+
+    A function rather than the body of one test, so
+    :func:`test_the_document_exemption_lets_a_citation_pass_and_still_catches_an_instruction`
+    can drive **both ends** of :data:`EXEMPT_DOCUMENTS` on synthetic inputs -
+    which is the only way to assert that an exempt file passes without editing a
+    real one and the standing rule is to test both ends, not the convenient one.
+
+    ``documents`` is handed in unfiltered and the exemption is applied here, so
+    the test exercises the real filter rather than a copy of it.
+    """
+    ranked: list[tuple[int, str]] = []
     for source, text in sorted(rendered.items()):
         served = shingles(authored(text, stored)) - EXEMPT
         for path, document in sorted(documents.items()):
+            if relative(path) in EXEMPT_DOCUMENTS:
+                continue
             shared = served & shingles(document)
             if not shared:
                 continue
             worst = sorted(shared, key=lambda item: (-len(item), item))[:REPORTED]
             shown = "".join(f"\n    {shingle!r}{_where(document, shingle)}" for shingle in worst)
-            offences.append(
+            ranked.append(
                 (
                     len(shared),
                     f"{source} shares {len(shared)} {WINDOW}-word shingle(s) with "
-                    f"{path.relative_to(REPO_ROOT).as_posix()}{shown}",
+                    f"{relative(path)}{shown}",
                 )
             )
-    offences.sort(reverse=True)
-    assert not offences, (
-        "served text is duplicated in tracked documentation (ruling R-78). Move the text into "
-        "the prompt and leave the document explaining why it exists, or - if a shingle is a "
-        "shared rule id rather than duplication - widen WINDOW or add it to EXEMPT with a "
-        "reason.\n" + "\n".join(line for _, line in offences)
+    ranked.sort(reverse=True)
+    return [line for _, line in ranked]
+
+
+#: A nine-word run used to drive both ends of the document exemption. Long enough
+#: to shingle, and deliberately not a sentence from any prompt or document, so it
+#: cannot pass or fail for a reason other than the one under test.
+_PLANTED = "a planted run of exactly nine words for the exemption control"
+
+
+def test_the_document_exemption_lets_a_citation_pass_and_still_catches_an_instruction() -> None:
+    """Both ends of :data:`EXEMPT_DOCUMENTS`, on synthetic inputs.
+
+    The same copied text in two documents: reported for `README.md`, silent for
+    the exempt `DECISIONS.md`. Asserting only the passing half would be the
+    vacuous shape - an exemption that swallowed *everything* would satisfy it -
+    so the failing half is asserted first and the message is checked to name the
+    document, not merely to be non-empty.
+    """
+    rendered = {"prompt planted": _PLANTED}
+    assert len(words(_PLANTED)) >= WINDOW, "the control text is too short to shingle"
+
+    caught = duplications(rendered, {REPO_ROOT / "README.md": _PLANTED}, [])
+    assert len(caught) == 1 and "README.md" in caught[0], (
+        f"the guard missed a duplication in a compared document: {caught}"
     )
+
+    for name in sorted(EXEMPT_DOCUMENTS):
+        assert not duplications(rendered, {REPO_ROOT / name: _PLANTED}, []), (
+            f"{name} is exempt and was reported anyway"
+        )
 
 
 def _where(document: str, shingle: str) -> str:
