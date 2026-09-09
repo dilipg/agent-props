@@ -65,7 +65,9 @@ containing the separator character, empty strings, and any Python ``int``.
 **A modulo is not a uniform draw.** :meth:`Seeded.int` uses rejection sampling
 against the largest multiple of the span that fits in 64 bits, so every value
 in ``[lo, hi]`` is equally likely. The loop has exactly one exit and terminates
-because the acceptance probability is never below one half.
+because the acceptance probability is never below one half - which holds only
+for a span of at most ``2**64``, so that is a **guard** and not a comment. A
+wider span made this method hang; see the method.
 
 The derivation is pinned by a test
 ----------------------------------
@@ -243,19 +245,36 @@ class Seeded:
         The loop has exactly **one** exit, deliberately - a retry loop with more
         than one is the shape that goes wrong - and it terminates because the
         acceptance probability is never below one half: ``ceiling`` is at least
-        ``2**64 - span + 1``, and ``span`` is at most ``2**64``. For every span
-        this service uses it is above ``1 - 2**-32``, so the second iteration is
+        ``2**64 - span + 1``, and ``span`` is at most ``2**64`` **because the
+        guard below enforces it**. For every span this service uses the
+        acceptance probability is above ``1 - 2**-32``, so a second iteration is
         effectively unreachable.
 
-        Raises ``ValueError`` for ``lo > hi``. That is an inverted range rather
-        than a value a user supplied: `service/` clamps a caller integer through
-        `limits.py` before it reaches here, so an inverted range is a
-        programming error and the alternative to raising is silently returning
-        the wrong end.
+        That precondition used to be stated as a fact and enforced by nothing,
+        which made this method **hang** rather than fail for a wider span:
+        ``_DRAW_SPACE % span`` is ``2**64`` when ``span`` is ``2**64 + 1``, so
+        ``ceiling`` is ``0``, no draw is ever below it, and ``while True``
+        never exits. No caller reaches it today - `service/limits.py` bounds
+        every integer that gets here to 64 bits - but an unbounded ``drift_s``
+        arriving at :meth:`timestamp` later would have produced a wedged process
+        with no exception and no log, which is the most expensive shape of
+        failure to diagnose. A termination proof whose premise nothing checks is
+        not a proof, so the premise is now a guard.
+
+        Raises ``ValueError`` for ``lo > hi`` and for a span wider than
+        ``2**64``. Both are programming errors rather than values a user
+        supplied: `service/` clamps a caller's integer through `limits.py`
+        before it reaches here, so the alternative to raising is silently
+        returning the wrong end in the first case and never returning at all in
+        the second.
         """
         if lo > hi:
             raise ValueError(f"int() needs lo <= hi, got lo={lo}, hi={hi}")
         span = hi - lo + 1
+        if span > _DRAW_SPACE:
+            raise ValueError(
+                f"int() needs a span of at most 2**{_DRAW_BYTES * 8}, got {span} (lo={lo}, hi={hi})"
+            )
         ceiling = _DRAW_SPACE - (_DRAW_SPACE % span)
         while True:
             drawn = self._draw()

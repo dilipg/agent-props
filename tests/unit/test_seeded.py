@@ -259,6 +259,63 @@ def test_int_covers_the_whole_storable_range() -> None:
     assert -(2**63) <= value <= 2**63 - 1
 
 
+@pytest.mark.parametrize(
+    ("lo", "hi"),
+    [(-(2**63), 2**63 - 1), (0, 2**64 - 1), (1, 2**64)],
+    ids=["storable-range", "unsigned-64", "off-by-one-above"],
+)
+def test_the_widest_working_span_is_exactly_two_to_the_sixty_four(lo: int, hi: int) -> None:
+    """The last span that works, from three directions.
+
+    The test below is the first span that does *not*. All three of these are a
+    span of exactly ``2**64``, which is where ``_DRAW_SPACE % span`` is zero and
+    ``ceiling`` is the whole draw space - so every draw is accepted and the loop
+    exits on its first pass.
+    """
+    assert hi - lo + 1 == 2**64
+    assert lo <= Seeded(5).int(lo, hi) <= hi
+
+
+def test_int_refuses_a_span_wider_than_a_draw_instead_of_hanging() -> None:
+    """The defect this guard replaced: a wider span made ``int()`` **hang**.
+
+    ``_DRAW_SPACE % span`` is ``2**64`` when ``span`` is ``2**64 + 1``, so
+    ``ceiling`` is ``0``, no 64-bit draw is ever below it, and ``while True``
+    never exits. The docstring stated "span is at most ``2**64``" as a *fact*
+    and nothing enforced it - and the two tests above stop at exactly the last
+    value that works, which is why this was invisible.
+
+    No caller reaches it today: `service/limits.py` bounds every integer that
+    gets here to 64 bits. But an unbounded ``drift_s`` arriving at
+    :meth:`Seeded.timestamp` at a later milestone would have been a wedged
+    process with no exception and no log, and that is the most expensive shape
+    of failure to diagnose - so the premise of a termination proof is now a
+    guard rather than a sentence.
+
+    Both ends, per the standing rule that an entry reasoning about a boundary
+    tests both of them: the parametrised test above is ``2**64`` working, this
+    is ``2**64 + 1`` refused.
+    """
+    with pytest.raises(ValueError, match=r"span of at most 2\*\*64"):
+        Seeded(5).int(0, 2**64)
+    with pytest.raises(ValueError, match=r"span of at most 2\*\*64"):
+        Seeded(5).int(-(2**63) - 1, 2**63 - 1)
+    with pytest.raises(ValueError, match=r"span of at most 2\*\*64"):
+        Seeded(5).int(0, 10**40)
+
+
+def test_timestamp_refuses_a_drift_wider_than_a_draw() -> None:
+    """The reachable route to the span guard, which is why it is not academic.
+
+    ``timestamp(base, drift_s)`` calls ``int(0, drift_s)``, so a ``drift_s``
+    above ``2**64 - 1`` is a span above ``2**64``. Nothing calls
+    ``timestamp`` in `src/` yet; when something does, this is the failure it
+    gets instead of a hang.
+    """
+    with pytest.raises(ValueError, match=r"span of at most 2\*\*64"):
+        Seeded(1).timestamp(datetime(2026, 1, 1, tzinfo=UTC), 2**64)
+
+
 def test_choice_picks_from_the_sequence_and_costs_one_draw() -> None:
     source = Seeded(20260908, "pick")
     items = ["a", "b", "c"]
