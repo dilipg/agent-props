@@ -2006,6 +2006,86 @@ a different question. Both were wrong in the direction that looks like success.
 not really duplication (a rule id, a tool name). Tune the window, or exempt a named string —
 never delete the guard.
 
+**Amended: the guard covers documentation that *instructs*, and `DECISIONS.md` is exempt.**
+
+I wrote "every tracked `.md`". M9.5's fix round took that literally, and the guard promptly
+found a fourth collision the reviewer had missed — in `DECISIONS.md` — and then **caught the
+fix-round entry that was quoting the guard's own failure output.** The implementer truncated
+its evidence rather than exempt the file, because the ruling said what it said.
+
+That is the ruling being wrong, not the implementer. `DECISIONS.md` is an **append-only
+record whose function is quotation**: it exists to preserve what was decided and, often, the
+exact text that was wrong. Overlap there is *citation*, not drift, and a guard that fights it
+converts a build log into a paraphrase — losing the thing that made the log worth keeping.
+
+So the guard's scope is documentation a caller reads for **instructions**: `README.md`,
+`CLAUDE.md`, and `docs/`. `DECISIONS.md` is exempt by name, with the reason recorded at the
+exemption.
+
+**Cost of the exemption.** A genuinely duplicated instruction could hide in `DECISIONS.md`.
+Acceptable: nobody follows a build log, and the register plus the README are where an
+instruction would have to appear to mislead anyone.
+
+### R-79 — "the library cannot do X" needs a probe, or it is "I did not find how"
+
+M9.5's implementer made the sharpest observation of this build about its own work:
+
+> Two claims in this milestone were "the library cannot do X" and both were "I did not find
+> how" — the SDK's `list_resources` and the draft blueprint. Both claims were about something
+> outside the diff, and neither was tested. **The pattern is the concern.**
+
+That is exactly right, and it names a class this build has hit three times:
+
+1. **`docs/build-handoff.md`** asserted `from mcp import MCPServer`. It fails; the correct
+   path is `from mcp.server import MCPServer` (R-16). A confident claim about a third party,
+   written without running it.
+2. **My R-77(a)** said the only override for a dynamic `resources/list` is the private
+   `_lowlevel_server`. Wrong — `_handle_list_resources` delegates to a **public** coroutine,
+   so subclassing is a public route. I asserted an SDK limit I had not probed.
+3. **The draft-blueprint claim**, same milestone, same shape.
+
+**Ruling.** A claim that an external library, SDK or service **cannot** do something is only
+admissible with a probe against the **installed** version, quoted. Without one, write "I did
+not find how", which is honest, differently actionable, and does not become a fact by being
+repeated.
+
+**Why this is worth a ruling rather than an instruction.** Every other failure this build
+records is about our own code, where the tests eventually find it. A false claim about a
+dependency has no such backstop: it silently forecloses an option, and the next reader
+inherits it as settled. R-16 cost a fix round; R-77(a) I corrected only because a reviewer
+read the package I had not.
+
+**The corollary, and the reason the observation is worth more than the two fixes:** a claim
+about anything **outside the diff** is exactly the claim no test in the diff will catch. Say
+whether you probed it.
+
+**Cost if wrong.** A probe is a few lines and one command. The alternative is a limitation
+that is true only in the sense that nobody checked.
+
+### R-80 — three M9.5 items, ratified as they stand
+
+**(a) `_draft_caveat` — a third option, better than either I offered.** I said "fix the
+wording, not the call" for `cover-the-label-space`. The implementer reasoned that reporting a
+draft's vocabulary *without* saying DS-001 will refuse its datasets is unactionable advice,
+while refusing outright diverges from `label_vocabulary`, the tool it mirrors. So it reports
+**with a caveat naming the blocker and the fix**. Ratified — that serves the caller better
+than either of my two options, and declining a controller's binary is the behaviour R-69 asks
+for.
+
+**(b) The three carried-forward questions stay closed.** `resources/list` remains
+index-plus-templates even though subclassing is now known to be public: R-77(a)'s outcome was
+ratified for coupling, and that reason survives the correction to its justification.
+`contracts.md` still documents neither surface, per R-77(d)'s mechanism distinction — the
+guards enumerate the registered surface, so prose would be an unguarded second copy.
+`cover-the-label-space` still names per-`dimension=value` gaps, because the cross-product is
+432 and R-77(c)'s reasoning is unchanged.
+
+**(c) The template-breadth boundary the guard cannot close.** An over-broad future template
+matching `agentprops://catalogue/no-such-thing` would be credited — caught instead by that
+test's `raises("Unknown resource")` failing, with the docstring naming the boundary rather
+than implying there is none. Ratified: a guard that states its own edge is worth more than one
+that pretends to have none.
+
 ## Owner scope decisions
 
 ### R-76 — M9.5: register the MCP `prompts` and `resources` the server already advertises
