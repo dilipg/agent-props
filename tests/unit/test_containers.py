@@ -7,11 +7,18 @@ you: whether the compose file and the Python it starts still **agree**.
 Three ways they can silently disagree, and each is a test here:
 
 **A renamed environment variable.** `server/__main__.py` reads
-``AGENTPROPS_STORE``, ``AGENTPROPS_HTTP_HOST`` and ``AGENTPROPS_HTTP_PORT``, and
-the compose file writes them. Rename one on either side and the container starts
-perfectly, serves happily, and uses the *default* store - a SQLite file inside
-the container, thrown away on the next ``docker compose up``. Nothing logs it
-and no test would notice, which is the worst kind of green.
+``AGENTPROPS_STORE``, ``AGENTPROPS_HTTP_HOST`` and ``AGENTPROPS_HTTP_PORT``.
+Rename one on either side and the container starts perfectly, serves happily,
+and uses the *default* store - a SQLite file inside the container, thrown away
+on the next ``docker compose up``. Nothing logs it and no test would notice,
+which is the worst kind of green.
+
+The three are written in **two** places and the split is deliberate: the store
+URL is per-profile so it is in each service's ``environment``, and the HTTP pair
+is the same for both so it is in the image. YAML's ``<<`` replaces a mapping
+rather than merging into it, so an anchored ``environment:`` would have been
+discarded by both services and would have looked shared while being dead. So
+this file checks both places.
 
 **A store URL whose scheme nothing dispatches.** ``context_for`` routes on the
 URL prefix. A compose file saying ``mongo://`` instead of ``mongodb://`` falls
@@ -115,20 +122,39 @@ def test_every_service_is_in_a_profile() -> None:
 
 
 @pytest.mark.parametrize("profile", sorted(PROFILES), ids=lambda name: str(name))
-def test_the_service_reads_the_environment_variables_the_entry_point_reads(profile: str) -> None:
+def test_each_service_names_the_store_variable_the_entry_point_reads(profile: str) -> None:
     """The drift guard that matters most, in the direction that fails silently.
 
     A renamed variable on either side leaves a container that starts, serves,
     and uses the default SQLite file inside itself - discarded on the next
-    ``up``. Read from `server/__main__.py`'s own constants rather than spelled
-    again here, so there is one source for each name.
+    ``up``. Read from `server/__main__.py`'s own constant rather than spelled
+    again here, so there is one source for the name.
+
+    The store is the **only** thing a service's ``environment`` carries, which
+    is what makes "the only difference between the two profiles is the store
+    URL" literally true rather than nearly true. The HTTP pair is the image's -
+    see the test below.
     """
     environment = service_for(profile)["environment"]
-    assert STORE_ENV_VAR in environment, f"the {profile} service names no store"
-    assert environment[HTTP_HOST_ENV_VAR] == "0.0.0.0", (
-        "a container listening on 127.0.0.1 is unreachable from the host"
+    assert list(environment) == [STORE_ENV_VAR], (
+        f"the {profile} service environment is {sorted(environment)}, not just the store"
     )
-    assert int(environment[HTTP_PORT_ENV_VAR]) == DEFAULT_HTTP_PORT
+
+
+def test_the_image_sets_the_http_host_and_port_the_entry_point_reads() -> None:
+    """The other half, in the other file, for the reason the module docstring gives.
+
+    ``0.0.0.0`` and not ``127.0.0.1``: a container listening on loopback is
+    unreachable from the host, which is a working server that nothing can talk
+    to. The port is checked against ``DEFAULT_HTTP_PORT`` so the image, the
+    compose port mapping and the Python default cannot drift into three numbers.
+    """
+    dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+    assert f"{HTTP_HOST_ENV_VAR}=0.0.0.0" in dockerfile, (
+        "the image does not bind 0.0.0.0, so the container is unreachable from the host"
+    )
+    assert f"{HTTP_PORT_ENV_VAR}={DEFAULT_HTTP_PORT}" in dockerfile
+    assert f"EXPOSE {DEFAULT_HTTP_PORT}" in dockerfile
 
 
 @pytest.mark.parametrize(

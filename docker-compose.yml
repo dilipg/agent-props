@@ -52,18 +52,26 @@
 
 name: agent-props
 
-# The service is defined once and used twice. The only difference between the
-# two profiles is the store URL, so an anchor is what keeps that literally
-# true - a copied-and-edited block is where two deployments quietly diverge.
+# The service is defined once and used twice, and the only difference between
+# the two profiles is the store URL - which an anchor keeps *literally* true
+# rather than nearly true. A copied-and-edited block is where two deployments
+# quietly diverge.
+#
+# `AGENTPROPS_HTTP_HOST` and `AGENTPROPS_HTTP_PORT` are deliberately **not**
+# here. YAML's `<<` merge key replaces a mapping rather than merging into it, so
+# anything in an anchored `environment:` is discarded the moment a service
+# declares one of its own - which both of these have to, for the store. Putting
+# the two HTTP variables in the anchor would therefore have looked shared and
+# been dead. They are set by the image instead (`ENV` in the Dockerfile), which
+# is one place per variable and is also right for a bare `docker run`.
+# `tests/unit/test_containers.py` asserts both halves: the image sets the HTTP
+# pair, each service sets the store.
 x-service: &service
   build:
     context: .
   restart: unless-stopped
   ports:
     - "${AGENTPROPS_SERVICE_PORT:-8000}:8000"
-  environment:
-    AGENTPROPS_HTTP_HOST: 0.0.0.0
-    AGENTPROPS_HTTP_PORT: 8000
 
 services:
   # ------------------------------------------------------------------ local
@@ -71,8 +79,6 @@ services:
     <<: *service
     profiles: ["local"]
     environment:
-      AGENTPROPS_HTTP_HOST: 0.0.0.0
-      AGENTPROPS_HTTP_PORT: 8000
       # Mongo needs no migration: contracts section 8 declares collections and
       # indexes, not DDL, and `MongoStore.create_schema()` declares the indexes
       # idempotently on startup. So this profile is genuinely one command.
@@ -105,8 +111,6 @@ services:
     <<: *service
     profiles: ["shared"]
     environment:
-      AGENTPROPS_HTTP_HOST: 0.0.0.0
-      AGENTPROPS_HTTP_PORT: 8000
       AGENTPROPS_STORE: postgresql://agentprops:agentprops@postgres:5432/agentprops
     depends_on:
       postgres:

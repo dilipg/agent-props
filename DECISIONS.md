@@ -3401,3 +3401,185 @@ can.
 5. **An empty object key is not addressable in Mongo**, and the codec cannot make it so without a
    prefix scheme that changes every stored key. Nothing in this project produces one. Flagged rather
    than fixed.
+
+---
+
+## [M7, fix round 1] Correction: `find_datasets` filtered the wrong version on Mongo
+The Mongo aggregation put the four promoted filters in a `$match` **before** the
+`$sort`/`$group`/`$replaceRoot` that reduces a lineage to its latest version. That reads
+perfectly and answers a different question: the group then sees only *matching* versions, so
+`$first` returned the latest version **that matched the filter** rather than the latest version of
+the lineage. SQL picks `version == max(version)` for the lineage first and filters that row.
+
+For a lineage whose promoted fields differ between versions the two are different rows, and Mongo
+returned a non-latest one — contradicting ruling R-38's "one row per lineage, at its **latest**
+version" literally. Reproduced on all four filters (`labels`, `author`, `blueprint_version`,
+`agent_id`); each returned `(…001, 1)` on Mongo where SQL returned `[]`.
+
+**Why it matters rather than merely differs.** `find_datasets` is the review surface M9 builds on —
+PRD 5.7, "a stranger has to judge relevance without opening anything" — so a search for
+`tier=regional` that surfaces a dataset which is now `national` is the surface lying rather than a
+near miss. And it is reachable through a feature this same milestone shipped: `dataset_import`
+writes a bundle's document as a new version of an existing lineage id, so a bundle whose labels,
+blueprint version or author differ from the store's copy produces exactly such a lineage.
+
+Fixed by moving **every** filter after `$replaceRoot`. `archived` moved with the rest, even though
+R-34 makes it lineage-level and pre-filtering it would therefore be equivalent *today*: an
+optimisation whose correctness depends on an invariant enforced two modules away is the shape of
+thing that outlives the invariant, and SQL does not pre-filter it either.
+Cost, stated: the group now runs over the whole collection rather than over the filtered subset.
+`datasets_lineage` (`{id, version desc}`) serves the sort that feeds it, and the volumes are a local
+authoring instance's — the same trade R-39(a) accepted for the `q` filter and M6 accepted for
+`_by_labels`. Identical results first; contracts section 7 licenses the different plan.
+
+**And the conformance gap is the more important half.** Every other test in the file writes the
+*same* document twice, so both readings of R-38 agree on every fixture that exists and the suite was
+blind to the difference. Two tests added, immediately after the test whose blind spot they fill:
+`test_find_filters_the_latest_version_and_not_whichever_version_matched` (version 1 matches, version
+2 does not — the discriminating direction) and
+`test_find_matches_a_lineage_that_only_the_latest_version_satisfies` (the converse, which both
+readings pass and which pins that the filter reads the *latest* version's fields). All four filters
+each, because the defect was in one `$match` carrying all of them and fixing one would have fixed
+none. A `heterogeneous` fixture publishes two more blueprints, because `datasets` has a foreign key
+on `(agent_id, bp_version)` and a version-2 document pointing elsewhere needs somewhere else to
+exist.
+Verified: 4 failed on Mongo, 8 passed on SQLite and 8 on Postgres, before the fix.
+
+## [M7, fix round 1] Ruling R-57 applied to every site carrying the struck claim, found by grepping for the claim
+`sql.py` still told the next author, in three places, that an `ILIKE`/`pg_trgm` prefilter was fine
+"provided it matches a *superset* of what the Python fold matches; Postgres's `lower()` and Python's
+`casefold()` are close enough for that to hold" — the exact sentence M7 measured false. The
+correction lived ~1200 lines away in `POSTGRES_ONLY_INDEXES`, so the file contradicted itself and
+**the stale half was the one sitting on `_apply_dataset_filters`**, which is the method a future
+author would edit.
+
+This is R-57's own general lesson reproduced one layer down: a claim naming an implementation, left
+un-re-read when the mechanism changed. It happened twice in one milestone — the same shape as the
+splitting guarantee below — which is the argument for **grepping for the claim rather than fixing
+the site you remember**. Doing that found two sites the review had not listed:
+`tests/unit/test_service_expansion.py`'s own module docstring still asserted the splitting property
+its own test disproves, and `service/expansion.py::_grown` contradicted its own module docstring.
+Both fixed. All three `sql.py` sites now cite R-57 and say **do not add one**, with the measurement
+and with R-39(a)'s named remedy (a pre-folded search column) as the thing that would actually work.
+`_byte_ordered` cites R-58 the same way.
+
+## [M7, fix round 1] Correction: the disproved splitting guarantee was published on the tool surface
+`dataset_expand`'s docstring — which is what an LLM caller reads when it lists the tools — said
+"expanding by 5 equals expanding by 2 then 3". The module docstring and the test recorded that this
+is **false**; the caller-facing description and `_grown`'s docstring did not.
+
+A false determinism guarantee on the tool surface is worse than one in a comment, because a caller
+can act on it: an agent that believed it could split a 10,000-entry expansion into ten calls and get
+the same pool would get ten different pools and no error. Replaced on both with the guarantee that
+was actually proved — the same request against the same dataset reproduces exactly, an entry already
+written keeps its content when the pool grows again, and expanding in two calls is *not* the same as
+expanding in one because a new entry is drawn from the pool it is added to.
+
+My report said the guarantee "is now what is asserted", which was two-thirds true. Recording that
+rather than quietly fixing it: the fix I described was the fix I had made to two of the four sites.
+
+## [M7, fix round 1] `Seeded.int` enforces the premise of its own termination proof
+`ceiling = _DRAW_SPACE - (_DRAW_SPACE % span)` is **0** when `span > 2**64` — `span == 2**64 + 1`
+gives `_DRAW_SPACE % span == 2**64` — so `while True:` never satisfies `drawn < ceiling` and the
+method **hangs**. The docstring stated the precondition as a fact ("`span` is at most `2**64`") and
+nothing enforced it, and the two tests around it stopped at exactly the last value that works:
+`test_int_covers_the_whole_storable_range` uses a span of exactly `2**64`, and the property test
+capped `width` at `10**9`.
+
+Fixed with one `raise` beside the existing `lo > hi` guard, and the docstring now says the bound is
+enforced rather than assumed. **A termination proof whose premise nothing checks is not a proof.**
+
+Latent today — `service/limits.py` bounds every integer that reaches here to 64 bits — and the
+reason it is worth a guard rather than a note is the shape of the failure it would become: an
+unbounded `drift_s` arriving at `Seeded.timestamp` at M8 or M9 is a wedged process with **no
+exception and no log**, which is the most expensive thing to diagnose. `timestamp` is the reachable
+route and has its own test.
+Both ends, per the standing rule: `test_the_widest_working_span_is_exactly_two_to_the_sixty_four`
+covers `2**64` from three directions and `test_int_refuses_a_span_wider_than_a_draw_instead_of_hanging`
+covers `2**64 + 1` from three. Verified the old code hangs rather than fails: with the guard removed,
+`Seeded(5).int(0, 2**64)` on a daemon thread was **still running after 5 seconds**.
+
+## [M7, fix round 1] The Mongo losing side has its own race suite
+`test_sql_allocation_races.py` is SQL-only by design and says so, which left the equivalent branches
+in `mongo.py` **never executed** — the `continue`-versus-`raise` discrimination that decides whether
+a real fault gets buried under eight retries, and `set_step_actual`'s loop-back that decides whether
+a losing writer receives the winner's value.
+
+Those branches are the whole reason the retry pattern is portable. R-37 and R-39 both turn on "the
+guard is a unique key on every backend"; the guard being a *different exception class* on this one is
+exactly the kind of thing that looks handled and is not. So
+`tests/integration/test_mongo_allocation_races.py` mirrors the SQL file with `DuplicateKeyError` in
+place of `IntegrityError`: six tests covering the version race, the unrelated-duplicate
+discrimination, the `seq` race, the step-key no-op convergence, `set_step_actual`'s losing writer,
+and two concurrent first writes of one blueprint converging on R-29's no-op success.
+
+**It needed three test seams in the adapter, and adding them is the point rather than a cost.**
+`put_blueprint`, `put_skeleton` and `put_run` read existence inline, so the losing branch had no way
+in. They now go through `_blueprint_doc`, `_skeleton_exists` and `_run_exists` — which is exactly
+what `sql.py` did at M3 and for exactly the reason its docstring records: "the losing side of a
+concurrent first write is reachable in a test by making this return `None` once". A read spelled
+inline is a branch with no way in.
+
+## [M7, fix round 1] Correction: the server-defaults test exercised one of nine
+Its docstring promised a row omitting "every one of them" and named `sa.false()` as the sharpest
+case; the body inserted one `skeletons` row and read back `parts`. `datasets.archived`,
+`runs.warnings`, `runs.external_refs`, `runs.run_class` and the four defaulted timestamps were never
+exercised, and the M7 report repeated the overclaim.
+
+Now `SERVER_DEFAULTS` is a table of all nine and `_defaulted_rows` inserts one row per table omitting
+every defaulted column, on both dialects, through SQLAlchemy Core rather than raw SQL — because a
+`jsonb` column needs a cast from a text parameter on Postgres and does not on SQLite, and
+hand-writing that is how a test ends up proving something about its own SQL.
+
+`test_the_defaults_table_covers_every_declared_default` compares the table against `METADATA` itself,
+so a column that gains or loses a `server_default` fails rather than being quietly unexercised —
+which is precisely the failure the original had. Verified: removing `server_default=false()` from
+`datasets.archived` fails it with `stale: [('datasets', 'archived')]`.
+
+## [M7, fix round 1] The one field expansion varies is now tested, and the clamp is tested exactly
+No golden pool entry carries `latency_hint_ms`, so `_replicated`'s jitter — the only `Seeded.int`
+call site in `src/` — was never exercised and the clamp arithmetic had no case.
+
+**The first attempt at the clamp test was vacuous and that is the part worth recording.** It asserted
+the *stored* hint fell inside the expected band, and at `MAX_STORED_INT` it **passed without the
+clamp**: the draw happened to land below the column width, so the test proved nothing about the case
+it was written for. Verified by removing the clamp — the negative case failed, the at-the-width case
+did not.
+
+So the range became the unit. `jittered_range(hint)` is now a named public function, and
+`test_the_jitter_range_clamps_at_both_ends` asserts it exactly at seven points including
+`doubles-past-the-width`, where the unclamped upper bound is above `MAX_STORED_INT` while the lower
+bound is not — the case no draw can hide. A `hypothesis` property test asserts `lo <= hi` and both
+ends storable over every `int`. With the clamp removed, five of ten fail, including that case and
+`hint=-1` from the property test.
+
+The two clamps prevent different failures and both are R-50 one layer in from the boundary: the top
+stops the expansion writing a `latency_hint_ms` no backend can store, and the bottom stops
+`lo > hi` raising `ValueError` out of `Seeded.int` where an envelope belongs. A negative
+`latency_hint_ms` is nonsense but nothing forbids it — R-04 keeps value constraints out of the models
+and no `DS-*` rule has an opinion about this field.
+
+## [M7, fix round 1] The compose anchor's claim is now literally true
+`x-service` claimed "the only difference between the two profiles is the store URL", and YAML's `<<`
+**replaces** a mapping rather than merging into it — so both services re-spelled
+`AGENTPROPS_HTTP_HOST` and `AGENTPROPS_HTTP_PORT` and the claim was not literally true.
+
+Made true rather than corrected: the two HTTP variables were already set by the image (`ENV` in the
+Dockerfile), so they came out of the compose file entirely and each service's `environment` now
+carries the store URL and nothing else. That is one place per variable, and it is right for a bare
+`docker run` too. Putting them in the anchor would have been worse than either option — they would
+have looked shared and been dead, discarded by both services the moment each declared an
+`environment` of its own, which both must for the store.
+`test_containers.py` follows: `test_each_service_names_the_store_variable_the_entry_point_reads`
+asserts each service's environment is **exactly** `[AGENTPROPS_STORE]`, which is what makes the claim
+checkable, and a new `test_the_image_sets_the_http_host_and_port_the_entry_point_reads` asserts the
+other half in the other file. The guard now checks both places, which is stronger than the one it
+replaced.
+
+## Questions for the owner — M7 fix round 1
+1. **`find_datasets` now groups over the whole `datasets` collection on Mongo** rather than over a
+   pre-filtered subset, because a pre-filter changes which version is the row. If Mongo is ever the
+   backend for a large shared instance, the shape that keeps both the grain and the pre-filter is a
+   `latest: true` flag maintained by `put_dataset` — one more write per version, and an invariant to
+   keep. Not built: R-39(a) and M6 both accepted the same trade for the same reason, and a measured
+   problem is the trigger.
