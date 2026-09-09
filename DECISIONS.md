@@ -4256,3 +4256,92 @@ It is the only test outside `test_transports.py` that spawns a process, which is
 3. **`AP-007`'s context omits the documents.** A caller that wants to see what it disagreed with
    makes a second call (`run_get`). The alternative is putting an unbounded agent-produced document
    into an error envelope, which no other finding in this product does.
+
+# Fix round 2 — M8
+
+## [M8, fix round 2] Retraction: the identical re-write is **silent** (R-65 amended)
+**The `[M8, fix round 1] R-65's no-op half carries a warning` entry above is retracted in full.**
+It is left standing rather than edited, so the reasoning that produced the wrong answer stays
+readable — the treatment M3's fix round 2 and M4's fix round 1 gave their own corrections.
+
+What it decided, and what replaces it:
+
+> `run_finish` needed **no new code** ... `record_step` needed one,
+> `step_actual_already_recorded`, keyed per step
+
+`step_actual_already_recorded` is **deleted**, and `run_already_finished` returns to the **read
+path only** — attached by `fetch_step` and by nothing else, which is where R-54(c) put it and
+R-67(a) ratified it. An identical re-record and an identical re-finish are both **silent** no-op
+successes.
+
+**Why the entry was wrong, and the part worth keeping.** I implemented R-65's bold text while
+recording that its two cited precedents contradicted it — R-29's byte-identical re-publish is
+silent and R-47's compare-and-set loser *errors*, so neither supports warning. That was the right
+order of operations: implement the ruling, flag the broken justification, and name the revert. The
+owner amended the ruling. **The lesson is not "trust the citation over the text" but "a ruling
+whose precedents point the other way is a ruling to query, not to work around"** — and the query
+belongs in the report, which is where it went.
+
+**And silent is better on merits**, which is the reasoning to keep rather than the citation
+archaeology. A caller re-recording an identical actual is a client **retrying after a timeout** —
+the case R-53 kept `run_start` idempotent for — so success is the *expected* outcome. A warning on
+an expected outcome is noise, and a vocabulary that fires on expected outcomes trains callers to
+ignore it. Warnings in this product mean "something happened you would not have predicted":
+`pool_exhausted`, `dataset_archived`, `blueprint_version_mismatch`, `run_already_finished` are all
+that shape. A retry is not.
+
+**It also dissolves a residue I had flagged**, which is the strongest signal it was right. The
+identical-repeat detection read a pre-write snapshot, so a concurrent *equal* write reported no
+warning where the sequential case did — an inconsistency I documented at `_already_recorded` and
+listed as a concern. With no warning to report there is nothing to be inconsistent about, and the
+snapshot read is gone with it. A simpler answer that removes a caveat rather than adding one is
+usually the right answer.
+
+**`run_already_finished` on a write was the same mistake in miniature**, and it is worth stating
+separately because reusing an existing code felt like the frugal choice. The code means "a finished
+run **served** you a fixture anyway" — that is what makes it worth saying under R-54(c), whose whole
+subject is the read path continuing to serve. A write is not serving, so attaching it there put a
+second meaning under one name. `_lifecycle`'s docstring now says it is called by `fetch_step` and by
+nothing else.
+
+**What did not change**, and it is the half that matters: a **differing** re-write is still
+`ok: false` with `AP-007`, still writes nothing, and the pointer and context are unchanged. Verified
+after the revert by planting the differing branch back to a silent success — seven tests fail,
+including the wire contract test and the read-only walk. Neither half of R-65 can regress into the
+other unnoticed.
+
+Net vocabulary across M8: shipped three, ended with **one** (`run_already_finished`, read path).
+
+## [M8, fix round 2] `AP-007` carries the step key and not the documents, and that is now said at the code
+Ruled by the owner at fix round 1 rather than left to taste, so `_step_conflict` and
+`_finish_conflict` now carry the reasoning in their own docstrings instead of only in the report.
+Two reasons: an `actual` and an `outcome` are **arbitrary agent output with no size bound**, so
+putting one inside an error context is a real hazard — no other finding in this product carries a
+document — and `run_get` is the right place to look for it. What a caller needs from the finding is
+that a value is there, which key it is under, and that it is not theirs.
+
+## [M8, fix round 2] Retraction: the two `DECISIONS.md` references to M11 (ruling R-68)
+**Ruling R-68 descopes M11, the TypeScript client, by owner decision. Phase 1 ends at M10.** This
+file is append-only, so the two entries that reference it are left standing and retracted here:
+
+- **`[M0] client/python/, client/typescript/, web/, Dockerfile, docker-compose.yml and alembic.ini
+  not created at M0`** says "`client/python` and `client/typescript` are M8 and M11's deliverables
+  respectively". The M8 half is now built. **The M11 half is retracted**: `client/typescript/` is
+  not a deliverable of any milestone and will not be created. The *entry's own reasoning is
+  untouched* and was correct — a directory is created by the milestone that owns it, and this one
+  turned out to be owned by nobody, which is the argument working rather than failing.
+- **`[M8] The client is packaged separately, and depends on nothing of the service's`** says "(M11
+  is the TypeScript one)" as an aside in its argument for a separate distribution. **The aside is
+  retracted; the argument is not.** It stands on the other two grounds it gave — a client speaks MCP
+  to a *server*, which may be another process or another machine, and a path dependency would make
+  "separately installable" false and be invisible in this repository. A second language was the
+  vivid case, not the load-bearing one.
+
+`.gitignore`'s `client/typescript/dist/` line is deliberately left in place: it ignores a directory
+that will now never exist, which costs nothing and instructs nobody. `README.md`'s three references
+were corrected in `d822a89`, and `docs/prd.md`'s three by the owner.
+
+## Questions for the owner — M8 fix round 2
+None. Fix round 1's three questions are all answered: R-65 amended (question 1),
+`run_already_finished` confined to the read path (question 2), and `AP-007`'s context omission
+ratified and now documented at the code (question 3).
