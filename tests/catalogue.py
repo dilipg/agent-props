@@ -130,3 +130,47 @@ def parse_boundary_codes(path: Path | str) -> set[str]:
         if BOUNDARY_CODE.match(first_cell):
             codes.add(first_cell)
     return codes
+
+
+WARNING_CODE = re.compile(r"^`([a-z][a-z0-9_]*)`$")
+
+
+def parse_runtime_warnings(path: Path | str) -> set[str]:
+    """The warning codes section 3.4 tabulates, for the M6 drift guard.
+
+    Added at M6, and the scope needs stating because the vocabulary is
+    deliberately **open** (ruling R-22): ``Warning.code`` is a plain string so a
+    tool may add a code without a model change, and two already have -
+    ``blueprint_version_missing`` at M4 and ``dataset_selection_ambiguous`` at
+    M6. Both are documented in section 3.4's *prose* and defined as constants in
+    the module that attaches them.
+
+    So this parses the **table** only, and the guard compares it to
+    :data:`~agentprops.models.RUNTIME_WARNING_CODES` - the three codes contracts
+    3.4 tabulates and the models export. A tool-local addition is out of scope
+    by construction, which is what keeps an open vocabulary and a drift guard
+    from contradicting each other.
+
+    Scoped to **section 3.4**, unlike the ``AP-*`` and ``RT-*`` parsers above.
+    Those two match a distinctive id shape that appears nowhere else in the
+    document; a warning code is a backticked lower-snake-case word, which is
+    also exactly what section 4's tool-name column looks like. An unscoped
+    version of this parser returns every tool name in the document, so the
+    section walk is load-bearing rather than tidiness.
+    """
+    codes: set[str] = set()
+    inside = False
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        subsection = SUBSECTION.match(line)
+        if subsection is not None:
+            inside = subsection.group(1) == "4"
+            continue
+        if NEXT_TOP_SECTION.match(line):
+            inside = False
+            continue
+        if not inside or not line.startswith("|"):
+            continue
+        match = WARNING_CODE.match(line.split("|")[1].strip())
+        if match is not None:
+            codes.add(match.group(1))
+    return codes

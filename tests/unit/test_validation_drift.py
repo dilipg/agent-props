@@ -39,6 +39,9 @@ import ast
 from pathlib import Path
 from typing import Final
 
+from agentprops.models import RUNTIME_ERROR_CODES, RUNTIME_WARNING_CODES
+from agentprops.service.blueprints import WARNING_BLUEPRINT_VERSION_MISSING
+from agentprops.service.runs import WARNING_DATASET_SELECTION_AMBIGUOUS
 from agentprops.validation import (
     FILL_RULES,
     RULE_REGISTRY,
@@ -48,7 +51,7 @@ from agentprops.validation import (
     TARGETS,
 )
 from agentprops.validation.context import WARNING_RULES
-from catalogue import parse_catalogue_ids, parse_runtime_codes
+from catalogue import parse_catalogue_ids, parse_runtime_codes, parse_runtime_warnings
 from corpus import CASES, COVERED_RULE_IDS, RAW_TEXT_CASES
 
 #: Resolved from this module, never from the CWD (ruling R-22): as written in
@@ -249,6 +252,46 @@ def test_the_parser_excludes_the_response_code_table() -> None:
         "ruling R-03 deletes RT-E05: a loop drawing past its pool is a pool_exhausted warning, "
         "never an error, because the service never gates"
     )
+
+
+def test_the_runtime_codes_match_the_documented_table() -> None:
+    """M6's drift guard, in the shape M4 put on the ``AP-*`` codes.
+
+    ``RT-*`` is a *closed* set - four codes, tabulated in section 3.4 and
+    exported from `models/errors.py` - so equality is the right assertion, and
+    it is what pins ruling R-03's deletion of RT-E05 from **both** sides at
+    once: a re-added constant fails here, and so does a re-added table row.
+    """
+    assert parse_runtime_codes(CATALOGUE_PATH) == RUNTIME_ERROR_CODES, (
+        f"documented but not defined: "
+        f"{sorted(parse_runtime_codes(CATALOGUE_PATH) - RUNTIME_ERROR_CODES)}; "
+        f"defined but not documented: "
+        f"{sorted(RUNTIME_ERROR_CODES - parse_runtime_codes(CATALOGUE_PATH))}"
+    )
+    assert "RT-E05" not in RUNTIME_ERROR_CODES
+
+
+def test_the_warning_vocabulary_is_the_documented_three_plus_named_additions() -> None:
+    """Ruling R-22, both halves - and they pull in opposite directions.
+
+    The *vocabulary* is open: ``Warning.code`` is a plain string so a tool may
+    add a code without a model change. The *table* is closed: contracts 3.4
+    tabulates three codes and :data:`RUNTIME_WARNING_CODES` must be exactly
+    those, so a fourth cannot be smuggled into the shared constant.
+
+    An addition therefore lives in the module that attaches it, and the two
+    there are asserted by name so this test says what the arrangement is rather
+    than only what it forbids: ``blueprint_version_missing`` on
+    ``blueprint_diff`` (M4) and ``dataset_selection_ambiguous`` on ``run_start``
+    (M6). PRD 5.4's ``unresolved_step`` is **not** among them: R-22 records that
+    it was superseded by RT-E01/RT-E02 rather than dropped by accident.
+    """
+    assert parse_runtime_warnings(CATALOGUE_PATH) == RUNTIME_WARNING_CODES
+    additions = {WARNING_BLUEPRINT_VERSION_MISSING, WARNING_DATASET_SELECTION_AMBIGUOUS}
+    assert additions & RUNTIME_WARNING_CODES == set(), (
+        "a tool-local warning code must not also be in the shared constant"
+    )
+    assert "unresolved_step" not in RUNTIME_WARNING_CODES | additions
 
 
 def test_the_skeleton_rules_are_documented_and_implemented() -> None:

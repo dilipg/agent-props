@@ -26,8 +26,20 @@ entry here **fails** :func:`test_every_integer_parameter_on_the_surface_is_cover
 rather than being silently skipped. That is the same arrangement
 `test_tool_surface.py` uses for tool coverage and `DEFERRED`.
 
-M6 will add `iteration` on `fetch_step` and `limit`/`offset` on `run_find`. It
-will find out here.
+M6 added `iteration` on `fetch_step` and `limit`/`offset` on `run_find`, and it
+**did** find out here: the enumeration failed with those three pairs named
+before any of them had a case. That is the guard working as designed rather
+than a story about how it would have.
+
+The three answer differently, and the difference is the distinction
+`limits.py` draws. `run_find`'s `limit` and `offset` are *quantities* and are
+clamped, so an out-of-range page size still returns rows. `fetch_step`'s
+`iteration` is an *identifier* of a step within a run - the M4 fix-round entry
+names it as such - so it is refused with **RT-E02** rather than clamped. R-03
+is untouched by that: every *storable* index past the end of the pool still
+serves the last entry and warns, which
+`test_service_runs.py::test_iterating_past_the_pool_is_never_an_error_however_far`
+asserts at ``MAX_STORED_INT``.
 
 Why the assertion is behavioural
 --------------------------------
@@ -57,7 +69,14 @@ import pytest
 
 from agentprops.models import Dataset
 from agentprops.server import mcp
-from agentprops.service import MAX_STORED_INT, MIN_STORED_INT, ServiceContext, blueprints, storable
+from agentprops.service import (
+    MAX_STORED_INT,
+    MIN_STORED_INT,
+    ServiceContext,
+    blueprints,
+    runs,
+    storable,
+)
 from agentprops.service.limits import clamp
 from conftest import load_document
 from toolclient import attempt, connected, invoke
@@ -69,6 +88,13 @@ OUT_OF_RANGE: Final[tuple[int, ...]] = (MAX_STORED_INT + 1, MIN_STORED_INT - 1)
 
 GOLDEN_DATASET: Final = "datasets/priya-missing-docs.json"
 GOLDEN_BLUEPRINT: Final = "blueprints/location-onboarding-1.0.0.json"
+
+#: A run the `seeded` fixture starts, so ``fetch_step``'s integer parameter has
+#: somewhere to land. M6's `iteration` reaches ``run_steps.iteration``, which is
+#: an ``INTEGER`` column, so the case needs a real run and a real pool node -
+#: exactly the arguments no input schema can supply.
+GOLDEN_RUN: Final = "m6-bounds-run"
+POOL_NODE: Final = "request_docs"
 
 
 def integer_parameters() -> set[tuple[str, str]]:
@@ -120,14 +146,25 @@ COVERED: Final[dict[tuple[str, str], tuple[dict[str, Any], int]]] = {
         {"agent_id": "location-onboarding", "version": "1.0.0", "labels": labels()},
         20260908,
     ),
+    ("fetch_step", "iteration"): ({"run_id": GOLDEN_RUN, "node_id": POOL_NODE}, 1),
+    ("run_find", "limit"): ({}, 50),
+    ("run_find", "offset"): ({}, 0),
 }
 
 
 @pytest.fixture
 def seeded(context: ServiceContext) -> Iterator[ServiceContext]:
-    """The published blueprint and the golden dataset, so every case reaches the store."""
+    """The published blueprint, the golden dataset, and one started run.
+
+    The run is what makes ``fetch_step``'s case non-vacuous: without it the tool
+    answers RT-E03 before it ever looks at `iteration`, which is the same shape
+    of vacuity that would have let this guard pass against the code M5 shipped
+    broken.
+    """
     blueprints.upsert(context, load_document(GOLDEN_BLUEPRINT), publish=True)
     context.store.put_dataset(Dataset.model_validate(load_document(GOLDEN_DATASET)))
+    started = runs.start(context, GOLDEN_RUN, "location-onboarding", {"dataset_id": dataset_id()})
+    assert started.ok, started
     yield context
 
 
