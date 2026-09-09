@@ -1456,6 +1456,64 @@ the URL in the skip-or-connect message says what.
 
 **Cost if wrong.** None; these are a constant, a config knob and a documented caveat.
 
+### R-60 — the backend test defaults move off 27017 and 5432
+
+R-59(b) recorded the wrong-server hazard and mitigated it with overridable compose ports plus
+skip messages naming the URL. **That mitigation is insufficient, and there are now three
+occurrences.**
+
+1. M7's first `--store mongo` run passed against an unrelated host MongoDB.
+2. It recurred while the implementer measured the containerless count: 14 Mongo tests ran
+   against the host server, leaving a stray `agentprops_conformance` database there.
+3. **The controller's own verification run hit it.** With no compose containers up, my gate
+   returned **1384 passed / 17 skipped**, against the implementer's 1400/1 (servers up) and
+   1370/31 (both URLs at dead ports). The difference is exactly **14** — the same 14 Mongo
+   tests, against the same foreign server. Both 27017 and 5432 are open on this machine with
+   nothing of ours running.
+
+So the reported test count is not reproducible without knowing what happened to be listening,
+which makes it evidence of very little. That is the real cost: not a corrupted foreign
+database, but a number nobody can trust.
+
+**Ruling.** Remove the collision structurally rather than by convention. `docker-compose.yml`
+publishes Mongo and Postgres on **non-default host ports** — 27117 and 5442 — and the default
+test URLs match. A foreign server on 27017 or 5432 then cannot be reached by accident; only
+an explicit `AGENTPROPS_TEST_*_URL` or `AGENTPROPS_*_PORT` override can point at one, which
+is a deliberate act rather than a default.
+
+The container-internal ports stay 27017 and 5432. This changes only what the host publishes
+and what the test defaults dial.
+
+**Why structural and not a runtime probe.** A sentinel check ("is this our schema?") adds a
+round trip, a failure mode, and a thing to explain — and it still runs against the foreign
+server to find out. Choosing a port nobody else uses ends the question. Two occurrences was a
+pattern and R-50 already set the precedent that three is a policy failure; this is the third.
+
+**Also required:** state the true containerless number in the report — both URLs unreachable
+— because that is the figure CI produces, and record that any backend count is meaningless
+without the URL beside it.
+
+**Cost if wrong.** Anyone with muscle memory for `psql -p 5432` against the shared profile
+needs `-p 5442`; the compose file and the skip messages both name the port.
+
+### R-61 — `alembic check` after a full suite run is fixture residue, not drift
+
+M7 reported that `uv run alembic check` fails against the shared Postgres test database after
+a full suite run: the fixture's `downgrade base` empties `alembic_version`, then `create_all`
+recreates the tables unstamped. Reset plus `upgrade head` is clean and idempotent.
+
+**Ratified as diagnosed, with one requirement.** The milestone's acceptance evidence —
+"`alembic upgrade head` then `alembic check` clean against real Postgres" — is only
+reproducible **from a clean database**, so the report must say so beside the pasted output.
+An acceptance claim whose reproduction depends on unstated state is the same defect as a test
+count whose meaning depends on what was listening.
+
+The residue itself is correct behaviour for a test fixture that owns its schema. Do not make
+the fixture stamp `alembic_version` to keep `alembic check` happy — that would make the check
+pass by fabricating the state it exists to verify.
+
+**Cost if wrong.** A documented reset step before running the check.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
