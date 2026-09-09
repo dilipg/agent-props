@@ -8,12 +8,13 @@ So every write here is tested three times: the first call, the identical repeat,
 and the divergent repeat - and the three have three different answers:
 
 - the first call succeeds;
-- the identical repeat is a **no-op success that says so** -
-  ``step_actual_already_recorded`` or ``run_already_finished`` - because R-65
-  asks for "no-op success **with a warning**": nothing changed, and saying so is
-  honest. A retry after a network blip must be safe, and it is also worth a
-  word. Both tests assert the *first* call is silent as well, or a warning
-  attached unconditionally would satisfy them;
+- the identical repeat is a **silent no-op success**. A caller repeating a
+  write is a client retrying after a timeout - the case R-53 kept ``run_start``
+  idempotent for - so success is the *expected* outcome and there is nothing to
+  report. R-65's first draft asked for a warning here and M8's fix round
+  implemented one; the ruling was amended, because its two cited precedents both
+  point the other way - R-29's re-publish is silent, R-47's CAS loser errors -
+  and a vocabulary that fires on expected outcomes trains callers to ignore it;
 - the divergent repeat is **``ok: false`` with ``AP-007``**, and **nothing is
   written**. M8 first shipped it as a warning on a success envelope; R-65
   corrected that, because ``ok: true`` for a refused write is the same class of
@@ -65,7 +66,6 @@ from agentprops.service.runs import (
     STATUS_ABANDONED,
     STATUS_FINISHED,
     WARNING_RUN_ALREADY_FINISHED,
-    WARNING_STEP_ACTUAL_ALREADY_RECORDED,
 )
 from agentprops.storage import StoreError
 from conftest import FROZEN_NOW, load_document
@@ -166,16 +166,14 @@ def test_the_record_key_is_the_resolved_one(started: ServiceContext) -> None:
     }
 
 
-def test_recording_the_same_actual_twice_is_a_no_op_that_says_so(
-    started: ServiceContext,
-) -> None:
-    """The retry case, and R-65's other half: a success, and it **speaks**.
+def test_recording_the_same_actual_twice_is_a_silent_no_op(started: ServiceContext) -> None:
+    """The retry case, and R-65 as amended: a success, and it says **nothing**.
 
-    "The caller's intent is already satisfied, nothing changed, and saying so is
-    honest" - so the identical repeat is ``ok: true`` with
-    ``step_actual_already_recorded``, where the *first* call says nothing. Both
-    halves are asserted here, because a warning attached unconditionally would
-    satisfy the second alone.
+    A caller re-recording an identical actual is a client retrying after a
+    timeout, so success is the *expected* outcome and a warning on an expected
+    outcome is noise. Both responses are asserted silent, and so is the run - a
+    retry that flagged the run would leave a permanent marker on it, because
+    R-54(b)'s merge key would record it once per run forever.
 
     ``recorded_at`` is compared as well as ``actual``: a second write that
     happened to store the same document would still move the timestamp, and the
@@ -190,17 +188,11 @@ def test_recording_the_same_actual_twice_is_a_no_op_that_says_so(
     second = record(started, actual, node_id=POOL_NODE, iteration=0)
 
     assert first.ok and second.ok, "an identical re-record is a success (ruling R-65)"
-    assert codes(first) == [], "the first record has nothing to report"
-    assert codes(second) == [WARNING_STEP_ACTUAL_ALREADY_RECORDED]
+    assert codes(first) == [] and codes(second) == [], "a retry is not an event"
     assert data(first)["record"]["step"] == data(second)["record"]["step"], (
         "the repeat moved recorded_at, so it was not a no-op"
     )
-
-    detail = warnings_of(second)[0].detail
-    assert detail["node_id"] == POOL_NODE and detail["iteration"] == 0
-    assert [item["code"] for item in stored_run(started)["warnings"]] == [
-        WARNING_STEP_ACTUAL_ALREADY_RECORDED
-    ], "contracts 3.4: a warning is attached to the response and to the stored run"
+    assert stored_run(started)["warnings"] == [], "a retry flagged the run"
 
 
 def test_a_differing_actual_is_refused_and_writes_nothing(started: ServiceContext) -> None:
@@ -387,37 +379,25 @@ def test_run_finish_closes_the_run(started: ServiceContext) -> None:
     assert stored["finished_at"] == run["finished_at"]
 
 
-def test_finishing_twice_with_the_same_values_is_a_no_op_that_says_so(
-    started: ServiceContext,
-) -> None:
-    """The retry case again, and it reuses the code ``fetch_step`` already has.
+def test_finishing_twice_with_the_same_values_is_a_silent_no_op(started: ServiceContext) -> None:
+    """The retry case again, and the response is identical to the first.
 
-    An identical re-finish reports ``run_already_finished`` - the same code and
-    the same detail a ``fetch_step`` against a closed run attaches, because the
-    condition *is* the same: this run is already closed. No new code was needed
-    for R-65's no-op half here, which is the argument for reusing it.
+    A retry is meant to be indistinguishable from the call it retries, so the
+    two payloads are compared **whole** rather than field by field - which is
+    only possible because nothing is attached to the second.
 
-    The lifecycle fields are compared rather than the whole run, because the
-    second call's payload legitimately carries the warning the first one had
-    nothing to report.
+    ``run_already_finished`` is deliberately absent: that code belongs to the
+    **read** path, where it means "a finished run served you a fixture anyway"
+    (R-54(c), ratified by R-67(a)). A write is not serving, so attaching it here
+    would say something else under the same name.
     """
     first = runs.finish(started, RUN_ID, EXPECTED_FINAL, STATUS_FINISHED)
     second = runs.finish(started, RUN_ID, EXPECTED_FINAL, STATUS_FINISHED)
 
     assert first.ok and second.ok
-    assert codes(first) == [], "the call that closed the run has nothing to report"
-    assert codes(second) == [WARNING_RUN_ALREADY_FINISHED]
-
-    closed = data(first)["run"]
-    again = data(second)["run"]
-    for field in ("status", "outcome", "finished_at", "started_at", "steps"):
-        assert again[field] == closed[field], f"the repeat changed {field}"
-    assert [item["code"] for item in again["warnings"]] == [WARNING_RUN_ALREADY_FINISHED], (
-        "the returned run carries the warning this call attached"
-    )
-    assert [item["code"] for item in stored_run(started)["warnings"]] == [
-        WARNING_RUN_ALREADY_FINISHED
-    ]
+    assert codes(first) == [] and codes(second) == [], "a retry is not an event"
+    assert data(first)["run"] == data(second)["run"], "the repeat changed the run"
+    assert stored_run(started)["warnings"] == []
 
 
 def test_a_diverging_second_finish_is_refused_and_writes_nothing(
@@ -608,20 +588,25 @@ def test_a_fresh_step_is_still_servable_after_the_run_is_closed(started: Service
     assert stored_step(started, "verify_compliance")["served"] == data(reply)["step"]["fixture"]
 
 
-def test_a_closed_run_still_records_and_says_so(started: ServiceContext) -> None:
-    """``record_step`` takes the same "warn, never refuse" answer.
+def test_a_closed_run_still_records_and_says_nothing(started: ServiceContext) -> None:
+    """``record_step`` never refuses a closed run - and never warns about one either.
 
-    An agent still reporting actuals after its harness closed the run is the
-    same defect as one still fetching, and the evidence is worth keeping either
-    way.
+    The evidence is worth keeping whatever the run's lifecycle says, so the
+    actual lands. But ``run_already_finished`` is **not** attached: that code is
+    the read path's, where it means "a finished run served you a fixture anyway"
+    (R-54(c), ratified by R-67(a)), and a write is not serving. Both halves are
+    asserted - it records, and it is silent - because a test that only checked
+    the record would pass with the warning back.
     """
     fetch(started, node_id="receive_request")
     runs.finish(started, RUN_ID, EXPECTED_FINAL, STATUS_FINISHED)
 
-    reply = record(started, {"store_id": "store_bengaluru_04"}, node_id="receive_request")
+    actual = {"store_id": "store_bengaluru_04"}
+    reply = record(started, actual, node_id="receive_request")
     assert reply.ok
-    assert codes(reply) == [WARNING_RUN_ALREADY_FINISHED]
-    assert stored_step(started, "receive_request")["actual"] == {"store_id": "store_bengaluru_04"}
+    assert codes(reply) == [], "run_already_finished belongs to the read path"
+    assert stored_step(started, "receive_request")["actual"] == actual
+    assert stored_run(started)["warnings"] == [], "a write flagged the run lifecycle"
 
 
 def test_the_closed_run_warning_is_recorded_once_however_many_calls(

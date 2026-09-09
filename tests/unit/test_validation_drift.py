@@ -46,7 +46,6 @@ from agentprops.service.runs import (
     WARNING_DATASET_SELECTION_AMBIGUOUS,
     WARNING_RUN_ALREADY_FINISHED,
     WARNING_RUN_START_MISMATCH,
-    WARNING_STEP_ACTUAL_ALREADY_RECORDED,
 )
 from agentprops.validation import (
     FILL_RULES,
@@ -292,12 +291,18 @@ def test_the_warning_vocabulary_is_the_documented_three_plus_named_additions() -
     ``run_start_mismatch`` on ``run_start`` (M6, rulings R-54(a) and R-53).
     ``expansion_added_nothing`` is M7's, on ``dataset_expand``: a ``count`` of
     zero is a well-formed request that adds nothing, and the service does not
-    refuse well-formed requests. M8's two are ``run_already_finished`` (ruling
-    R-54(c), and R-65's no-op half for ``run_finish``) and
-    ``step_actual_already_recorded`` (R-65). M8 also added
-    ``step_actual_conflict`` and ``run_finish_mismatch`` and **R-65 removed
-    them**: a re-write whose value *differs* is ``AP-007`` on an ``ok: false``
-    envelope, not a warning on a success. PRD 5.4's ``unresolved_step`` is **not** among
+    refuse well-formed requests. M8's **one** is ``run_already_finished``
+    (ruling R-54(c), ratified by R-67(a)), on the read path: a finished run
+    still serves and says so.
+
+    M8 shipped two more and lost both, which is worth knowing so neither is
+    reinvented. ``step_actual_conflict`` and ``run_finish_mismatch`` became
+    ``AP-007`` on an ``ok: false`` envelope, because a re-write whose value
+    *differs* did not happen (R-65). And ``step_actual_already_recorded``,
+    added for the *identical* half when R-65's first draft asked for "a no-op
+    success with a warning", went when that was amended: a retry is the
+    expected outcome, and a vocabulary that fires on expected outcomes trains
+    callers to ignore it. PRD 5.4's ``unresolved_step`` is **not** among
     them: R-22 records that it was superseded by RT-E01/RT-E02 rather than
     dropped by accident.
 
@@ -312,7 +317,6 @@ def test_the_warning_vocabulary_is_the_documented_three_plus_named_additions() -
         WARNING_EXPANSION_ADDED_NOTHING,
         WARNING_RUN_ALREADY_FINISHED,
         WARNING_RUN_START_MISMATCH,
-        WARNING_STEP_ACTUAL_ALREADY_RECORDED,
     }
     assert additions & RUNTIME_WARNING_CODES == set(), (
         "a tool-local warning code must not also be in the shared constant"

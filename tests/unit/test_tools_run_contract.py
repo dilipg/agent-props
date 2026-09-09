@@ -380,11 +380,11 @@ async def test_a_repeated_write_answers_by_whether_the_value_differs(
     The two halves have two different envelopes and this asserts each against
     the other, in one session, so neither can be read as the general case:
 
-    - the **identical** repeat is a success carrying
-      ``step_actual_already_recorded`` or ``run_already_finished`` - R-65's
-      "no-op success with a warning": a retry must be safe *and* visible. The
-      *first* call of each pair is asserted silent in the same breath, so a
-      warning attached unconditionally would not pass;
+    - the **identical** repeat is a **silent** success - R-65 as amended: a
+      retry after a timeout is the *expected* outcome, so there is nothing to
+      report, and a vocabulary that fires on expected outcomes trains callers to
+      ignore it. Asserted on the response *and* on the stored run, because a
+      warning merged onto the run would outlive the request that caused it;
     - the **differing** one is ``ok: false`` with ``AP-007``, and the stored
       value is unchanged afterwards, which is the assertion that makes it a
       refused *write* rather than a rejected argument.
@@ -410,7 +410,7 @@ async def test_a_repeated_write_answers_by_whether_the_value_differs(
             client, "record_step", run_id=RUN_ID, actual=first, node_id=POOL_NODE, iteration=0
         )
         assert repeated["ok"] is True, "an identical re-record is a no-op success (ruling R-65)"
-        assert codes(repeated) == ["step_actual_already_recorded"], "and it says so"
+        assert codes(repeated) == [], "and it is silent"
         assert repeated["data"]["record"]["step"]["actual"] == first
 
         refused = await invoke(
@@ -436,10 +436,8 @@ async def test_a_repeated_write_answers_by_whether_the_value_differs(
             client, "run_finish", run_id=RUN_ID, outcome=outcome, status="finished"
         )
         assert again["ok"] is True, "an identical re-finish is a no-op success"
-        assert codes(again) == ["run_already_finished"], "the code fetch_step already uses"
-        assert again["data"]["run"]["status"] == closed["data"]["run"]["status"]
-        assert again["data"]["run"]["outcome"] == closed["data"]["run"]["outcome"]
-        assert again["data"]["run"]["finished_at"] == closed["data"]["run"]["finished_at"]
+        assert codes(again) == [], "run_already_finished belongs to the read path"
+        assert again["data"]["run"] == closed["data"]["run"], "the repeat changed the run"
 
         diverging = await invoke(
             client,
@@ -457,7 +455,7 @@ async def test_a_repeated_write_answers_by_whether_the_value_differs(
         assert stored["data"]["run"]["status"] == "finished", "the refused finish wrote anyway"
         assert stored["data"]["run"]["outcome"] == outcome
         assert stored["data"]["run"]["steps"][0]["actual"] == first
-        assert sorted(item["code"] for item in stored["data"]["run"]["warnings"]) == [
-            "run_already_finished",
-            "step_actual_already_recorded",
-        ], "the run records the two no-ops and nothing from the two refusals"
+        assert stored["data"]["run"]["warnings"] == [], (
+            "four writes on one run - two that landed, two no-ops and two refusals - and none "
+            "of them is an event the run should carry"
+        )
