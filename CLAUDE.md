@@ -11,8 +11,9 @@ timeline, a narrative, an expected outcome. A running agent calls `fetch_step` o
 step's fixture back. It inverts "mock each tool call" into "author the world once, then run the agent
 through it".
 
-Phase 1 is eleven milestones, M0 to M11, defined in
-[docs/build-handoff.md](docs/build-handoff.md) section 4. Build one milestone per session, in order.
+Phase 1 is eleven milestones, **M0 to M10**, defined in
+[docs/build-handoff.md](docs/build-handoff.md) section 4. **M11, the TypeScript client, was
+descoped by the owner — do not build it (R-68).** Build one milestone per session, in order.
 Each milestone's acceptance criteria are the gate: do not start one until the previous one's
 criteria pass. **M0 through M8 are built:** the models, the validator, all three storage adapters,
 the MCP surface, the skeleton pipeline, the runtime read path, the containers, the promotion path

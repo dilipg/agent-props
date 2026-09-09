@@ -1687,6 +1687,42 @@ stale-read one. That is the fifth self-caught instance in this build of a test p
 than it claimed, and every one of the five was caught by an implementer rather than a
 reviewer.
 
+## Owner scope decisions
+
+### R-68 — M11, the TypeScript client, is descoped
+
+**Owner decision, 2026-09-09: do not build the TypeScript client.** Phase 1 ends at M10.
+
+Unlike every other entry in this register, this is not a correction or an interpretation — it
+is a scope decision from the product owner, recorded here because this file is what every
+session reads and a milestone section that still says "build this" is exactly the kind of
+stale instruction this build has spent nine milestones learning to distrust.
+
+**Verified before recording:** nothing in the project referenced M11 or a TypeScript client —
+the only matches were third-party noise in `.venv` — and `client/typescript/` was never
+created. So there is no residue to unwind and no dependency to sever. M11 was deliberately
+placed last precisely so the contract would be settled by real Python usage first, which
+means dropping it forfeits nothing already built.
+
+**What is lost:** the cross-client property in M11's acceptance criteria — "run ids generated
+by either client are accepted by the other's server session" — is now untestable, because
+there is only one client. That property was never a service-side guarantee: R-10 puts run id
+generation in the client, and the service accepts any string, so the invariant it would have
+proved is simply "the service does not care where the id came from". That is already asserted
+by the Python client's own tests.
+
+**The one bookkeeping consequence**, which is a small pleasure: `build-handoff.md` section 8
+said "All eleven milestones accepted" while the plan listed twelve (M0..M11), and R-22
+recorded that as a slip. With M11 dropped the count is eleven again, so the line is correct as
+originally written.
+
+`docs/build-handoff.md`'s M11 section is marked descoped with its original text preserved as a
+block quote, and `CLAUDE.md` states the new end of phase 1.
+
+**Cost if reversed.** The Python client and its end-to-end script are the contract a
+TypeScript port would mirror, and both are complete and reviewed — so a later port starts from
+a settled contract rather than a moving one, which was M11's whole rationale for being last.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
