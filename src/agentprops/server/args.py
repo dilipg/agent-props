@@ -68,6 +68,7 @@ __all__ = [
     "ObjectArg",
     "OptionalObjectArg",
     "OptionalTextArg",
+    "OptionalTextArrayArg",
     "RequiredIntArg",
     "TextArg",
     "reply",
@@ -90,6 +91,15 @@ BoolArg = Annotated[object, Field(json_schema_extra={"type": "boolean"})]
 
 #: An optional integer.
 IntArg = Annotated[object, Field(json_schema_extra={"type": ["integer", "null"]})]
+
+#: An optional array of strings. ``items`` is advertised alongside ``type``
+#: because an LLM reading the schema needs to know what goes *in* the array, and
+#: ``dataset_export``'s ``dataset_ids`` is the only array parameter on the
+#: surface - so an untyped one would be untyped everywhere it appears.
+OptionalTextArrayArg = Annotated[
+    object,
+    Field(json_schema_extra={"type": ["array", "null"], "items": {"type": "string"}}),
+]
 
 #: A required integer, advertised as one. Separate from :data:`IntArg` because
 #: the published schema is what an LLM caller reads: ``dataset_skeleton``'s
@@ -199,6 +209,33 @@ class ArgReader:
             self._reject(name, value, f"an integer no wider than 64 bits (got {value})")
             return 0
         return value
+
+    def text_array(self, name: str, value: object) -> list[str] | None:
+        """An array of strings, or ``None`` when the argument was omitted.
+
+        ``dataset_export``'s ``dataset_ids``. Absence and emptiness are
+        different answers and the tool depends on it: omitted means "export
+        every discoverable dataset for this agent", while ``[]`` means "export
+        these zero datasets" and produces an empty bundle. Collapsing the two
+        would make an empty array quietly export everything, which is the wrong
+        direction for a tool whose output another machine imports.
+
+        A non-string element is rejected with a pointer at that index
+        (``/dataset_ids/2``) rather than at the whole argument, the same way
+        :meth:`labels` points at the offending dimension.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            self._reject(name, value, "an array of strings or null")
+            return None
+        coerced: list[str] = []
+        for index, item in enumerate(value):
+            if isinstance(item, str):
+                coerced.append(item)
+            else:
+                self._reject(name, item, "a string", target=field_pointer(name, index))
+        return coerced
 
     def mapping(self, name: str, value: object) -> dict[str, Any]:
         """A required JSON object, as a plain ``dict``.

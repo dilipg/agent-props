@@ -1,13 +1,18 @@
 """The eight dataset tools. contracts section 4, Dataset table.
 
-Four are M4's reads, one is ``dataset_validate``, and the last three are M5's
-skeleton pipeline. ``dataset_expand``, ``dataset_export`` and ``dataset_import``
-are M7's: they go in this module, decorated the same way, and inherit the same
-plumbing.
+Four are M4's reads, one is ``dataset_validate``, three are M5's skeleton
+pipeline, and the last three are M7's - ``dataset_expand``, ``dataset_export``
+and ``dataset_import``, decorated the same way and inheriting the same
+plumbing, which is what "eight" became "eleven" without a new module.
 
-``dataset_submit`` is the **only tool on this surface that writes a dataset** -
-ground rule 1's "nothing writes to a dataset except the authoring flow". All of
-the behaviour is in `service/skeletons.py`; each function here reads its
+**Three tools on this surface write a dataset**, and all three are the
+authoring flow rather than the runtime: ``dataset_submit`` (`service/skeletons.py`),
+``dataset_expand`` (`service/expansion.py`) and ``dataset_import``
+(`service/promotion.py`). Ground rule 1 is about the *runtime* - "nothing writes
+to a dataset except the authoring flow" - and
+`tests/unit/test_runtime_is_read_only.py` enumerates those three ``put_dataset``
+call sites by name, so a fourth is a visible decision rather than a silent
+widening. All of the behaviour is in `service/`; each function here reads its
 arguments and delegates, the same shape as every other tool in this package.
 
 ``dataset_validate`` is here rather than at M5 because ruling R-15 assigns it to
@@ -29,17 +34,21 @@ from agentprops.server.args import (
     ObjectArg,
     OptionalObjectArg,
     OptionalTextArg,
+    OptionalTextArrayArg,
     RequiredIntArg,
     TextArg,
     reply,
 )
-from agentprops.service import datasets, failure, skeletons
+from agentprops.service import datasets, expansion, failure, promotion, skeletons
 
 __all__ = [
     "dataset_archive",
+    "dataset_expand",
+    "dataset_export",
     "dataset_fill_part",
     "dataset_find",
     "dataset_get",
+    "dataset_import",
     "dataset_restore",
     "dataset_skeleton",
     "dataset_submit",
@@ -186,3 +195,68 @@ def dataset_submit(skeleton_id: TextArg) -> dict[str, Any]:
     if args.errors:
         return reply(failure(args.errors))
     return reply(skeletons.submit(bound(), wanted))
+
+
+@mcp.tool()
+def dataset_expand(dataset_id: TextArg, node_id: TextArg, count: RequiredIntArg) -> dict[str, Any]:
+    """Add `count` deterministic entries to a pool node, as a new dataset version.
+
+    Seeded from the dataset's own `seed` and the entry's position in the pool,
+    so the same request always produces the same entries and expanding by 5
+    equals expanding by 2 then 3. Each new entry is a copy of one of the
+    node's authored fixtures with its `latency_hint_ms` varied; expansion fills
+    volume, it does not invent fixture content.
+
+    Copy-on-write, like every dataset edit: the pre-expansion version stays
+    readable. An expansion that would push a loop node's pool past
+    `max_iterations` is refused with `DS-023`, naming both numbers, and stores
+    nothing. `count` is at most 10000 per call.
+    """
+    args = ArgReader()
+    wanted = args.text("dataset_id", dataset_id)
+    node = args.text("node_id", node_id)
+    many = args.integer("count", count)
+    if args.errors:
+        return reply(failure(args.errors))
+    return reply(expansion.expand(bound(), wanted, node, many))
+
+
+@mcp.tool()
+def dataset_export(agent_id: TextArg, dataset_ids: OptionalTextArrayArg = None) -> dict[str, Any]:
+    """Export a portable bundle: the datasets plus the blueprint versions they need.
+
+    Omit `dataset_ids` to export every discoverable dataset for the agent, at
+    its latest version, in `dataset_find` order. Name them to export those
+    lineages, archived or not, in the order given; an id that names nothing, or
+    a dataset belonging to another agent, is `AP-004`.
+
+    The bundle is `{format, format_version, agent_id, blueprints, datasets}` and
+    is what `dataset_import` takes. Feed it to `dataset_import` on another
+    store to promote a locally authored dataset to a shared one.
+    """
+    args = ArgReader()
+    agent = args.text("agent_id", agent_id)
+    wanted = args.text_array("dataset_ids", dataset_ids)
+    if args.errors:
+        return reply(failure(args.errors))
+    return reply(promotion.export_bundle(bound(), agent, wanted))
+
+
+@mcp.tool()
+def dataset_import(bundle: ObjectArg) -> dict[str, Any]:
+    """Import a `dataset_export` bundle, re-running full validation on arrival.
+
+    Every blueprint is checked against the whole `BP-*` catalogue and every
+    dataset against the whole `DS-*` catalogue, against *this* store - so
+    DS-001 and DS-031, which are existence checks, are answered here rather
+    than trusted from wherever the bundle came from. Nothing is written unless
+    all of it passes, and each finding's pointer names which document in the
+    bundle it came from (`/datasets/2/provenance/title`).
+
+    Returns the `{agent_id, version}` of each blueprint published and the
+    `{id, version}` of each dataset stored. Version numbers are allocated by
+    this store, so an imported dataset starts at version 1; `created_at` is
+    authored content and survives, which is what keeps `dataset_find`'s
+    ordering identical on both sides.
+    """
+    return reply(promotion.import_bundle(bound(), bundle))
