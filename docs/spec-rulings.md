@@ -1567,6 +1567,34 @@ thing whose blast radius is currently unbounded, so it is the right place to bou
 mid-suite; a dropped-on-session-exit cleanup plus a documented sweep covers it, and a stray
 *named* database is far easier to reason about than two runs racing in one.
 
+## Rulings that bind M8 (the Python client)
+
+### R-64 — the idempotency re-fetch uses `node_id`, and "the same key" means the same step
+
+This settles finding F-26, deferred from the pre-flight scan.
+
+`worked-example.md` section 7 step 8 says: "Re-fetch step 2 with the same key. Must return
+byte-identical output and add no path entry." Step 2 was fetched **by tool name**
+(`fetch_store_profile`). By the time step 8 runs, the run's path head has advanced to the end
+of the walk — so a re-fetch by tool name resolves against a *different* position and either
+resolves elsewhere or returns RT-E01. The idempotency proof would fail for a reason that has
+nothing to do with idempotency.
+
+**Ruling.** "The same key" means **the same step**, not the same argument shape. Step 8
+re-fetches by **`node_id`** — which is also what `contracts.md` section 5 recommends
+generally ("this is what the CLI and generated code should emit") and what RT-E01's candidate
+list exists to let a caller retry with.
+
+This is not a workaround. Idempotency is defined on the **resolved** key
+`(run_id, resolved_node_id, iteration)`, per the Protocol. Tool-name addressing is a
+convenience for reaching a step from inside an agent that knows only what tool it is calling;
+re-fetching a *known* step is exactly the case where the explicit id is correct.
+
+**Cost if wrong.** If the intent really was to prove tool-name re-fetch is idempotent, that
+is a different and stronger property — it would require resolution to be position-independent
+for unique tool names, which it already is, and a separate test should assert that directly
+rather than smuggling it into step 8.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
