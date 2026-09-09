@@ -28,13 +28,21 @@ codebase for two dialects is that the list stays short and known.
    silently, so this type normalises to UTC on the way in and re-attaches UTC on
    the way out; without it a timestamp written as ``10:14:22Z`` reads back naive
    and compares unequal to what was stored.
-3. :data:`POSTGRES_ONLY_INDEXES` - ``datasets_labels_gin`` and
-   ``datasets_search``, which contracts section 7 says have no SQLite
-   equivalent. They are created by the migration inside a dialect branch and
-   filtered out of Alembic's autogenerate comparison, so neither dialect sees
-   drift.
+3. :data:`POSTGRES_ONLY_INDEXES` - ``datasets_labels_gin``, which contracts
+   section 7 says has no SQLite equivalent. It is created by the migration
+   inside a dialect branch and filtered out of Alembic's autogenerate
+   comparison, so neither dialect sees drift. (Section 7 declared a second one,
+   ``datasets_search``; M7 dropped it. See the constant.)
 4. The engine factory's SQLite ``PRAGMA foreign_keys=ON``, which makes SQLite
    enforce the DDL's foreign keys the way Postgres always does.
+5. :meth:`SqlStore._byte_ordered` - ``COLLATE "C"`` on a ``TEXT`` tie-break,
+   on Postgres only. **This one was found at M7 by asking the server**, and it
+   is a real divergence rather than a tidiness: a Postgres database created with
+   ``en_US.utf8`` orders ``'runa'`` before ``'run-b'``, while SQLite (BINARY)
+   and Mongo (byte-wise) both order ``'run-b'`` first. Ruling R-35 requires
+   every list ordering to be **total** so that "identical inputs give
+   byte-identical output on every backend", and a locale-aware tie-break is not
+   that. See the method.
 
 Nothing else in this module asks what dialect it is talking to, and the
 ``q`` filter is the reason that list is short by one: case folding is the place
@@ -45,6 +53,18 @@ and the substring match both happen in Python, once, in
 contract, so M7's Postgres adapter accelerates that query with ``pg_trgm``
 rather than replacing it with full-text search. The conformance suite asserts
 identical *results* across backends, never identical query plans.
+
+What lives in `common.py` instead, and why
+------------------------------------------
+
+The pure predicates two adapters must answer **identically** - the ``q`` case
+fold, the semver ordering, the canonical comparison BP-016 uses - and the
+mappers from a flat record to a model. `storage/common.py` says why at length;
+the short version is ruling R-39(a): the fold is in Python precisely because no
+query expression agrees across the three backends, so a second copy of it in
+`mongo.py` would be the divergence that ruling exists to prevent. The retry
+budgets are there too, because the guard is a unique key on every backend and
+the number is a property of the pattern rather than of the driver.
 
 What this module does not do
 ----------------------------
@@ -63,7 +83,6 @@ return value from the stored row rather than from its argument, so
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -104,17 +123,12 @@ from sqlalchemy.sql import Select
 from sqlalchemy.types import JSON, TypeDecorator
 
 from agentprops.models import (
-    Author,
     Blueprint,
-    BlueprintRef,
     BlueprintSummary,
     Dataset,
     DatasetQuery,
     DatasetSummary,
-    ModelInfo,
-    PathStep,
     Run,
-    RunPin,
     RunQuery,
     RunSummary,
     Skeleton,
@@ -131,6 +145,24 @@ from agentprops.storage.base import (
     Store,
     StoreError,
 )
+from agentprops.storage.common import (
+    FIRST_WRITE_ATTEMPTS,
+    SEQ_ALLOCATION_ATTEMPTS,
+    VERSION_ALLOCATION_ATTEMPTS,
+    blueprint_summary,
+    canonical,
+    dataset_summary,
+    parse_uuid,
+    q_matches,
+    require_uuid,
+    run_from,
+    run_summary,
+    semver_key,
+    skeleton_from,
+    slice_page,
+    step_from,
+    stored_document,
+)
 
 __all__ = [
     "METADATA",
@@ -143,6 +175,7 @@ __all__ = [
     "create_schema",
     "datasets",
     "include_object",
+    "postgres_url",
     "run_steps",
     "runs",
     "skeletons",
@@ -224,9 +257,28 @@ JsonDocument = JSON(none_as_null=True).with_variant(
 #: They are absent from :data:`METADATA` because ``create_all`` would then try
 #: to build a GIN index on SQLite, and they are created by the initial migration
 #: inside a ``dialect.name == "postgresql"`` branch. `migrations/env.py` filters
-#: these names out of autogenerate comparison so that a future ``alembic check``
-#: against Postgres does not propose dropping them.
-POSTGRES_ONLY_INDEXES: Final[frozenset[str]] = frozenset({"datasets_labels_gin", "datasets_search"})
+#: these names out of autogenerate comparison so that ``alembic check`` against
+#: Postgres does not propose dropping them - **verified clean against a real
+#: Postgres 17 at M7**, which is what the M3 report asked M7 to check first.
+#:
+#: ``datasets_search`` **was** the second entry and is gone. Contracts section 7
+#: declared it as a ``to_tsvector`` GIN index; ruling R-36 superseded that by
+#: making ``q`` substring matching by contract, and ruling R-39(a) then moved
+#: the fold and the match into Python because no SQL expression folds case
+#: identically across the three backends. So ``find_datasets`` emits no SQL
+#: text match of any kind, and an index for a query nothing issues is dead
+#: weight on every write. R-36 offers ``pg_trgm`` as the alternative and it
+#: would be equally dead for the same reason: it accelerates ``LIKE``, and
+#: there is no ``LIKE``.
+#:
+#: **An ``ILIKE`` prefilter was measured and rejected**, which is the part worth
+#: recording because R-36 names ``ILIKE`` explicitly. A prefilter is only safe
+#: if it matches a *superset* of the Python fold, and it does not:
+#: ``casefold()`` folds ``ß`` to ``ss`` while Postgres does not, so against a
+#: real Postgres 17 (UTF8, ``en_US.utf8``) ``'Straße operator' ILIKE
+#: '%strasse%'`` is **false** where Python matches - and the reverse pair too.
+#: A prefilter that drops rows the contract promises is worse than a scan.
+POSTGRES_ONLY_INDEXES: Final[frozenset[str]] = frozenset({"datasets_labels_gin"})
 
 
 def include_object(
@@ -243,26 +295,6 @@ def include_object(
     """
     return not (type_ == "index" and name in POSTGRES_ONLY_INDEXES)
 
-
-#: How many characters of ``narrative`` a :class:`DatasetSummary` carries.
-#: Contracts section 2.2.1: "the first 200 characters of narrative".
-NARRATIVE_EXCERPT_CHARS: Final = 200
-
-#: Bounded retries for dataset version allocation. Reached only when another
-#: writer wins the race for the same ``(id, version)`` that many times running.
-VERSION_ALLOCATION_ATTEMPTS: Final = 8
-
-#: Bounded retries for ``run_steps.seq`` allocation, guarded by
-#: ``UNIQUE (run_id, seq)`` (ruling R-37). Same shape, same reason, same number.
-SEQ_ALLOCATION_ATTEMPTS: Final = 8
-
-#: Attempts for a writer whose only race is two concurrent *first* writes of one
-#: key - ``put_blueprint``, ``put_skeleton``, ``put_run``, ``set_step_actual``.
-#: Two is enough: the loser's second pass takes the "row exists" branch, which
-#: is where it belonged all along. On the last attempt the ``IntegrityError`` is
-#: re-raised as itself rather than translated, so a foreign-key violation still
-#: names the constraint it broke.
-FIRST_WRITE_ATTEMPTS: Final = 2
 
 _BACKEND_NAMES: Final[dict[str, str]] = {"sqlite": "sqlite", "postgresql": "postgres"}
 
@@ -465,6 +497,24 @@ def create_engine_for(url: str) -> Engine:
     return engine
 
 
+def postgres_url(url: str) -> str:
+    """``url`` with the psycopg 3 driver named explicitly.
+
+    A plain ``postgresql://host/db`` selects SQLAlchemy's *default* Postgres
+    driver, which is psycopg2 - not a dependency of this project. So a caller
+    that has a URL in the shape every other Postgres client uses (an
+    environment variable, a compose file, ``--store postgres``) passes it
+    through here and gets the one this process can actually open.
+
+    A URL that already names a driver is returned unchanged, so
+    ``postgresql+asyncpg://`` is not silently rewritten to something else.
+    """
+    for prefix in ("postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix) :]
+    return url
+
+
 def sqlite_url(path: str | Path | None = None) -> str:
     """``--store sqlite <path>``, as a URL. ``None`` means in-memory."""
     if path is None:
@@ -483,122 +533,6 @@ def create_schema(engine: Engine) -> None:
     the only thing that makes using it here safe.
     """
     METADATA.create_all(engine)
-
-
-# --------------------------------------------------------------------------
-# small pure helpers
-# --------------------------------------------------------------------------
-
-
-def _canonical(value: Any) -> str:
-    """A stable text form of a JSON value, for identity comparison (ruling R-29).
-
-    Deliberately a duplicate of ``validation.jsonschemas.canonical`` rather than
-    an import of it: `storage/` may import `models/` and nothing else sideways,
-    and BP-016's idempotency check needs exactly the ``json.dumps(sort_keys=True)``
-    comparison R-29 names. Three lines duplicated across a layer boundary is the
-    cheaper of the two prices.
-    """
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-
-
-def _semver_key(version: str) -> tuple[int, tuple[int, ...], str]:
-    """Sort key for a version string, newest last.
-
-    BP-002 requires semver, and `service/` has already enforced it by the time a
-    row exists - but a store must not raise on data it can be handed, so an
-    unparseable version sorts *below* every parseable one and ties break
-    lexicographically. Done in Python rather than SQL because ``ORDER BY`` on a
-    ``TEXT`` column puts ``1.10.0`` before ``1.9.0``, and no portable SQL
-    expression fixes that.
-    """
-    head = version.split("-", 1)[0].split("+", 1)[0]
-    parts = head.split(".")
-    if all(part.isdigit() for part in parts) and parts != [""]:
-        return (1, tuple(int(part) for part in parts), version)
-    return (0, (), version)
-
-
-def _parse_uuid(value: str) -> uuid.UUID | None:
-    """A UUID, or ``None`` for anything that is not one.
-
-    The read path's parser. A malformed id is "no such row", never an
-    exception: ``get_dataset``, ``get_skeleton`` and ``find_runs`` all take ids
-    that arrived as tool inputs, and ``RunQuery.dataset_id``'s own docstring
-    settles the question - "an unparseable filter should return no rows, not
-    raise".
-    """
-    try:
-        return uuid.UUID(value)
-    except (ValueError, AttributeError, TypeError):
-        return None
-
-
-def _require_uuid(value: str, field: str) -> uuid.UUID:
-    """A UUID, or :class:`StoreError`. The write path's parser.
-
-    The asymmetry with :func:`_parse_uuid` is intentional. On a read a
-    malformed id is a miss; on a write it is a value that cannot be stored in a
-    ``UUID`` column, and the choices are to raise or to drop it. Nothing
-    user-caused reaches here: ``provenance.supersedes`` is proved to name a real
-    dataset by DS-031, and dataset ids come from ``Seeded.uuid()``.
-    """
-    parsed = _parse_uuid(value)
-    if parsed is None:
-        raise StoreError(f"{field} is not a UUID: {value!r}")
-    return parsed
-
-
-def _document(model: Blueprint | Dataset, **overrides: Any) -> dict[str, Any]:
-    """The JSON document to store for ``model``, with ``overrides`` applied.
-
-    ``exclude_unset=True`` is load-bearing, not a micro-optimisation. Ruling
-    R-08 defines the round trip as
-    ``model_validate(raw).model_dump(mode="json", exclude_unset=True) == raw``,
-    and the golden fixtures omit many optional fields - ``tool_name`` on three
-    nodes, ``max_iterations`` on eight, ``input`` on every pool entry. A full
-    dump would reintroduce those as ``null`` and the bytes a dataset was
-    submitted with would not be the bytes ``dataset_export`` emits, which is
-    exactly the byte-stability M7's cross-backend import gate depends on.
-
-    The overrides are the fields the *store* owns rather than the author: a
-    dataset's allocated ``version`` and its lineage-level ``archived`` state
-    (ruling R-34), and a blueprint's ``status``. Applying them to the document
-    as well as to the column is what makes it impossible for a row and the
-    document inside it to disagree - which is the same reason ``set_archived``
-    rewrites the document rather than only the column.
-    """
-    document = model.model_dump(mode="json", exclude_unset=True)
-    document.update(overrides)
-    return document
-
-
-def _labels(value: Any) -> dict[str, str]:
-    """A ``labels`` column, typed. JSON gives back ``Any``; ``Labels`` is
-    ``dict[str, str]`` and the rows were validated before they were written."""
-    return {str(key): str(item) for key, item in dict(value).items()}
-
-
-def _folded(value: object) -> str:
-    """The case-folded form used by the ``q`` filter, on every backend.
-
-    One implementation, in Python, because there is no SQL expression that
-    folds case identically on all three backends: SQLite's ``lower()`` is
-    ASCII-only, Postgres's is locale-aware, and Mongo's ``$regex`` with ``i``
-    is a third answer. Folding the *term* in Python and the *column* in SQL -
-    which is what M3 shipped first - is the worst of the three, because the two
-    halves of one comparison then disagree with each other.
-
-    Verified, not assumed: SQLite returns ``lower('BENGALŪRU')`` as
-    ``'bengalŪru'``, while Python returns ``'bengalūru'``. Every current
-    fixture is ASCII, so nothing was broken - it was a trap for whoever wrote
-    the first non-ASCII dataset.
-
-    ``str.casefold`` rather than ``str.lower``: it is the Unicode operation
-    designed for caseless comparison (it folds ``ß`` to ``ss``), and picking
-    the weaker one here would be choosing to be subtly wrong on purpose.
-    """
-    return str(value).casefold()
 
 
 # --------------------------------------------------------------------------
@@ -658,7 +592,7 @@ class SqlStore:
         error instead.
         """
         status = STATUS_PUBLISHED if publish else STATUS_DRAFT
-        document = _document(bp, status=status)
+        document = stored_document(bp, status=status)
         for attempt in range(FIRST_WRITE_ATTEMPTS):
             try:
                 with self._engine.begin() as conn:
@@ -676,7 +610,7 @@ class SqlStore:
 
                     stored: dict[str, Any] = row.document
                     if row.status == STATUS_PUBLISHED:
-                        if _canonical(stored) == _canonical(document):
+                        if canonical(stored) == canonical(document):
                             # Ruling R-29: a byte-identical re-publish is a
                             # no-op success. Nothing changes, because the
                             # documents are identical, so immutability is fully
@@ -727,7 +661,7 @@ class SqlStore:
             ).all()
         if not published:
             return None
-        newest = max(published, key=lambda candidate: _semver_key(str(candidate.version)))
+        newest = max(published, key=lambda candidate: semver_key(str(candidate.version)))
         latest: dict[str, Any] = newest.document
         return Blueprint.model_validate(latest)
 
@@ -749,16 +683,8 @@ class SqlStore:
             statement = statement.where(blueprints.c.status == status)
         with self._engine.connect() as conn:
             rows = conn.execute(statement).all()
-        ordered = sorted(rows, key=lambda row: (str(row.agent_id), _semver_key(str(row.version))))
-        return [
-            BlueprintSummary(
-                agent_id=str(row.agent_id),
-                version=str(row.version),
-                status=str(row.status),
-                description=str(row.document.get("description", "")),
-            )
-            for row in ordered
-        ]
+        ordered = sorted(rows, key=lambda row: (str(row.agent_id), semver_key(str(row.version))))
+        return [blueprint_summary(_fields(row)) for row in ordered]
 
     # ------------------------------------------------------------------ datasets
 
@@ -785,7 +711,7 @@ class SqlStore:
         would have no coherent answer. The caller's flag is honoured only for
         the first version, where there is no lineage to inherit from.
         """
-        base = _document(ds)
+        base = stored_document(ds)
         inherited = self._lineage_archived(ds.id)
         archived = ds.archived if inherited is None else inherited
         for _ in range(VERSION_ALLOCATION_ATTEMPTS):
@@ -804,7 +730,7 @@ class SqlStore:
 
     def get_dataset(self, dataset_id: str, version: int | None) -> Dataset | None:
         """See :meth:`agentprops.storage.base.Store.get_dataset`."""
-        identifier = _parse_uuid(dataset_id)
+        identifier = parse_uuid(dataset_id)
         if identifier is None:
             return None
         statement = select(datasets.c.document).where(datasets.c.id == identifier)
@@ -874,10 +800,9 @@ class SqlStore:
         with self._engine.connect() as conn:
             rows = conn.execute(statement).all()
         if q.q is None:
-            return [_dataset_summary(row) for row in rows]
-        term = _folded(q.q)
-        matched = [row for row in rows if term in _folded(row.title) or term in _folded(row.intent)]
-        return [_dataset_summary(row) for row in _slice(matched, q.limit, q.offset)]
+            return [dataset_summary(_fields(row)) for row in rows]
+        matched = [row for row in rows if q_matches(q.q, row.title, row.intent)]
+        return [dataset_summary(_fields(row)) for row in slice_page(matched, q.limit, q.offset)]
 
     def set_archived(self, dataset_id: str, archived: bool) -> DatasetSummary:
         """See :meth:`agentprops.storage.base.Store.set_archived`.
@@ -899,7 +824,7 @@ class SqlStore:
         metadata, not fixture content, and archiving must not bump the version -
         a run pinned to version 1 has to keep reading version 1.
         """
-        identifier = _parse_uuid(dataset_id)
+        identifier = parse_uuid(dataset_id)
         if identifier is None:
             raise RecordNotFoundError(f"no dataset {dataset_id!r}")
         with self._engine.begin() as conn:
@@ -937,7 +862,7 @@ class SqlStore:
                 .order_by(desc(datasets.c.version))
                 .limit(1)
             ).one()
-        return _dataset_summary(summary_row)
+        return dataset_summary(_fields(summary_row))
 
     # ----------------------------------------------------------------- skeletons
 
@@ -980,7 +905,7 @@ class SqlStore:
                             update(skeletons).where(skeletons.c.id == sk.id).values(**values)
                         )
                     row = conn.execute(select(skeletons).where(skeletons.c.id == sk.id)).one()
-                    return _skeleton(row)
+                    return skeleton_from(_fields(row))
             except IntegrityError:
                 if attempt == FIRST_WRITE_ATTEMPTS - 1:
                     raise
@@ -990,12 +915,12 @@ class SqlStore:
 
     def get_skeleton(self, skeleton_id: str) -> Skeleton | None:
         """See :meth:`agentprops.storage.base.Store.get_skeleton`."""
-        identifier = _parse_uuid(skeleton_id)
+        identifier = parse_uuid(skeleton_id)
         if identifier is None:
             return None
         with self._engine.connect() as conn:
             row = conn.execute(select(skeletons).where(skeletons.c.id == identifier)).one_or_none()
-        return None if row is None else _skeleton(row)
+        return None if row is None else skeleton_from(_fields(row))
 
     def mark_skeleton_submitted(self, skeleton_id: str, dataset_id: str) -> bool:
         """See :meth:`agentprops.storage.base.Store.mark_skeleton_submitted`.
@@ -1015,10 +940,10 @@ class SqlStore:
         The existence check stays separate and still raises: "no such skeleton"
         is not a false answer to "did this call claim it".
         """
-        identifier = _parse_uuid(skeleton_id)
+        identifier = parse_uuid(skeleton_id)
         if identifier is None:
             raise RecordNotFoundError(f"no skeleton {skeleton_id!r}")
-        dataset = _require_uuid(dataset_id, "dataset_id")
+        dataset = require_uuid(dataset_id, "dataset_id")
         with self._engine.begin() as conn:
             exists = conn.execute(
                 select(skeletons.c.id).where(skeletons.c.id == identifier)
@@ -1101,33 +1026,14 @@ class SqlStore:
             step_rows = conn.execute(
                 select(run_steps)
                 .where(run_steps.c.run_id == run_id)
-                .order_by(run_steps.c.seq, run_steps.c.node_id, run_steps.c.iteration)
+                .order_by(
+                    run_steps.c.seq,
+                    self._byte_ordered(run_steps.c.node_id),
+                    run_steps.c.iteration,
+                )
             ).all()
-        steps = [_step(step_row) for step_row in step_rows]
-        return Run(
-            id=str(row.id),
-            agent_id=str(row.agent_id),
-            pin=RunPin(
-                dataset_id=row.dataset_id,
-                dataset_version=int(row.dataset_ver),
-                blueprint_version=str(row.bp_version),
-            ),
-            declared_blueprint_version=row.declared_bp_version,
-            model=None if row.model is None else ModelInfo.model_validate(row.model),
-            run_class=str(row.run_class),
-            path=[
-                PathStep(node_id=step.node_id, iteration=step.iteration, at=at)
-                for step in steps
-                if (at := step.fetched_at) is not None
-            ],
-            steps=steps,
-            outcome=row.outcome,
-            warnings=[Warning.model_validate(warning) for warning in row.warnings],
-            status=str(row.status),
-            started_at=row.started_at,
-            finished_at=row.finished_at,
-            external_refs=dict(row.external_refs),
-        )
+        steps = [step_from(_fields(step_row)) for step_row in step_rows]
+        return run_from(_fields(row), steps)
 
     def find_runs(self, q: RunQuery) -> list[RunSummary]:
         """See :meth:`agentprops.storage.base.Store.find_runs`.
@@ -1136,6 +1042,12 @@ class SqlStore:
         ``(agent_id, run_class, started_at DESC)`` is built for, and the order a
         caller listing runs wants. An unparseable ``dataset_id`` filter matches
         nothing rather than raising.
+
+        The tie-break goes through :meth:`_byte_ordered`, which is not
+        decoration: a locale-collated Postgres orders ``'runa'`` before
+        ``'run-b'`` while the other two backends do the opposite, so without it
+        two runs sharing a ``started_at`` come back in a different order per
+        backend and ruling R-35's byte-identical claim is simply false.
         """
         statement = select(
             runs.c.id,
@@ -1154,7 +1066,7 @@ class SqlStore:
         if q.agent_id is not None:
             statement = statement.where(runs.c.agent_id == q.agent_id)
         if q.dataset_id is not None:
-            identifier = _parse_uuid(q.dataset_id)
+            identifier = parse_uuid(q.dataset_id)
             if identifier is None:
                 return []
             statement = statement.where(runs.c.dataset_id == identifier)
@@ -1162,27 +1074,11 @@ class SqlStore:
             statement = statement.where(runs.c.run_class == q.run_class)
         if q.model is not None:
             statement = statement.where(runs.c.model["name"].as_string() == q.model)
-        statement = statement.order_by(desc(runs.c.started_at), runs.c.id)
+        statement = statement.order_by(desc(runs.c.started_at), self._byte_ordered(runs.c.id))
         statement = _paginate(statement, q.limit, q.offset)
         with self._engine.connect() as conn:
             rows = conn.execute(statement).all()
-        return [
-            RunSummary(
-                id=str(row.id),
-                agent_id=str(row.agent_id),
-                dataset_id=row.dataset_id,
-                dataset_ver=int(row.dataset_ver),
-                bp_version=str(row.bp_version),
-                run_class=str(row.run_class),
-                model=None if row.model is None else ModelInfo.model_validate(row.model),
-                status=str(row.status),
-                warnings=[Warning.model_validate(warning) for warning in row.warnings],
-                started_at=row.started_at,
-                finished_at=row.finished_at,
-                external_refs=dict(row.external_refs),
-            )
-            for row in rows
-        ]
+        return [run_summary(_fields(row)) for row in rows]
 
     def upsert_step(self, run_id: str, step: StepRecord) -> StepRecord:
         """See :meth:`agentprops.storage.base.Store.upsert_step`.
@@ -1228,7 +1124,7 @@ class SqlStore:
         for _ in range(SEQ_ALLOCATION_ATTEMPTS):
             existing = self._step_row(run_id, step.node_id, step.iteration)
             if existing is not None:
-                return _step(existing)
+                return step_from(_fields(existing))
             seq = self._next_step_seq(run_id)
             values: dict[str, Any] = {
                 "run_id": run_id,
@@ -1253,7 +1149,7 @@ class SqlStore:
             written = self._step_row(run_id, step.node_id, step.iteration)
             if written is None:  # pragma: no cover - the row was just written
                 raise StoreError(f"step {run_id}/{step.node_id}/{step.iteration} vanished")
-            return _step(written)
+            return step_from(_fields(written))
         raise StoreError(f"could not allocate a seq for run {run_id} after repeated races")
 
     def set_run_warnings(self, run_id: str, warnings: Sequence[Warning]) -> list[Warning]:
@@ -1322,8 +1218,8 @@ class SqlStore:
                 )
             stored: dict[str, Any] | None = row.actual
             if stored is not None:
-                if _canonical(stored) == _canonical(dict(actual)):
-                    return _step(row)
+                if canonical(stored) == canonical(dict(actual)):
+                    return step_from(_fields(row))
                 raise StoreError(
                     f"step {run_id}/{node_id}/{iteration} already recorded a different actual"
                 )
@@ -1492,11 +1388,47 @@ class SqlStore:
             "supersedes": (
                 None
                 if ds.provenance.supersedes is None
-                else _require_uuid(ds.provenance.supersedes, "provenance.supersedes")
+                else require_uuid(ds.provenance.supersedes, "provenance.supersedes")
             ),
             "document": document,
             "created_at": ds.provenance.created_at,
         }
+
+    def _byte_ordered(self, column: Any) -> Any:
+        """``column``, ordered by **byte value** on every backend.
+
+        The fifth dialect-specific thing in this module, and the only one M3 did
+        not predict. Ruling R-35 requires every list ordering to be total so
+        that identical inputs give byte-identical output on *every* backend, and
+        ``ORDER BY`` on a ``TEXT`` column does not satisfy that by itself:
+
+        - SQLite compares with ``BINARY``, which is ``memcmp`` over UTF-8;
+        - Mongo compares strings byte-wise by default;
+        - Postgres uses the database's ``LC_COLLATE``, and the default on every
+          mainstream image is a locale rather than ``C``.
+
+        Measured against Postgres 17 with ``datcollate = en_US.utf8``:
+        ``'run-b' < 'runa'`` is **false**, where both other backends say true -
+        because a locale collation weights punctuation below letters at the
+        first level. So two runs sharing a ``started_at`` come back in a
+        different order on Postgres than on SQLite, and R-35's byte-identical
+        claim is false for exactly the inputs a tie-break exists for.
+
+        ``COLLATE "C"`` fixes it on the one backend that needs it. ``C`` and
+        ``POSIX`` are the two collations every Postgres installation has, so
+        this needs no extension and no database-level change. SQLite gets the
+        column unchanged, because its default *is* byte order and ``COLLATE
+        "C"`` is not a collation it has.
+
+        Applied to the two ``TEXT`` tie-breaks in this adapter: ``runs.id`` in
+        :meth:`find_runs`, where it decides real cases, and
+        ``run_steps.node_id`` in :meth:`get_run`, where ``UNIQUE (run_id, seq)``
+        means it never does - kept there anyway, because ruling R-37 put those
+        two keys in the order precisely for the case where the constraint has
+        somehow not held, and an ordering that is only total when nothing has
+        gone wrong is not the property R-37 asked for.
+        """
+        return column.collate("C") if self._backend == "postgres" else column
 
     def _apply_dataset_filters(self, statement: Select[Any], q: DatasetQuery) -> Select[Any]:
         """``dataset_find``'s four SQL filters. The fifth, ``q``, is not SQL.
@@ -1549,23 +1481,22 @@ def _protocol_conformance(store: SqlStore) -> Store:
 
 
 # --------------------------------------------------------------------------
-# row to model
+# small SQL helpers
 # --------------------------------------------------------------------------
+
+
+def _fields(row: Row[Any]) -> dict[str, Any]:
+    """A row as a plain ``{column name: value}`` mapping, for `common.py`'s mappers.
+
+    ``Row._mapping`` is keyed by ``str | Column`` as far as the type stubs are
+    concerned, which is not a ``Mapping[str, Any]``, so the narrowing is
+    explicit rather than a ``cast`` that would hide a real mismatch.
+    """
+    return {str(key): value for key, value in row._mapping.items()}
 
 
 def _count(conn: Connection, table: Table) -> int:
     return int(conn.execute(select(func.count()).select_from(table)).scalar() or 0)
-
-
-def _slice(rows: list[Row[Any]], limit: int | None, offset: int | None) -> list[Row[Any]]:
-    """:func:`_paginate`'s meaning, applied to a list.
-
-    Used only by ``find_datasets``'s ``q`` branch, where the filter cannot be
-    pushed into SQL, so ``LIMIT``/``OFFSET`` cannot be either: a page sliced
-    before the filter runs comes back short.
-    """
-    start = offset or 0
-    return rows[start:] if limit is None else rows[start : start + limit]
 
 
 def _paginate(statement: Select[Any], limit: int | None, offset: int | None) -> Select[Any]:
@@ -1580,57 +1511,3 @@ def _paginate(statement: Select[Any], limit: int | None, offset: int | None) -> 
     if offset is not None:
         statement = statement.offset(offset)
     return statement
-
-
-def _dataset_summary(row: Row[Any]) -> DatasetSummary:
-    """A ``DatasetSummary`` from a row, built from the promoted columns.
-
-    Which is what they were promoted for - "so find can filter and sort without
-    parsing JSON". The document is read for exactly one field: contracts 2.2.1
-    puts a 200-character ``narrative`` excerpt in the summary and the DDL
-    promotes no column for it.
-    """
-    document: dict[str, Any] = row.document
-    narrative = str(document.get("narrative", ""))
-    return DatasetSummary(
-        id=row.id,
-        version=int(row.version),
-        title=str(row.title),
-        intent=str(row.intent),
-        labels=_labels(row.labels),
-        author=Author(
-            name=str(row.author_name),
-            handle=str(row.author_handle),
-            agent=str(row.author_agent),
-        ),
-        blueprint=BlueprintRef(agent_id=str(row.agent_id), version=str(row.bp_version)),
-        narrative_excerpt=narrative[:NARRATIVE_EXCERPT_CHARS],
-        archived=bool(row.archived),
-        created_at=row.created_at,
-    )
-
-
-def _skeleton(row: Row[Any]) -> Skeleton:
-    return Skeleton(
-        id=row.id,
-        agent_id=str(row.agent_id),
-        bp_version=str(row.bp_version),
-        labels=dict(row.labels),
-        seed=int(row.seed),
-        manifest=list(row.manifest),
-        parts=dict(row.parts),
-        submitted_as=row.submitted_as,
-        created_at=row.created_at,
-    )
-
-
-def _step(row: Row[Any]) -> StepRecord:
-    return StepRecord(
-        node_id=str(row.node_id),
-        iteration=int(row.iteration),
-        served=dict(row.served),
-        actual=row.actual,
-        recorded_at=row.recorded_at,
-        seq=int(row.seq),
-        fetched_at=row.fetched_at,
-    )

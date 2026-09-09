@@ -12,7 +12,8 @@ The layout
 ============================ =============================================
 `clock.py`                   the one clock port (ruling R-09)
 `resolver.py`                the real ``Resolver`` over a store (R-11)
-`context.py`                 the two injected ports, together
+`context.py`                 the two injected ports, together, and the
+                             one dispatch from a store URL to a backend (M7)
 `envelope.py`                the contracts section 1 envelopes, plus the
                              six ``AP-*`` boundary codes that are not rules
 `limits.py`                  the integer range a store column can hold, the
@@ -25,6 +26,8 @@ The layout
 `skeletons.py`               the authoring flow, and the one dataset write
 `resolution.py`              contracts section 5, the step identity algorithm
 `runs.py`                    the runtime read path, which writes only the run
+`expansion.py`               ``dataset_expand``: seeded, validated, then stored
+`promotion.py`               ``dataset_export`` and ``dataset_import``
 `admin.py`                   the three admin reads
 ============================ =============================================
 
@@ -56,7 +59,13 @@ its docstring walks the six steps.
 """
 
 from agentprops.service.clock import Clock, FrozenClock, SystemClock
-from agentprops.service.context import ServiceContext, context_from_url, sqlite_context
+from agentprops.service.context import (
+    ServiceContext,
+    context_for,
+    context_from_url,
+    mongo_context,
+    sqlite_context,
+)
 from agentprops.service.documents import Document, read_document
 from agentprops.service.envelope import (
     AP_ARGUMENT,
@@ -94,9 +103,11 @@ __all__ = [
     "SystemClock",
     "boundary",
     "clamp",
+    "context_for",
     "context_from_url",
     "failure",
     "field_pointer",
+    "mongo_context",
     "read_document",
     "sqlite_context",
     "storable",

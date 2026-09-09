@@ -18,13 +18,24 @@ five places, each of which is a place autogenerate cannot know the intent:
    column. Batch mode exists to rebuild a table SQLite cannot ``ALTER``; on a
    table created three statements earlier it buys nothing and obscures the
    ``started_at DESC`` the index is for.
-4. **The two Postgres-only indexes are created in a dialect branch.**
-   ``datasets_labels_gin`` and ``datasets_search`` have no SQLite equivalent -
-   contracts section 7 says so, and says SQLite falls back to a scan with
-   ``LIKE`` for ``q`` and JSON extraction for labels, which is what
-   ``find_datasets`` does. They are absent from ``METADATA`` (``create_all``
-   would try to build a GIN index on SQLite) and filtered out of autogenerate
-   comparison by env.py, so neither dialect reports drift over them.
+4. **The Postgres-only index is created in a dialect branch.**
+   ``datasets_labels_gin`` has no SQLite equivalent - contracts section 7 says
+   so, and says SQLite falls back to JSON extraction for labels, which is what
+   ``find_datasets`` does. It is absent from ``METADATA`` (``create_all`` would
+   try to build a GIN index on SQLite) and filtered out of autogenerate
+   comparison by env.py, so neither dialect reports drift over it.
+
+   Contracts section 7 declared a second one, ``datasets_search``, as a
+   ``to_tsvector`` GIN index. **M7 dropped it.** Ruling R-36 made ``q``
+   substring matching by contract, R-39(a) then moved the fold and the match
+   into Python because no SQL expression folds case identically across the
+   three backends, and ``find_datasets`` therefore emits no SQL text match at
+   all - so the index served no query and cost every write. R-36 offers
+   ``pg_trgm`` instead and it would be dead for the same reason. See
+   ``POSTGRES_ONLY_INDEXES`` in `storage/sql.py` for the measurement that
+   closes the remaining option: an ``ILIKE`` prefilter is **not** a superset of
+   ``str.casefold``, so it cannot be added without changing which rows ``q``
+   returns.
 5. **``UNIQUE (run_id, seq)`` on ``run_steps``** - an addition to contracts
    section 7 authorised by ruling R-37, and the constraint that makes
    ``upsert_step``'s ``seq`` allocation sound. See the note at the column.
@@ -35,8 +46,8 @@ five places, each of which is a place autogenerate cannot know the intent:
    is a fillable section, and ``dataset_submit(skeleton_id)`` takes nothing
    else, so they have to survive on the skeleton row.
 
-Amended in M3's first fix round, and again at M5, rather than superseded by a
-second revision.
+Amended in M3's first fix round, again at M5, and again at M7, rather than
+superseded by a second revision.
 This is the *initial* schema of an unreleased milestone on an unmerged branch:
 no database outside a temporary test file has ever been migrated by it, so
 there is nothing for an additive revision to migrate *from*. A follow-up
@@ -178,27 +189,17 @@ def upgrade() -> None:
 
     if op.get_bind().dialect.name == "postgresql":
         op.create_index("datasets_labels_gin", "datasets", ["labels"], postgresql_using="gin")
-        # datasets_search is contracts section 7's index, and ruling R-36 has
-        # since superseded it: `q` is substring matching, by contract, so
-        # Postgres uses ILIKE rather than full-text search and a to_tsvector
-        # index cannot serve the query. It is dead rather than wrong - nothing
-        # reads it, because find_datasets never emits to_tsvector - and it is
-        # left here so the DDL and this revision still correspond.
-        #
-        # M7 replaces it with a pg_trgm GIN index, which does accelerate
-        # substring matching, or drops it where the extension is unavailable.
-        # Dropping it costs speed and nothing else: the conformance suite
-        # asserts identical results, never identical plans.
-        op.execute(
-            "CREATE INDEX datasets_search ON datasets "
-            "USING gin (to_tsvector('english', title || ' ' || intent))"
-        )
+        # There is deliberately no `datasets_search` here. See note 4 above: it
+        # was contracts section 7's to_tsvector GIN index, ruling R-36
+        # superseded it, and M7 dropped it rather than replacing it with the
+        # pg_trgm index R-36 offers - because find_datasets issues no SQL text
+        # match for either kind of index to serve.
 
 
 def downgrade() -> None:
     """Downgrade schema.
 
-    Dropping a table drops its indexes, so the two Postgres-only ones need no
+    Dropping a table drops its indexes, so the Postgres-only one needs no
     dialect branch here. Reverse dependency order, since the foreign keys are
     real on both dialects.
     """
