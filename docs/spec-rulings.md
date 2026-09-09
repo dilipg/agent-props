@@ -1915,8 +1915,17 @@ one. Two instances in one milestone is why R-72 asks for an assertion rather tha
 
 **(a) `resources/list` is an index plus templates, not one entry per document.** Ratified,
 and the constraint is real rather than a shortcut: `mcp` 2.2.0 serves that list from an
-**import-time registry** with no listing callback, and `Extension.methods()` refuses to
-replace a registered handler — the only override is the private `_lowlevel_server`.
+**import-time registry** — `ResourceManager.list_resources()` returns `list(self._resources
+.values())` from a dict populated at registration — with no listing callback, and
+`Extension.methods()` refuses to replace a registered handler.
+
+**Corrected.** I wrote "the only override is the private `_lowlevel_server`". M9.5's reviewer
+read the installed package and found that overstated: `MCPServer._handle_list_resources`
+delegates to the **public** coroutine `self.list_resources()`, so subclassing is a public
+route to a dynamic listing. The ratified outcome does not change — index-plus-templates
+stands, and the code correctly touches no private attribute — but the reason is "subclassing
+the server is more coupling than one extra read is worth", not "the SDK makes it
+impossible". Fifth ruling of mine to carry a factual error, and the fifth caught downstream.
 
 R-76 asked for two things and got both. "Without being told an id" is satisfied in full: a
 caller lists, finds `agentprops://catalogue`, reads it, and has real ids. "Expose the
@@ -1966,6 +1975,36 @@ example — and the docstring/behaviour gap was the tell. Both halves are now as
 
 **Cost if wrong.** (a) is one extra read; (b)–(d) are additive or documentary; (e) is a
 process rule that costs one command per guard.
+
+### R-78 — duplication is measured by shingles, not by formatting
+
+M9.5's charter (R-76) named one risk: "if a prompt restates the README rather than replacing
+it, this milestone has added a second place to drift and fixed nothing." The milestone
+shipped believing it had avoided that, on the evidence `grep -c '^> ' README.md == 0`.
+
+That count is 0, and it proves nothing about duplication. **It measures blockquote
+formatting.** The reviewer measured the actual property instead — 9-word shingles over every
+non-docstring string literal in `service/prompts.py` against every `.md` in the repo — and
+found **34 shared shingles in three fragments**, one of them ~25 consecutive words verbatim:
+the BP-014 sentence about two nodes sharing a `tool_name`.
+
+So the milestone's own named risk survived, behind a proxy that could not detect it. Note the
+particular irony: the milestone *did* ship a duplication guard — against `dataset_skeleton`'s
+`instructions` — and not against the README, which is the one duplication R-76 names.
+
+**Ruling.** Duplication between served text and documentation is asserted by **content
+overlap**, not by formatting or by a grep for a phrase someone remembers. A shingle
+comparison over the served strings against every tracked `.md` is the shape; the guard the
+milestone already wrote for `instructions` is the precedent, pointed at the README.
+
+**The general rule, which is this build's most repeated lesson in a new costume:** when a
+claim is about a property, measure the property. `grep -c '^> '` stands to "no duplication"
+exactly as `git grep -Il ''` stood to "no NUL byte" in R-73 — a plausible proxy that answers
+a different question. Both were wrong in the direction that looks like success.
+
+**Cost if wrong.** A shingle guard can false-positive on a shared technical phrase that is
+not really duplication (a rule id, a tool name). Tune the window, or exempt a named string —
+never delete the guard.
 
 ## Owner scope decisions
 
