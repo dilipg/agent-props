@@ -225,6 +225,18 @@ def _postgres_store(request: pytest.FixtureRequest) -> Iterator[Store]:
     a throwaway database, not the deletion of a row anyone authored, so ground
     rule 6 is untouched - the same reasoning `test_migrations.py` records for
     ``downgrade base``.
+
+    **A consequence worth knowing, because it looks like a bug.** This fixture
+    creates the schema with ``create_all`` and never stamps ``alembic_version``,
+    while `test_migrations.py` migrates and ``test_the_migration_is_reversible``
+    downgrades to base - so after a full run the shared Postgres test database
+    holds the five tables with an *empty* ``alembic_version``, and a
+    ``uv run alembic check`` against it reports "Target database is not up to
+    date". That is the fixtures' residue on a throwaway database and not schema
+    drift: reset the schema, ``alembic upgrade head``, and the check is clean and
+    idempotent. ``test_the_migrated_schema_matches_sql_py[postgres]`` runs the
+    same comparison ``alembic check`` runs, against a database it migrated
+    itself, which is the assertion that actually holds the line.
     """
     engine: Engine = request.getfixturevalue("postgres_engine")
     METADATA.drop_all(engine)
