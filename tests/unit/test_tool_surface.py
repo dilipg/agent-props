@@ -41,7 +41,6 @@ Four guards:
 
 from __future__ import annotations
 
-import ast
 import asyncio
 from pathlib import Path
 from typing import Any, Final
@@ -52,6 +51,7 @@ from mcp_types import Tool as RegisteredTool
 from agentprops.server import mcp
 from agentprops.service import ServiceContext
 from catalogue import parse_tool_names
+from sourcescan import literals_passed_to
 from toolclient import attempt
 
 CATALOGUE_PATH: Final[Path] = Path(__file__).parents[2] / "docs" / "contracts.md"
@@ -244,28 +244,13 @@ def test_every_tool_argument_advertises_a_json_type() -> None:
 def tool_names_in_test_sources() -> set[str]:
     """Every string literal handed to a ``call_tool``/``invoke`` call under `tests/`.
 
-    Parsed rather than imported, for the reason the drift test gives: a name is
-    checked against the source, so a test that exists but is skipped or renamed
-    is all visible, and no import order matters.
+    The walk itself moved to `tests/sourcescan.py` at M9.5, because the prompt
+    and resource coverage guards need the same one over different function
+    names and two copies of a scanner is two things to keep in step. The two
+    non-vacuity controls below did **not** move: they are claims about *this*
+    surface.
     """
-    found: set[str] = set()
-    for path in sorted(TESTS_DIR.rglob("test_*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            function = node.func
-            name = function.attr if isinstance(function, ast.Attribute) else None
-            if name is None and isinstance(function, ast.Name):
-                name = function.id
-            if name not in TOOL_CALL_FUNCTIONS:
-                continue
-            found.update(
-                argument.value
-                for argument in node.args
-                if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
-            )
-    return found
+    return literals_passed_to(TESTS_DIR, TOOL_CALL_FUNCTIONS)
 
 
 def test_the_source_scanner_finds_something() -> None:

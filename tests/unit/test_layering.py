@@ -48,6 +48,7 @@ this file does - cannot trip it.
 from __future__ import annotations
 
 import ast
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,18 @@ SERVER_FILES = sorted(SERVER_DIR.glob("*.py"))
 #: glob, so a new tool module is covered by the one edit that registers it.
 TOOL_MODULE_FILES = sorted(
     Path(module.__file__).resolve() for module in agentprops.server.TOOL_MODULES if module.__file__
+)
+
+#: The modules that register M9.5's prompts and resources, read the same way.
+#: They are **not** in ``TOOL_MODULES``: the guards below match on the
+#: ``@mcp.tool()`` decorator, and a prompt registers nothing callable through
+#: ``tools/call``. Ruling R-76 asks for registration in `server/` to be "thin as
+#: ever", so the three shape guards run over these files too - against the
+#: prompt and resource decorators - rather than "thin" being left to taste.
+SURFACE_MODULE_FILES = sorted(
+    Path(module.__file__).resolve()
+    for module in agentprops.server.PROMPT_MODULES + agentprops.server.RESOURCE_MODULES
+    if module.__file__
 )
 
 #: `models/` may import none of these. `export/` is in the list even though
@@ -774,6 +787,13 @@ def test_the_tool_module_table_is_not_empty() -> None:
     assert len(TOOL_MODULE_FILES) == 4, f"expected four tool modules, got {TOOL_MODULE_FILES}"
 
 
+def test_the_surface_module_table_is_not_empty() -> None:
+    """The same for M9.5's two registration modules."""
+    assert len(SURFACE_MODULE_FILES) == 2, (
+        f"expected one prompt module and one resource module, got {SURFACE_MODULE_FILES}"
+    )
+
+
 @pytest.mark.parametrize("path", SERVICE_FILES, ids=lambda p: p.name)
 def test_service_does_not_import_the_server(path: Path) -> None:
     offences = sibling_import_offences(path, FORBIDDEN_LAYERS_FOR_SERVICE)
@@ -819,8 +839,17 @@ def test_only_the_clock_module_reads_a_clock(path: Path) -> None:
     )
 
 
-def tool_functions(path: Path) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-    """Every module-level function in ``path`` decorated with ``@mcp.tool()``.
+#: The decorators that register something on the MCP surface. A function
+#: carrying one of these is measured by the three shape guards below; a plain
+#: helper beside it is not, which is why the match is on the decorator rather
+#: than on the name.
+REGISTRATION_DECORATORS = ("mcp.tool", "mcp.prompt", "mcp.resource")
+
+
+def registered_functions(
+    path: Path, decorators: Sequence[str] = REGISTRATION_DECORATORS
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every module-level function in ``path`` decorated with one of ``decorators``.
 
     Matched on the decorator rather than on the name, so a helper in a
     `tools_*.py` module is not measured as a tool and a tool cannot escape the
@@ -832,10 +861,15 @@ def tool_functions(path: Path) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
             continue
         for decorator in node.decorator_list:
             target = decorator.func if isinstance(decorator, ast.Call) else decorator
-            if dotted(target).endswith("mcp.tool"):
+            if any(dotted(target).endswith(name) for name in decorators):
                 found.append(node)
                 break
     return found
+
+
+def tool_functions(path: Path) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every ``@mcp.tool()`` function in ``path``. The M4 spelling, kept."""
+    return registered_functions(path, ("mcp.tool",))
 
 
 def body_without_docstring(
@@ -853,12 +887,26 @@ def test_every_tool_module_registers_at_least_one_tool() -> None:
         assert tool_functions(path), f"{path.name} registers no @mcp.tool() function"
 
 
-@pytest.mark.parametrize("path", TOOL_MODULE_FILES, ids=lambda p: p.name)
+def test_every_surface_module_registers_at_least_one_prompt_or_resource() -> None:
+    """The same non-vacuity check for the two M9.5 modules.
+
+    Without it, the three widened guards below would pass against a module that
+    had stopped registering anything - which is the exact way a guard goes
+    quiet rather than red.
+    """
+    for path in SURFACE_MODULE_FILES:
+        assert registered_functions(path), (
+            f"{path.name} registers no @mcp.prompt() or @mcp.resource() function"
+        )
+
+
+@pytest.mark.parametrize("path", TOOL_MODULE_FILES + SURFACE_MODULE_FILES, ids=lambda p: p.name)
 def test_a_tool_function_stays_under_twenty_lines(path: Path) -> None:
     """CLAUDE.md: "a tool function ... parses, delegates, shapes the response,
-    and stays under 20 lines"."""
+    and stays under 20 lines". Ruling R-76 says the same of a prompt or a
+    resource: "registration in `server/`, thin"."""
     offences: list[str] = []
-    for function in tool_functions(path):
+    for function in registered_functions(path):
         body = body_without_docstring(function)
         if not body:
             offences.append(f"{function.name}: empty body")
@@ -874,7 +922,7 @@ def test_a_tool_function_stays_under_twenty_lines(path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("path", TOOL_MODULE_FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", TOOL_MODULE_FILES + SURFACE_MODULE_FILES, ids=lambda p: p.name)
 def test_a_tool_function_contains_no_control_flow_but_the_argument_guard(path: Path) -> None:
     """ "No business logic in `server/`", as a shape rather than as a judgement.
 
@@ -884,7 +932,7 @@ def test_a_tool_function_contains_no_control_flow_but_the_argument_guard(path: P
     belongs in `service/`, where it can be tested without an MCP client.
     """
     offences: list[str] = []
-    for function in tool_functions(path):
+    for function in registered_functions(path):
         for node in ast.walk(function):
             if isinstance(node, ast.For | ast.While | ast.Try | ast.ListComp | ast.DictComp):
                 offences.append(f"{function.name}: {type(node).__name__} at line {node.lineno}")
@@ -893,7 +941,7 @@ def test_a_tool_function_contains_no_control_flow_but_the_argument_guard(path: P
     assert not offences, f"{path.name} carries logic that belongs in service/: {offences}"
 
 
-@pytest.mark.parametrize("path", TOOL_MODULE_FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", TOOL_MODULE_FILES + SURFACE_MODULE_FILES, ids=lambda p: p.name)
 def test_a_tool_function_never_raises(path: Path) -> None:
     """CLAUDE.md: structured errors, never exceptions, for anything a user causes.
 
@@ -904,7 +952,7 @@ def test_a_tool_function_never_raises(path: Path) -> None:
     """
     offences = [
         f"{function.name}:{node.lineno}"
-        for function in tool_functions(path)
+        for function in registered_functions(path)
         for node in ast.walk(function)
         if isinstance(node, ast.Raise)
     ]
