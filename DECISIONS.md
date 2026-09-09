@@ -5546,3 +5546,338 @@ along, would leave the record harder to read and no more honest. Owner question 
    tracked, it is `.md`, and it *is* read for instructions - by the harness rather than by a person.
    It shares nothing today. Flagging it because it is the one file in scope whose classification I
    guessed rather than derived from R-78's list of three.
+
+# M10 — publish outward
+
+## [M10] `export/` imports nothing of this package, and takes the evidence bundle
+`export/otel.py::trace_of` takes the `run_evidence` **bundle** — a plain mapping — rather than a
+`Run`, a `Dataset` and a `Blueprint`.
+Reason: the trace and the evidence a grader reads are then literally the same document, so they
+cannot drift. A field on a span was in the bundle; a Langfuse trace and a `run_evidence` response
+compared side by side are one thing compared with itself. It also makes `export/` the only package
+here that imports **no** sibling layer, `models/` included, which
+`tests/unit/test_layering.py::test_export_imports_no_sibling_layer_at_all` enforces with a negative
+control that plants `from agentprops.models import Run` and observes the failure.
+Alternative rejected: taking the three models, which is the obvious implementation. It would make
+the trace a *second projection* of a run, free to disagree with the first — and there would be no
+test that could tell.
+
+## [M10] The span hierarchy: one trace per run, root is the run, steps are flat children
+One root span named `run <agent_id>`, one child per **served step** named `step <node_id>`, in the
+run's `(seq, node_id, iteration)` order (ruling R-37, so it is total and identical on all three
+backends). A nine-step run is ten spans, and `request_docs` appears twice because the bundle is
+keyed by `(node_id, iteration)`.
+Reason: a run's steps are a *sequence* an agent walked, not a call stack. A loop's third iteration
+is not inside its second, and `check_docs` visited twice is two peers. Depth would be an invention —
+the path is *reconstructed* from call order (PRD 5.5), and reconstruction gives order, not nesting.
+Langfuse's own OTLP contract asks for the same shape from the other side: "Do not create an
+enclosing 'experiment' span."
+Alternative rejected: nesting steps under a synthetic parent per loop node. It would have to invent
+a parent the service never observed, and the invention would then be indistinguishable from
+evidence.
+
+## [M10] Attribute names: `agentprops.*`, plus the GenAI convention where one exists
+Vendor-neutral attributes are prefixed `agentprops.` — `run.id`, `run.class`, `run.status`,
+`agent.id`, `dataset.id`, `dataset.version`, `dataset.title`, `blueprint.version`,
+`blueprint.declared_version`, `expected.comparison`, `expected.final`, `expected.rationale`,
+`outcome_schema`, `actual`, `step_count`, `path.expected`, `path.actual`, `warnings`,
+`label.<dimension>` — and per step `node.id`, `node.iteration`, `node.kind`, `node.tool_name`,
+`step.seq`, `step.served`, `step.expected`, `step.actual`, `step.recorded`, `node.fault.kind`,
+`node.expectation`. The model travels as `gen_ai.request.model` and `gen_ai.provider.name`, the
+semantic convention's own spellings, with `agentprops.model.version` for the snapshot date the
+convention has no field for.
+Reason: one prefix means a consumer that knows nothing about agent-props can still tell which
+attributes came from it, and a vendor overlay never risks colliding. Using the GenAI names where
+they exist is design principle 7 — a GenAI-aware backend groups these traces by model with no
+agent-props knowledge.
+Alternative rejected: squeezing `model.version` into `gen_ai.request.model` or a nearby convention
+field. It means something else there, and a wrong standard name is worse than a right local one.
+Resource attributes: `service.name` is the **agent** (that is what a tracing UI groups by, and it is
+what makes two runs comparable — design principle 2), `service.namespace` is `agent-props`,
+`service.version` is the *pinned* blueprint version.
+
+## [M10] `service.instance.id` is set to the run id, because not setting it is not neutral
+`Resource.create` fills `service.instance.id` with a fresh `uuid4()` from the SDK's own detector
+when nothing supplies it. So two exports of one run differed in a field nobody had chosen.
+Reason: a run *is* the instance of the agent a trace describes, so the semantics and the determinism
+point the same way. Found by `test_two_traces_of_one_bundle_are_identical`, which compares the whole
+resource — the assertion that exists because "byte-identical export" is a claim worth measuring
+rather than assuming.
+Alternative rejected: `Resource(attributes)` without the detectors, which would also have dropped
+the useful `telemetry.sdk.*` trio.
+
+## [M10] Trace and span ids are `blake2b` digests of the run id and the step's identity
+`trace_id = blake2b(run_id)`, `span_id = blake2b(run_id + "step:<node_id>:<iteration>")`, joined
+with a NUL that neither a run id nor a node id may contain.
+Reason: three things follow. Exporting the same run twice lands in the **same trace**, so a retry
+after a timeout is not a second, unlinked trace. The `external_ref` is a function of the run id, so
+nothing has to be stored for it to stay true. And a span id is a function of the step's *identity*
+rather than its position, so a test can name one without depending on emission order.
+This is a hash, not a random source: ground rule 9 routes *randomness* through `Seeded`, and there
+is none here — which is what lets `test_layering.py` hold `export/` to the same no-clock,
+no-unseeded-random rule as `expansion/`.
+Alternative rejected: the SDK's `RandomIdGenerator`. It would have worked and been invisible, and
+`run_export` would then have had to store its answer for the ref to survive — see the next entry.
+`IdGenerator.is_trace_id_random` keeps the base class's `False`: the W3C flag asserts the low 56
+bits were *randomly* generated, and a digest is uniformly distributed but not random.
+
+## [M10] `run_export` stores nothing; `Run.external_refs` stays empty in phase 1
+No `set_run_external_refs`, no write of any kind on the evidence path. The read-only guard's entry
+points now include `evidence.py::evidence` and `evidence.py::export`, and a planted
+`put_dataset` on the export path was run against it and observed to fail.
+Reason: the trace id is `blake2b(run_id)`, so the ref is already implied by the run — storing it
+would store a derivable value. Against that, rulings R-33 and R-55 both say the same thing from the
+other direction: a `Store` method added **after** M7 costs three signed-off adapters instead of one
+conformance test, and this would be paying that at the last milestone of the phase, on the one path
+whose whole claim is that it has none.
+Alternative rejected: adding the narrow write. **Phase-2 note:** if `run_get` should show
+`external_refs`, that is `set_run_external_refs` plus one conformance case, and the column already
+exists in all three backends.
+
+## [M10] The bundle carries what the three helper signatures take — ruling R-82, read generally
+Ruling R-82 settles `outcome_schema`: the bundle carries **the schema itself, not a reference**,
+because "a reference is another server call, which is what the criterion forbids". Its general form
+is what shaped the rest: *"the bundle must carry everything the three helpers take as input …
+let the helper signatures enumerate the bundle's contents rather than guessing at them."*
+So `client/python/agentprops_client/compare.py` was read off, and each argument is a key:
+`exact(expected, actual)` and `subset(expected, actual)` → `expected.final` and `actual`;
+`schema(instance, outcome_schema)` → `actual` and `outcome_schema`; `grade(mode, …)` →
+`comparison`. The per-node half is the same reading one level down: each served step carries an
+`expected` (the authored fixture's `output`) beside its `actual`, so `exact(node["expected"],
+node["actual"])` is the whole call.
+The full key set is `{run, pin, dataset, comparison, expected, outcome_schema, actual, nodes, path,
+warnings}`.
+`dataset` — id, version, title, intent, author, labels, narrative, archived — goes **beyond** the
+helper signatures, deliberately: the criterion is "no further server calls", and a grader that has
+to ask which scenario it just graded has been sent back to the service. It is also what
+`export/langfuse.py` needs as the experiment item's input.
+Cost if wrong: a larger payload on one read-only tool. BP-016 makes the pinned blueprint version
+immutable, so the embedded schema cannot go stale relative to its run.
+
+## [M10] `path` juxtaposes the two paths and computes **no** verdict
+`path` is `{expected, actual, traversed}`. No `matches`, no first-divergence index, no missing-node
+set — and no `agentprops.path.matches_expected` on the span either.
+Reason: ground rule 2 is not "the service does not grade the outcome", it is "**there is no
+comparison logic in the server**", and a path verdict is comparison logic. A caller who wants one
+has `exact(bundle["path"]["expected"], bundle["path"]["actual"])` — positional, with an index on the
+difference — which the client already implements.
+**This restraint turned out to be load-bearing rather than pedantic, and the finding is the reason
+the entry is here.** `priya-missing-docs`'s `expected_path` visits `check_docs` **twice**, while
+`fetch_step` is idempotent on `(run_id, node_id, iteration)` (M6's gate) — so a second visit to a
+non-pool node records no second path entry, and the reconstructed path can **never** equal that
+`expected_path` however correctly an agent behaves. A `matches_expected` computed here would have
+reported a conforming run as divergent, on the service's authority, in the direction that reads as
+failure. The first draft did emit that attribute; `test_no_attribute_names_a_verdict` caught it.
+**Question for the owner (see below):** whether `expected_path` means "per visit" or "per step key"
+is a data-contract question this milestone must not answer by picking a comparison.
+
+## [M10] The Langfuse mapping, and exactly what was probed
+Ruling R-83: OTLP attributes, no vendor SDK, no API key handling in `src/`.
+**Probed**, against Langfuse's documented ingestion contract, as ruling R-79 requires:
+- `https://langfuse.com/docs/opentelemetry/get-started` — endpoint path `/api/public/otel`,
+  auth header `"Authorization: Basic ${AUTH_STRING}"`, and the trace/observation attribute families
+  (`langfuse.trace.name`, `langfuse.observation.type`, `langfuse.observation.input/output`, …), with
+  the note that "trace-level attributes must propagate to all spans for reliable filtering and
+  aggregation across observations".
+- `https://langfuse.com/integrations/native/opentelemetry/experiments` — "Ingest experiment spans
+  with OpenTelemetry", which is the **dataset-run** contract the brief asks for. Three levels:
+  *experiment context* (`langfuse.experiment.id`, `langfuse.experiment.name`,
+  `langfuse.experiment.dataset.id` required; `…description`, `…metadata.*`, `langfuse.environment`
+  optional); *experiment item root* (`langfuse.observation.input`, `langfuse.observation.output`,
+  `langfuse.experiment.item.id`, `langfuse.experiment.item.root_observation_id` required, the last
+  "must equal the span's own `spanId`"; `…expected_output`, `…version`, `…metadata.*` optional);
+  *item context*, propagated to the child spans. Two sentences shaped the span tree and both agree
+  with what `otel.py` had already built: "Langfuse needs a clear root span to identify the item
+  trace and its data", and "**Do not create an enclosing 'experiment' span.**"
+
+So **OTLP attributes are sufficient** — the honest answer, with a probe, rather than "I did not find
+how". The mapping:
+
+| Langfuse | agent-props |
+|---|---|
+| `experiment.dataset.id` | the **blueprint** — `agent_id`, the agent whose scenarios these are |
+| `experiment.item.id` / `item.version` | one agent-props **dataset** at the version the run pinned |
+| the item trace | one agent-props **run** |
+| `item.expected_output` | `expected.final` |
+| `observation.output` (root) | the run's recorded `outcome` |
+| `observation.input` (root) | the authored world: `{narrative, labels}` |
+| `observation.input/output` (step) | the served fixture and the recorded `actual` |
+| `observation.type` | `tool_call`→`tool`, `llm`→`generation`, others→`span`, root→`agent` |
+| `trace.name` / `trace.tags` / `environment` | dataset title / `dimension:value` labels / `run_class` |
+
+`decision`, `loop` and `terminal` deliberately stay the neutral `span`: a `decision` is not a
+`chain` and a `terminal` node is not an `event`, and a nearby word would make a Langfuse view claim
+something about the agent's structure the blueprint never said.
+
+**The one judgement is `langfuse.experiment.id`**, which their contract wants unique per experiment
+and shared across its item traces — and agent-props has **no experiment or suite id on a run**. It
+is derived from `(agent_id, blueprint_version, run_class, provider, model, model_version)`: the
+tuple that makes two runs comparable, which is PRD design principle 2 as an identity ("a difference
+between two runs must be attributable to the model, not the world"). **Cost, recorded rather than
+hidden:** two batches run a week apart against the same model collapse into one experiment, because
+the only field that could separate them is a clock read and that would make the id
+non-reproducible. **Phase-2 note:** an explicit experiment id on the run is the fix, and it is an
+owner decision.
+
+**Baggage** is a propagation mechanism, not an ingestion format: it is how a *distributed*
+instrumentation gets an attribute onto a span it does not build. This module builds every span from
+one stored run, so it sets the attributes directly on each — the same end state, no propagator.
+
+**What was NOT probed, stated plainly (R-79's corollary).** No trace was sent to a Langfuse
+instance. That needs a project and an API key, and ground rule 4 keeps key handling out of `src/`.
+So the attribute names and shapes are checked against the documented contract above and against a
+**real OTLP collector** (`tests/integration/test_otel_collector.py` asserts every required
+attribute survives the round trip on every span, with `root_observation_id` equal to the root span's
+id). The claim "Langfuse files this as a dataset run" rests on their documentation, not on an
+observation of their server.
+
+## [M10] Braintrust is not a target, and that is a probe rather than an omission
+PRD 5.4 point 6 names Braintrust beside Langfuse and an OTel collector. `EXPORT_TARGETS` is
+`{otel, langfuse}` and an unknown target is `AP-001` naming both.
+Probed: `https://www.braintrust.dev/docs/integrations/sdk-integrations/opentelemetry` — Braintrust
+**does** accept OTLP at `https://api.braintrust.dev/otel/v1/traces`, and it does read
+`braintrust.*` span attributes (`braintrust.span_attributes`, `braintrust.metadata`,
+`braintrust.input_json` / `output_json`). But its project and experiment linkage rides an
+**HTTP header** — `x-bt-parent=project_id:<id>`, alternatively `project_name:` or `experiment_id:` —
+not a span attribute.
+Reason for leaving it out: the header would be configuration this service does not have and, in the
+API-key half, configuration ground rule 4 forbids it to have. The transport already reaches
+Braintrust through `OTEL_EXPORTER_OTLP_HEADERS`; what is missing is only the attribute overlay.
+**Phase-2 note:** adding `braintrust` is one module the shape of `langfuse.py` plus an owner
+decision about the header, not a line to slip into the vocabulary.
+
+## [M10] The collector is a third compose profile on port **4418**
+`docker compose --profile otel up -d otel-collector` runs
+`otel/opentelemetry-collector-contrib:0.144.0` with an OTLP/HTTP receiver, a `debug` exporter for a
+human and a `file` exporter for the test. Published on **4418** (host) → 4318 (container), health
+extension on **13233** → 13133.
+Reason: ruling R-60 applied to a third protocol. 4318 is OTLP/HTTP's default, so any other collector
+on a developer's machine answers it — and a clause-1 test that passed against someone else's
+collector would be worth exactly what M7's Mongo run against a foreign database was worth. 27017
+became 27117 and 5432 became 5442 for this reason; 4318 becomes 4418. Only `AGENTPROPS_OTLP_PORT` or
+`AGENTPROPS_TEST_OTLP_URL` can point it elsewhere, which is a deliberate act. The skip message names
+both URLs.
+A **third profile** rather than an addition to `local` and `shared` because the collector is
+orthogonal to both: a caller may want it beside either, or on its own against a containerless SQLite
+store. Folding it into both would start two collectors for anyone who tried both.
+`-contrib` rather than the core image because the `file` exporter lives there, and the test needs to
+read the spans back and count them — the `debug` exporter's stdout format is documented as unstable.
+**Two things measured rather than assumed.** `flush_interval: 1s` is **required**, not a tuning
+knob: with `append: true` the exporter wraps the file in a buffered writer and otherwise flushes
+only on shutdown, so the first run had the collector printing all ten spans through `debug` and
+leaving the file empty. And the output file must not be **deleted** while the collector holds it
+open — doing so leaves the exporter writing to an unreadable inode and every test reports zero
+spans, which reads exactly like a service that stopped exporting.
+
+## [M10] The clause-1 count is distinct span **ids**, not lines in the file
+`spans_written` de-duplicates by `spanId`.
+Reason: a span id is derived from the run id and the step's identity, so re-running the suite
+re-exports the *same* trace with the *same* ten span ids and the append-only file then holds twenty
+lines describing ten spans. Counting lines makes the assertion a fact about how many times pytest
+has run — measured, on the third run, as "30 spans reached the collector". Counting distinct span
+ids makes it a fact about the trace, which is what the clause is about.
+Each collector test also derives its run id from its own test name, so the trace-id filter is exact
+rather than shared.
+
+## [M10] One OTLP batch per export, not one span per request
+`emit` builds the spans with an in-memory exporter first (`readable_spans`), then hands the whole
+list to `OTLPSpanExporter.export` once.
+Reason: the obvious wiring — hang the OTLP exporter off a `SimpleSpanProcessor` — exports **one span
+per call**. A ten-span run became ten HTTP requests, a collector saw ten payloads instead of one
+trace, and a dead endpoint cost ten retry budgets instead of one: **measured at twenty seconds
+against one**. Splitting construction from transport also means every property of the emitted trace
+is assertable with no collector at all, which is why `test_export_otel.py` reads real `ReadableSpan`
+objects rather than the `SpanSpec` tree it built them from.
+`ok` is the exporter's own `SpanExportResult`, not the absence of an exception: the OTLP exporter
+does not raise on a refusal, it retries and returns `FAILURE`, and reporting that as success is the
+shape ruling R-65 forbade one layer in.
+The provider is local to the call, never `trace.set_tracer_provider` (the MCP SDK ships its own
+instrumentation and the global is a race either way), and the sampler is `ALWAYS_ON` **explicitly**,
+because the default is read from `OTEL_TRACES_SAMPLER` and an ambient `traceidratio` would silently
+drop a caller's export. An explicit export is not a sampling decision.
+
+## [M10] `AP-008`: an outward export target refused, or was not listening
+An eighth boundary code, with a row in `contracts.md` section 3.5. `run_export` against an
+unreachable collector is `ok: false` with `AP-008` and the endpoint in the finding's `context`.
+Reason: `ok: true` would claim a publication that did not happen — ruling R-65's rule pointed
+outward, "a success the transport declined to give". Not gating: ground rule 3 governs refusing to
+*serve*, and R-56 settled that a refused write is `ok: false`. An export is a write, outward.
+Why not an existing code: `AP-001` means a malformed argument and here every argument is well formed
+(an unknown *target* **is** `AP-001`); `AP-005` is *this* service's store refusing through a
+programming-error guard, which is a defect in us, whereas a collector refusing a batch is a fact
+about someone else's deployment whose only actionable part is the endpoint (R-60: the URL beside the
+count).
+
+## [M10] `external_ref` is an object, and the endpoint is in it
+`{target, trace_id, endpoint, spans}` under the `external_ref` key.
+Reason: `contracts.md` names the key, not its type, and ruling R-60's standing requirement is to put
+the URL beside any count — an export reporting "10 spans" without saying where they went is the same
+class of evidence as a test count with no URL. `trace_id` is the value contracts 2.3 calls
+`otel_trace_id`.
+
+## [M10] The endpoint comes from the OTel SDK's own environment convention
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, else `OTEL_EXPORTER_OTLP_ENDPOINT` (a *base* URL, so
+`/v1/traces` is appended to that one only), else the SDK's `localhost:4318` default.
+Reason: no new configuration surface, and — the load-bearing half — **no credential ever reaches
+this code**. An API key travels in `OTEL_EXPORTER_OTLP_HEADERS`, which the exporter reads and no
+module in `src/` names; `test_no_credential_variable_is_named_anywhere_in_this_package` scans for
+that, which is ground rule 4 and ruling R-83 as a measurement rather than a promise.
+Alternative rejected: a `ServiceContext` field plus a CLI argument. It would be a second way to say
+the same thing, and the one that has to handle the key.
+
+## [M10] No span ever carries an error status
+Every span is `StatusCode.UNSET`, asserted against five runs — as emitted, an outcome contradicting
+the expectation in every field, an abandoned run, every fixture faulted, and an agent that went
+nowhere.
+Reason: ground rule 2. The service stores expectations and emits evidence; the three comparison
+helpers live in the client. An `ERROR` status is a verdict a dashboard turns red without anyone
+having chosen a comparison mode. The faulted case is the clearest of the five: a `fault` fixture is
+the authored world failing **on purpose**, so a red span would report a fixture doing its job as an
+error.
+
+## [M10] The committed evidence fixture, and the one field masked on both sides
+`tests/fixtures/evidence/priya-missing-docs-run.json` is regenerated by
+`scripts/make_evidence_fixture.py` and held to the live service by
+`test_service_evidence.py::test_the_live_bundle_equals_the_committed_fixture`. Both sides walk the
+*same* run, through `tests/evidencewalk.py`.
+Reason: clause 2's test must have no store and no session, so it needs a bundle on disk — and a
+golden file nobody checks against the service is M9's clause-1 defect with the arrow reversed
+("a harness that cannot build a reply the service sends manufactures agreement").
+`recorded_at` is masked, because it is stamped by the **database** (`func.now()`), which R-09 permits
+as "a column default" and which the injected clock cannot freeze. The mask is a **valid** timestamp
+one second after the frozen instant rather than a sentinel like `<stamped>`: a sentinel would be
+unmistakable but would make the fixture a document the service can never emit, and
+`test_export_otel.py` reads that fixture to build a trace. `test_the_masked_field_is_a_real_timestamp`
+asserts the live values separately — an aware UTC stamp on every recorded step, `None` on exactly the
+unrecorded one — so what is hidden is the value and not the field.
+Two timestamps in the bundle come from the step's own `model_dump(mode="json")` rather than
+`isoformat()`. That is ruling R-24 rather than fastidiousness: the model is the canonicaliser and its
+form is `…Z`, and a hand-rolled `isoformat()` put `+00:00` beside `…Z` in one payload — the exact
+round-trip defect R-24 was written about, in a new place.
+
+## [M10] `no_run` went public
+`service/runs.py::_no_run` → `no_run`.
+Reason: `evidence.py` addresses a run by the same argument and must answer a missing one with the
+same code (RT-E03). Two spellings of "no such run" would make a caller branch on which tool it
+asked. Same move `service/documents.py`'s dumpers made at M9.5, for the same reason.
+
+## Questions for the owner — M10
+1. **Does `expected.expected_path` mean "per visit" or "per step key"?** The golden dataset's path
+   visits `check_docs` twice, and `fetch_step`'s idempotency on `(run_id, node_id, iteration)` means
+   a second visit to a non-pool node records no second path entry — so the reconstructed path can
+   never equal that `expected_path`, however correct the agent. The bundle therefore hands over both
+   lists and computes nothing, which is right under ground rule 2 either way; but a *client* running
+   `exact(path.expected, path.actual)` will report every conforming run as divergent. The two
+   candidate fixes are a data-contract change (`expected_path` records step keys, not visits) or a
+   client-side path helper that collapses re-visits. Both are owner decisions.
+2. **Should `Run.external_refs` ever be populated?** It is declared in contracts 2.3, the column
+   exists in all three backends, and nothing writes it. M10 deliberately did not add
+   `set_run_external_refs` (see the entry above); the ref is derivable, so nothing is lost except
+   that `run_get` shows `{}` forever.
+3. **Is a derived `langfuse.experiment.id` acceptable, or should a run carry one?** Two eval batches
+   a week apart against the same model currently collapse into one Langfuse experiment. An explicit
+   optional `experiment_id` on `run_start` would fix it and is a contract change.
+4. **Braintrust:** the probe says its dataset/experiment linkage needs an `x-bt-parent` **header**,
+   which is configuration this service does not hold and, for the key half, must not. Add the
+   `braintrust.*` attribute overlay anyway and leave the header to `OTEL_EXPORTER_OTLP_HEADERS`, or
+   leave the target out?

@@ -16,10 +16,11 @@ Phase 1 is eleven milestones, **M0 to M10**, defined in
 additive milestone between M9 and M10, defined by ruling **R-76** rather than by the handoff. **M11, the TypeScript client, was
 descoped by the owner — do not build it (R-68).** Build one milestone per session, in order.
 Each milestone's acceptance criteria are the gate: do not start one until the previous one's
-criteria pass. **M0 through M9 are built, plus M9.5:** the models, the validator, all three storage
-adapters, the MCP surface, the skeleton pipeline, the runtime read path, the containers, the
-promotion path, the Python client, the web app and the MCP prompt and resource surfaces.
-Twenty-five tools, four prompts, five resources, three backends, two packages and one web app -
+criteria pass. **Phase 1 is complete: M0 through M10, plus M9.5** - the models, the validator, all
+three storage adapters, the MCP surface, the skeleton pipeline, the runtime read path, the
+containers, the promotion path, the Python client, the web app, the MCP prompt and resource
+surfaces, and M10's outward publishing.
+Twenty-seven tools, four prompts, five resources, three backends, two packages and one web app -
 the service in `src/agentprops/`, `agent-props-client` in `client/python/`, which is separately
 installable and depends on nothing of the service's, and `web/`, which reaches the service through
 the tool surface and nothing else.
@@ -64,6 +65,14 @@ A change that violates one of these is a bug, however convenient.
   No defaults, no "fill it in later". `narrative` (what happens in the world) and `intent` (why this
   dataset exists in the suite) are different fields and must not carry the same text. `author` is
   attribution, never authentication — build no ownership or permissions on it.
+- **Nothing outward grades, either.** M10's `export/` turns a recorded run into an OTLP trace and
+  adds the `langfuse.*` attributes that make it arrive as a dataset run, and **no span carries an
+  error status and no attribute names a verdict** - both paths ride the trace side by side, as they
+  do in the bundle. `run_evidence` hands out everything the client's three comparison helpers take
+  as input, including the pinned blueprint's `outcome_schema` **itself** rather than a reference to
+  it (ruling R-82), and `tests/unit/test_evidence_grading.py` grades a committed bundle in an
+  interpreter where importing `agentprops` **raises**. `export/` imports no sibling layer at all -
+  not even `models/` - because it takes the bundle, so the trace and the evidence cannot drift.
 - **Determinism.** All randomness inside the service flows through `Seeded` in `expansion/seeded.py`,
   which takes `(seed, salt)` where salt is the node id or field path. No bare `random`, `uuid4()` or
   `datetime.now()` in any generation or expansion path — `tests/unit/test_layering.py` forbids the
@@ -145,6 +154,16 @@ Available from M0 onward, once `pyproject.toml` exists.
   MCP endpoint cross-origin - `OPTIONS /mcp` is 405 and no response carries a CORS header, measured
   (`DECISIONS.md` [M9], finding F-16). `npm test`, `npm run lint` and `npm run typecheck` are its
   own gates and are separate from `uv run pytest`; `web/README.md` has the rest
+- `docker compose --profile otel up -d otel-collector` — M10's local OpenTelemetry collector, which
+  `tests/integration/test_otel_collector.py` measures the first acceptance clause against. A
+  **third** profile, orthogonal to the two below rather than part of either. It publishes OTLP/HTTP
+  on **4418** and its health endpoint on **13233**, not the defaults 4318 and 13133 — ruling R-60
+  again, because any other collector on the machine answers 4318 and a clause that passed against
+  someone else's collector would prove nothing. Without it those tests skip with both URLs in the
+  reason. `run_export` reads the OpenTelemetry SDK's own `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` /
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, so agent-props adds no configuration of its own and never touches a
+  credential — an API key belongs in `OTEL_EXPORTER_OTLP_HEADERS`, which the exporter reads and no
+  module in `src/` names
 - `docker compose --profile local up` — service plus Mongo, for authoring; `--profile shared` for
   Postgres. Alternatives rather than layers; both publish the service on 8000. The databases
   publish **Mongo on 27117 and Postgres on 5442**, not their default ports, and the test URLs

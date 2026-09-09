@@ -38,16 +38,17 @@ both documents in `vanilla-jsoneditor` against the emitted JSON Schemas, and dra
 graph read-only with React Flow, and the M9.5 prompt and resource surfaces — four registered
 MCP prompts in `src/agentprops/server/prompts.py`, composed against the store in
 `src/agentprops/service/prompts.py`, plus the canonical examples read *from the store* in
-`src/agentprops/service/examples.py`. **Twenty-five tools, four prompts, five resources, three
-backends, two packages, one web app.** `export/` is an empty module waiting on M10.
+`src/agentprops/service/examples.py`, and M10's outward publishing — `run_evidence`, `run_export`
+and `src/agentprops/export/`. **Twenty-seven tools, four prompts, five resources, three
+backends, two packages, one web app.**
 
 M9.5 is an additive milestone between M9 and M10, approved by the owner and recorded as ruling
 R-76: the server advertised the `prompts` and `resources` capabilities from M4 and registered
 neither, so the workflow instructions lived only in this README.
 
-Not yet built: the evidence bundle (M10), which is where phase 1 ends — ruling R-68 descopes M11,
-the TypeScript client, by owner decision. `tests/unit/test_tool_surface.py` lists exactly which
-documented tools are still deferred, and to which milestone;
+**Phase 1 is complete at M10** — ruling R-68 descopes M11, the TypeScript client, by owner
+decision. The one documented tool still unbuilt is `blueprint_infer`, which `contracts.md` tags
+phase 1.5; `tests/unit/test_tool_surface.py` is where that deferral is recorded, and
 `tests/unit/test_prompt_and_resource_surface.py` does the equivalent for the other two surfaces.
 
 ## Use it against your own agent repo
@@ -257,8 +258,14 @@ matter, where the seam goes.
 ### Rough edges, so you meet them here and not mid-session
 
 - **`blueprint_infer` does not exist.** Claude authors; nothing infers.
-- **`run_evidence` is M10 and unbuilt.** Grade the outcome you recorded, as above, rather
-  than asking the service for a bundle.
+- **`run_evidence` gives you everything and grades nothing.** The bundle carries the expectation,
+  your recorded outcome, per-node expected against actual, both paths side by side, the declared
+  comparison mode and the pinned blueprint's `outcome_schema` itself — so
+  `grade(b["comparison"], b["expected"]["final"], b["actual"], outcome_schema=b["outcome_schema"])`
+  is the whole call and needs no second request. It computes no verdict, including about the paths:
+  compare them yourself with `exact(b["path"]["expected"], b["path"]["actual"])`, and read the note
+  in `DECISIONS.md` first — an `expected_path` that revisits a node can never equal a reconstructed
+  one, because `fetch_step` is idempotent per step key.
 - **Warnings never block.** A DS-027 warning — intent duplicating narrative — stores
   anyway. That is ground rule 3, not a bug.
 - **Fetch before you record.** `record_step` on an unserved step is `AP-004`, by design.
@@ -447,12 +454,12 @@ argument also reads an `AGENTPROPS_*` environment variable, which is how the con
 configured. A SQLite file is created if absent and Mongo's indexes are declared on startup; a
 Postgres database is neither, because it is migrated.
 
-Twenty-five tools. Blueprint: `blueprint_upsert`, `blueprint_get`, `blueprint_list`,
+Twenty-seven tools. Blueprint: `blueprint_upsert`, `blueprint_get`, `blueprint_list`,
 `blueprint_validate`, `blueprint_diff`. Dataset: `dataset_skeleton`, `dataset_fill_part`,
 `dataset_submit`, `dataset_validate`, `dataset_find`, `dataset_get`, `dataset_archive`,
 `dataset_restore`, `dataset_expand`, `dataset_export`, `dataset_import`. Run: `run_start`,
-`fetch_step`, `record_step`, `run_finish`, `run_get`, `run_find`. Admin: `store_status`,
-`label_vocabulary`, `agent_list`.
+`fetch_step`, `record_step`, `run_finish`, `run_get`, `run_find`, `run_evidence`, `run_export`.
+Admin: `store_status`, `label_vocabulary`, `agent_list`.
 
 Every tool answers one of the two envelopes in [`docs/contracts.md`](docs/contracts.md) section 1,
 and never raises for anything that reaches it — a malformed argument, an unknown id, a rule
