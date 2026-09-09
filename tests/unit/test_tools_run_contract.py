@@ -90,6 +90,33 @@ async def test_run_start_warns_on_a_declared_version_mismatch(seeded: ServiceCon
     assert envelope["data"]["start"]["run"]["run_class"] == "eval"
 
 
+async def test_a_diverging_replay_warns_over_the_wire(seeded: ServiceContext) -> None:
+    """Ruling R-53 through the transport: same run, warning attached, still ``ok``.
+
+    The wire is where this matters most, because the caller that hits it is a
+    client retrying after a network blip - and the two things it must never see
+    are a second run and a failure.
+    """
+    async with connected(seeded) as client:
+        first = await invoke(
+            client, "run_start", run_id=RUN_ID, agent_id=AGENT, selector={"dataset_id": PRIYA}
+        )
+        assert codes(first) == []
+        again = await invoke(
+            client,
+            "run_start",
+            run_id=RUN_ID,
+            agent_id=AGENT,
+            selector={"labels": {"scenario": "no-such-scenario"}},
+        )
+        assert again["ok"] is True
+        assert codes(again) == ["run_start_mismatch"]
+        assert again["data"]["start"]["pin"] == first["data"]["start"]["pin"]
+
+        listed = await invoke(client, "run_find")
+        assert len(listed["data"]["runs"]) == 1, "a replay must not create a second run"
+
+
 async def test_a_malformed_argument_is_an_envelope_and_not_a_protocol_error(
     seeded: ServiceContext,
 ) -> None:

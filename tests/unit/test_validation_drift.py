@@ -41,7 +41,10 @@ from typing import Final
 
 from agentprops.models import RUNTIME_ERROR_CODES, RUNTIME_WARNING_CODES
 from agentprops.service.blueprints import WARNING_BLUEPRINT_VERSION_MISSING
-from agentprops.service.runs import WARNING_DATASET_SELECTION_AMBIGUOUS
+from agentprops.service.runs import (
+    WARNING_DATASET_SELECTION_AMBIGUOUS,
+    WARNING_RUN_START_MISMATCH,
+)
 from agentprops.validation import (
     FILL_RULES,
     RULE_REGISTRY,
@@ -279,19 +282,35 @@ def test_the_warning_vocabulary_is_the_documented_three_plus_named_additions() -
     tabulates three codes and :data:`RUNTIME_WARNING_CODES` must be exactly
     those, so a fourth cannot be smuggled into the shared constant.
 
-    An addition therefore lives in the module that attaches it, and the two
+    An addition therefore lives in the module that attaches it, and the three
     there are asserted by name so this test says what the arrangement is rather
     than only what it forbids: ``blueprint_version_missing`` on
-    ``blueprint_diff`` (M4) and ``dataset_selection_ambiguous`` on ``run_start``
-    (M6). PRD 5.4's ``unresolved_step`` is **not** among them: R-22 records that
-    it was superseded by RT-E01/RT-E02 rather than dropped by accident.
+    ``blueprint_diff`` (M4), and ``dataset_selection_ambiguous`` and
+    ``run_start_mismatch`` on ``run_start`` (M6, rulings R-54(a) and R-53).
+    PRD 5.4's ``unresolved_step`` is **not** among them: R-22 records that it
+    was superseded by RT-E01/RT-E02 rather than dropped by accident.
+
+    And each addition has to be *documented*, which the table guard cannot see:
+    a code attached by a tool and described nowhere is a code the next
+    milestone invents a second time.
     """
     assert parse_runtime_warnings(CATALOGUE_PATH) == RUNTIME_WARNING_CODES
-    additions = {WARNING_BLUEPRINT_VERSION_MISSING, WARNING_DATASET_SELECTION_AMBIGUOUS}
+    additions = {
+        WARNING_BLUEPRINT_VERSION_MISSING,
+        WARNING_DATASET_SELECTION_AMBIGUOUS,
+        WARNING_RUN_START_MISMATCH,
+    }
     assert additions & RUNTIME_WARNING_CODES == set(), (
         "a tool-local warning code must not also be in the shared constant"
     )
     assert "unresolved_step" not in RUNTIME_WARNING_CODES | additions
+
+    prose = CATALOGUE_PATH.read_text(encoding="utf-8")
+    undocumented = {code for code in additions if f"`{code}`" not in prose}
+    assert not undocumented, (
+        f"these warning codes are attached by a tool and documented nowhere in "
+        f"docs/contracts.md: {sorted(undocumented)}"
+    )
 
 
 def test_the_skeleton_rules_are_documented_and_implemented() -> None:

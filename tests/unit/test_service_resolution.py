@@ -15,6 +15,7 @@ answered the same node.
 
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -168,6 +169,33 @@ def test_the_named_candidates_are_a_working_retry(blueprint: Blueprint) -> None:
     _, findings = resolve(blueprint, run_at("check_docs"), tool_name=REPEATED_TOOL)
     for candidate in findings[0].context["candidates"]:
         assert resolve(blueprint, run_at("check_docs"), node_id=candidate) == (candidate, [])
+
+
+def test_two_candidates_reachable_in_one_hop_are_also_rt_e01(
+    blueprint_document: dict[str, Any],
+) -> None:
+    """The ``len(narrowed) > 1`` branch, which no stored blueprint can reach.
+
+    BP-014 rejects a blueprint whose two one-hop successors share a
+    ``tool_name``, so this case is unreachable through the store - which is why
+    the *reachable* RT-E01 is the empty narrowing. But ``resolve`` is pure over
+    a ``Blueprint`` model, so the branch is three lines away from being covered,
+    and "unreachable by another layer's rule" is a claim worth having a test
+    behind rather than a reason to leave a branch untested.
+    """
+    document = copy.deepcopy(blueprint_document)
+    for node in document["nodes"]:
+        if node["id"] in {"request_docs", "assign_training"}:
+            node["tool_name"] = "delightree.both.ways"
+    graph = Blueprint.model_validate(document)
+
+    resolved, findings = resolve(graph, run_at("check_docs"), tool_name="delightree.both.ways")
+    assert resolved is None
+    assert [finding.rule for finding in findings] == [RT_E01]
+    assert findings[0].context["candidates"] == ["request_docs", "assign_training"]
+    assert sorted(findings[0].context["narrowed"]) == ["assign_training", "request_docs"], (
+        "both candidates survived the narrowing, which is the branch under test"
+    )
 
 
 # ------------------------------------------------------------------ step 3
