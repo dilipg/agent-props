@@ -16,7 +16,7 @@ See [`CLAUDE.md`](CLAUDE.md) for the invariants and layering rules that govern t
 
 ## Status
 
-Phase 1 is being built one milestone at a time, M0 through M11 (see
+Phase 1 is being built one milestone at a time, M0 through M10 (see
 [`docs/build-handoff.md`](docs/build-handoff.md) section 4). This repository currently has the M0
 scaffold (package layout, tooling, CI, golden fixtures), the M1 domain models in
 `src/agentprops/models/`, the M2 validator in `src/agentprops/validation/` — every `BP-*` and
@@ -35,7 +35,8 @@ Mongo adapters in `src/agentprops/storage/`, `Dockerfile` and `docker-compose.ym
 — alongside its two server-side writes, `record_step` and `run_finish`. **Twenty-five tools, three
 backends, two packages.** `export/` is an empty module waiting on M10.
 
-Not yet built: the web app (M9), the evidence bundle (M10), the TypeScript client (M11).
+Not yet built: the web app (M9) and the evidence bundle (M10), which is where phase 1 ends —
+ruling R-68 descopes M11, the TypeScript client, by owner decision.
 `tests/unit/test_tool_surface.py` lists exactly which documented tools are still deferred, and to
 which milestone.
 
@@ -346,4 +347,4 @@ docs/             the specification (PRD, build handoff, contracts, worked examp
 `Dockerfile`, `docker-compose.yml` and `.dockerignore` sit beside them at the repository root.
 `client/python/` is its **own distribution** with its own `pyproject.toml` and no dependency on the
 service; it is on this project's dev dependency group so one `uv run pytest` covers both packages.
-`client/typescript` and `web/` arrive with the milestones that own them (M11, M9).
+`web/` arrives with M9. There is no `client/typescript`: ruling R-68 descopes M11.
