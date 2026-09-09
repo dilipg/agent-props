@@ -1235,6 +1235,44 @@ suite, which asserts identical results across backends — and would then be ass
 **Cost if wrong.** A clamp rejects an integer some future caller wanted; the bound is the
 column's own width, so such a caller was going to get an error regardless — just a worse one.
 
+## Rulings that bind M6 (the runtime read path)
+
+### R-51 — `pool: true` on a non-loop node draws exactly like a loop node
+
+This settles finding F-31, deferred from the pre-flight scan. BP-017 says `kind: loop`
+implies `pool: true` but deliberately does **not** state the converse, so a non-loop node may
+legally declare `pool: true` — and DS-018 then requires it to have a `pools` entry. Nothing
+defines what drawing from it means.
+
+**Ruling.** The pool mechanism is **orthogonal to `kind`**. A `pool: true` node draws by
+`iteration` in order, repeats the last entry with `pool_exhausted` for any index
+>= `len(pool)`, and behaves identically whether or not it is a loop node. No special case.
+
+Two things make this the right reading rather than a convenience. R-03 already fixes the
+complement — "a non-zero `iteration` against a `pool: false` node is a caller error, reported
+as RT-E02" — and the natural complement of that is that a non-zero iteration against a
+`pool: true` node is always legal. And a non-loop node with a pool is a useful thing to
+author: a step that is retried, or reached twice by different branches, wants a second
+fixture without its blueprint node being a loop.
+
+**Cost if wrong.** If the owner wants pools restricted to loop nodes, that is a new blueprint
+rule (`pool: true` implies `kind: loop`), not a change to the draw semantics.
+
+### R-52 — the `pool_exhausted` boundary in `worked-example.md` section 7 is off by one
+
+Restating R-03's correction here because M6 and M8 both implement against that script and it
+is the single most likely place to encode the doc's error.
+
+The golden `request_docs` pool has **2 entries**. Exhaustion therefore begins at iteration
+**2**, not iteration 3 as section 7 step 7 states. Iteration 0 draws `pools[0]`, iteration 1
+draws `pools[1]`, and **iteration 2 already repeats `pools[1]` and sets `pool_exhausted`**.
+
+M6's tests and M8's end-to-end script both assert `pool_exhausted` from iteration 2 onward.
+Do not "fix" this by padding the golden pool to three entries — the fixture is byte-exact
+from the spec and R-44 now guards it.
+
+**Cost if wrong.** One boundary constant and its assertions.
+
 ## Rulings that bind later milestones
 
 ### R-15 — phase-2 tools required by a phase-1 gate get built (findings F-12, F-13)
