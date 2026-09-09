@@ -60,7 +60,13 @@ SERVICE_MODULE: Final = "agentprops"
 #: What the probe below runs inside the fresh environment. Deliberately more
 #: than an import: it grades a document, so the assertion is that the client
 #: *works* there rather than that it merely resolves.
-PROBE: Final = """
+#:
+#: ``SERVICE`` is prepended rather than interpolated: the body is full of ``{}``
+#: dict literals, so an f-string is not available and a placeholder that looked
+#: like one would be a trap for the next reader.
+PROBE: Final = (
+    f"SERVICE = {SERVICE_MODULE!r}"
+    + """
 import importlib.util, json, sys
 import agentprops_client
 from agentprops_client import grade, subset
@@ -72,13 +78,14 @@ json.dump(
         "module": agentprops_client.__name__,
         "graded": bool(verdict.ok),
         "dispatched": bool(dispatched.ok),
-        "service_available": importlib.util.find_spec("agentprops") is not None,
+        "service_available": importlib.util.find_spec(SERVICE) is not None,
         "run_client": agentprops_client.RunClient.__name__,
         "run_module": agentprops_client.RunClient.__module__,
     },
     sys.stdout,
 )
 """
+)
 
 
 def test_the_client_declares_its_own_packaging() -> None:

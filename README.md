@@ -128,7 +128,7 @@ from agentprops_client import connect, grade
 with connect("http://localhost:8000/mcp", agent_id="location-onboarding") as client:
     client.run_start({"labels": {"scenario": "missing-documents"}})
     step = client.fetch_step(tool_name="delightree.stores.get")
-    step.resolved_node_id            # 'fetch_store_profile' — resolved by position
+    step.resolved_node_id  # 'fetch_store_profile' — resolved by position
     client.record_step(step.output, node_id=step.resolved_node_id)
     run = client.run_finish({"onboarding_status": "complete", "outstanding_tasks": 0})
 
