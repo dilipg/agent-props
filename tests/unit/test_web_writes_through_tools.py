@@ -114,8 +114,21 @@ NETWORK_PRIMITIVES: Final[tuple[str, ...]] = (
     "<form",
 )
 
-#: Source files the scans cover. `.css` and `.json` cannot make a request.
-WEB_SUFFIXES: Final[tuple[str, ...]] = (".ts", ".tsx")
+#: Source files the scans cover. `.css` and `.json` cannot make a request, and
+#: neither can a `.md`. Every dialect that *can* is listed: the scan was `.ts`
+#: and `.tsx` only, which would have skipped a plain `.js` or `.mjs` module
+#: dropped into `web/src` - and a guard whose coverage depends on a file
+#: extension nobody chose deliberately is a guard with a gap.
+WEB_SUFFIXES: Final[tuple[str, ...]] = (
+    ".ts",
+    ".tsx",
+    ".mts",
+    ".cts",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+)
 
 #: Named rather than written inline so this file's own source stays free of the
 #: escape sequences its stripper is about, which makes both easier to read.
@@ -548,6 +561,66 @@ def test_the_web_app_does_name_both_permitted_writes() -> None:
         f"the web app never calls {sorted(missing)}, so it cannot write. Ruling R-17: the web app "
         f"writes through the tool surface."
     )
+
+
+#: Literals in `tools.ts` that ruling R-70 rests on, each with the reason it is
+#: load-bearing. The clause-5 guard checks tool *names*; these are tool
+#: *arguments*, and R-70 accepted `dataset_import` as the edit path partly
+#: because of what they are.
+REQUIRED_LITERALS: Final[dict[str, str]] = {
+    "blueprints: []": (
+        "ruling R-70 accepted dataset_import as the dataset-edit path on the fact that with an "
+        "empty blueprint list it CANNOT publish a blueprint as a side effect of saving a "
+        "dataset. A non-empty list would re-publish an immutable version and make R-70's first "
+        "supporting fact false."
+    ),
+    "publish: false": (
+        "a published blueprint version is immutable (BP-016), so an editor that published on "
+        "every save would make the second save an error. Publishing is a deliberate act, not "
+        "what pressing save in a JSON editor means."
+    ),
+}
+
+
+def test_the_dataset_edit_bundle_carries_no_blueprint() -> None:
+    """Minor 6: the fact ruling R-70 rests on, guarded rather than assumed.
+
+    Nothing mechanically held it. The clause-5 scans check which tools are
+    *named*; the bundle's contents are an *argument*, and the Python-side
+    review-surface test re-implements the bundle rather than deriving it from
+    the app - so both sides could have agreed while the app sent something
+    else.
+
+    A literal assertion over `tools.ts`, beside the existing `"dataset_import"`
+    check, because the value is a constant in one construction site with one
+    caller. If it ever becomes computed, this fails and the guard has to be
+    rewritten to follow it - which is the right moment to notice.
+    """
+    source = strip_comments(TOOLS_MODULE.read_text(encoding="utf-8"))
+    missing = {
+        literal: reason for literal, reason in REQUIRED_LITERALS.items() if literal not in source
+    }
+    assert not missing, f"these literals are gone from {TOOLS_MODULE.name}: " + "; ".join(
+        f"{literal!r} - {reason}" for literal, reason in missing.items()
+    )
+
+
+def test_the_bundle_literals_are_in_code_and_not_only_in_prose() -> None:
+    """The non-vacuity of the test above.
+
+    :func:`strip_comments` blanks comment bodies, so a `blueprints: []` that
+    survives stripping is in code. Asserted separately because the docstring in
+    `tools.ts` *discusses* `blueprints: []` at length, and a scan over the raw
+    source would pass on the prose alone.
+    """
+    raw = TOOLS_MODULE.read_text(encoding="utf-8")
+    stripped = strip_comments(raw)
+    for literal in REQUIRED_LITERALS:
+        assert literal in raw
+        assert literal in stripped, (
+            f"{literal!r} appears in {TOOLS_MODULE.name} only inside a comment; the code no "
+            f"longer does it"
+        )
 
 
 def test_every_call_tool_argument_is_a_literal() -> None:
