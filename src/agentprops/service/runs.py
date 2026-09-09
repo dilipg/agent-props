@@ -191,6 +191,7 @@ __all__ = [
     "find",
     "finish",
     "get",
+    "no_run",
     "paginate",
     "record_step",
     "start",
@@ -362,7 +363,7 @@ def fetch_step(
 
     run = context.store.get_run(run_id)
     if run is None:
-        return failure([_no_run(run_id)])
+        return failure([no_run(run_id)])
 
     blueprint = context.store.get_blueprint(run.agent_id, run.pin.blueprint_version)
     if blueprint is None:  # pragma: no cover - DS-001 plus BP-016 make this unreachable
@@ -435,7 +436,7 @@ def record_step(
 
     run = context.store.get_run(run_id)
     if run is None:
-        return failure([_no_run(run_id)])
+        return failure([no_run(run_id)])
 
     blueprint = context.store.get_blueprint(run.agent_id, run.pin.blueprint_version)
     if blueprint is None:  # pragma: no cover - DS-001 plus BP-016 make this unreachable
@@ -494,10 +495,10 @@ def finish(context: ServiceContext, run_id: str, outcome: dict[str, Any], status
     try:
         claimed = context.store.mark_run_finished(run_id, status, outcome, context.clock.now())
     except RecordNotFoundError:
-        return failure([_no_run(run_id)])
+        return failure([no_run(run_id)])
     run = context.store.get_run(run_id)
     if run is None:  # pragma: no cover - no hard delete, so the run cannot vanish
-        return failure([_no_run(run_id)])
+        return failure([no_run(run_id)])
     diverged = [] if claimed else _finish_divergence(run, status, outcome)
     if diverged:
         return failure([_finish_conflict(run, status, diverged)])
@@ -515,7 +516,7 @@ def get(context: ServiceContext, run_id: str) -> Reply:
     """
     run = context.store.get_run(run_id)
     if run is None:
-        return failure([_no_run(run_id)])
+        return failure([no_run(run_id)])
     return success("run", run.model_dump(mode="json"))
 
 
@@ -1241,8 +1242,15 @@ def _finish_divergence(run: Run, status: str, outcome: dict[str, Any]) -> list[s
 # ------------------------------------------------------------------- findings
 
 
-def _no_run(run_id: str) -> RuleError:
-    """RT-E03. The one finding four entry points share, so they cannot drift."""
+def no_run(run_id: str) -> RuleError:
+    """RT-E03. The one finding every run-addressed entry point shares.
+
+    Public since M10, for the reason `service/documents.py`'s dumpers went
+    public at M9.5: `evidence.py` addresses a run by the same argument and must
+    answer a missing one with the same code, and a second spelling of "no such
+    run" is a second thing to keep in step. The name is the finding's, so a
+    reader of either module sees one function rather than a copy.
+    """
     return runtime(RT_E03, field_pointer("run_id"), f"no run {run_id!r}.", run_id=run_id)
 
 

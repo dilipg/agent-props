@@ -1,4 +1,4 @@
-"""Envelope construction, and the seven boundary codes that are not rules.
+"""Envelope construction, and the eight boundary codes that are not rules.
 
 `docs/contracts.md` section 1 defines two shapes and CLAUDE.md's style rule says
 every tool answers with one of them: **structured errors, never exceptions, for
@@ -56,6 +56,12 @@ happen, and ``ok: true`` would claim a success the store declined to give. An
 *identical* re-write is not this - it is a no-op success, because the caller's
 intent is already satisfied.
 
+An eighth, added at M10 for ``run_export``, covers an **outward** target that
+refused the trace or was not listening. It is the same rule as the seventh
+pointed outward: nothing was published, so ``ok: true`` would claim a success
+the transport declined to give. It is the first code in this family about
+something outside this process, which is why its context carries the endpoint.
+
 ``AP-*`` ids are **not catalogue rules** and must never be registered as ones.
 ``tests/unit/test_service_envelope.py::test_boundary_codes_are_not_catalogue_rules``
 asserts they are disjoint from ``RULE_REGISTRY`` and from the documented
@@ -83,6 +89,7 @@ from agentprops.validation.pointers import pointer, section_for_pointer
 __all__ = [
     "AP_ARGUMENT",
     "AP_DOCUMENT_SHAPE",
+    "AP_EXPORT_REFUSED",
     "AP_ID_SPACE_EXHAUSTED",
     "AP_MALFORMED_JSON",
     "AP_NOT_FOUND",
@@ -147,6 +154,27 @@ AP_ID_SPACE_EXHAUSTED: Final = "AP-006"
 #: classification was written to avoid.
 AP_WRITE_ONCE_CONFLICT: Final = "AP-007"
 
+#: An eighth, added at M10 for ``run_export``: an **outward export target**
+#: refused the trace, or is not there. Nothing was published; nothing about the
+#: run changed.
+#:
+#: It is not any of the seven above, and the near misses are worth naming.
+#: ``AP-001`` means an argument is malformed, and here every argument is well
+#: formed - an unknown ``target`` *is* ``AP-001``, and this is the case where
+#: the target was one of the two and the collector at the other end was not
+#: listening. ``AP-005`` is a *store* refusing a write through a
+#: programming-error guard, which is a defect in this service; a collector
+#: refusing a batch is a fact about someone else's deployment, and the only
+#: actionable thing in it is the endpoint, which travels in the finding's
+#: context (ruling R-60: put the URL beside the count).
+#:
+#: **Why this is a failure rather than a warning.** ``ok: true`` would claim a
+#: publication that did not happen, which is ruling R-65's rule one layer out -
+#: "a success the transport declined to give". And it is not gating: ground
+#: rule 3 forbids refusing to *serve*, and R-56 settled that a refused write is
+#: ``ok: false``. An export is a write, outward.
+AP_EXPORT_REFUSED: Final = "AP-008"
+
 BOUNDARY_CODES: Final[frozenset[str]] = frozenset(
     {
         AP_ARGUMENT,
@@ -156,6 +184,7 @@ BOUNDARY_CODES: Final[frozenset[str]] = frozenset(
         AP_STORE_REFUSED,
         AP_ID_SPACE_EXHAUSTED,
         AP_WRITE_ONCE_CONFLICT,
+        AP_EXPORT_REFUSED,
     }
 )
 
