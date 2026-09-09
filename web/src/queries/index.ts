@@ -35,7 +35,7 @@ import {
   labelVocabulary,
   storeStatus,
 } from "@/mcp/tools";
-import type { ImportedDatasets } from "@/mcp/tools";
+import type { ImportedDatasets, WithWarnings } from "@/mcp/tools";
 
 const NO_RETRY = { retry: false } as const;
 
@@ -93,7 +93,7 @@ export function useDatasets(filter: DatasetFilter): UseQueryResult<readonly Data
 export function useDataset(
   datasetId: string | undefined,
   version?: number,
-): UseQueryResult<DatasetView> {
+): UseQueryResult<WithWarnings<DatasetView>> {
   return useQuery({
     queryKey: ["dataset_get", datasetId, version ?? null],
     queryFn: () => datasetGet(datasetId as string, version),
@@ -109,7 +109,11 @@ export function useDataset(
  * what the store actually holds rather than from what the editor had. That is
  * the point of a round trip: the stored document is the truth.
  */
-export function useSaveBlueprint(): UseMutationResult<BlueprintView, Error, JsonDocument> {
+export function useSaveBlueprint(): UseMutationResult<
+  WithWarnings<BlueprintView>,
+  Error,
+  JsonDocument
+> {
   const client = useQueryClient();
   return useMutation({
     mutationFn: blueprintSave,
@@ -126,7 +130,7 @@ export function useSaveBlueprint(): UseMutationResult<BlueprintView, Error, Json
  */
 export function useSaveDataset(
   agentId: string,
-): UseMutationResult<ImportedDatasets, Error, JsonDocument> {
+): UseMutationResult<WithWarnings<ImportedDatasets>, Error, JsonDocument> {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (document: JsonDocument) => datasetSave(agentId, document),

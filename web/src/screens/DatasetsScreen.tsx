@@ -15,8 +15,19 @@ import { DatasetDetail } from "@/components/DatasetDetail";
 import { DatasetFilters } from "@/components/DatasetFilters";
 import { DatasetList } from "@/components/DatasetList";
 import { DocumentEditor } from "@/components/DocumentEditor";
+import { Warnings } from "@/components/Findings";
 import type { DatasetFilter } from "@/mcp/types";
 import { useDataset, useDatasets, useLabelVocabulary, useSaveDataset } from "@/queries";
+
+/**
+ * The page size, sent explicitly rather than left to the server default.
+ *
+ * Ruling R-42(b) ratified 50 as `dataset_find`'s default "because it suits the
+ * review surface M9 builds on it". Sending it means the app *knows* the
+ * boundary it is displaying, which is what lets the footer say "the page is
+ * full" instead of printing a page count as though it were a total.
+ */
+const PAGE_SIZE = 50;
 
 export function DatasetsScreen({ agentId }: { readonly agentId: string | undefined }): React.JSX.Element {
   const [filter, setFilter] = useState<DatasetFilter>({});
@@ -24,17 +35,32 @@ export function DatasetsScreen({ agentId }: { readonly agentId: string | undefin
   const [editing, setEditing] = useState(false);
 
   const scoped = useMemo<DatasetFilter>(
-    () => ({ ...filter, ...(agentId === undefined ? {} : { agent_id: agentId }) }),
+    () => ({
+      ...filter,
+      ...(agentId === undefined ? {} : { agent_id: agentId }),
+      limit: PAGE_SIZE,
+    }),
     [filter, agentId],
   );
   const datasets = useDatasets(scoped);
   const vocabulary = useLabelVocabulary(agentId);
   const detail = useDataset(selected);
-  const save = useSaveDataset(agentId ?? "");
+  const dataset = detail.data?.value;
+  /**
+   * The agent id comes from the **dataset's own blueprint reference**, not from
+   * the screen's selection.
+   *
+   * `agentId ?? ""` sent an empty `agent_id` in the bundle whenever no agent
+   * was selected, which the service rejects — and the dataset already knows
+   * which agent it belongs to. A bundle whose `agent_id` disagreed with its
+   * dataset's blueprint would be wrong even when the selection was set.
+   */
+  const save = useSaveDataset(dataset?.blueprint.agent_id ?? "");
   const dimensions = useMemo(
     () => Object.keys(vocabulary.data?.label_schema.dimensions ?? {}),
     [vocabulary.data],
   );
+  const rows = datasets.data ?? [];
 
   return (
     <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[minmax(360px,1fr)_1.4fr]">
@@ -53,10 +79,25 @@ export function DatasetsScreen({ agentId }: { readonly agentId: string | undefin
             error={datasets.error}
           />
         </div>
-        <p className="shrink-0 border-t border-slate-200 px-4 py-1.5 text-[11px] text-slate-400">
-          {String((datasets.data ?? []).length)} dataset
-          {(datasets.data ?? []).length === 1 ? "" : "s"} · one row per lineage at its latest
-          version
+        {/*
+          A count that says what it counts. The number of rows is a **page**,
+          not a total: `dataset_find` takes a limit and this app has no paging,
+          so printing the row count as "50 datasets" told a reviewer they had
+          seen everything when they had seen the first fifty. The agent's true
+          total comes from `label_vocabulary`, which is already fetched.
+        */}
+        <p
+          data-testid="dataset-count"
+          className="shrink-0 border-t border-slate-200 px-4 py-1.5 text-[11px] text-slate-400"
+        >
+          {String(rows.length)} shown
+          {vocabulary.data === undefined
+            ? ""
+            : ` · ${String(vocabulary.data.dataset_count)} in this agent`}
+          {rows.length >= PAGE_SIZE
+            ? ` · page limit of ${String(PAGE_SIZE)} reached, refine the filter to see more`
+            : ""}
+          {" · one row per lineage at its latest version"}
         </p>
       </section>
 
@@ -90,17 +131,24 @@ export function DatasetsScreen({ agentId }: { readonly agentId: string | undefin
               <div className="min-h-0 flex-1">
                 <DocumentEditor
                   kind="dataset"
-                  loaded={detail.data}
+                  loaded={dataset}
                   onSave={(document) => {
                     save.mutate(document);
+                  }}
+                  onDirty={() => {
+                    // Clears `mutation.error`, so a rejection does not outlive
+                    // the document it was about. Without it the finding list
+                    // reports rules against text the reviewer has since fixed.
+                    save.reset();
                   }}
                   saveLabel="Save as new version"
                   saveState={save.status === "idle" ? "idle" : save.status}
                   saveError={save.error}
+                  saveWarnings={save.data?.warnings ?? []}
                   savedMessage={
                     save.data === undefined
                       ? null
-                      : `saved as v${String(save.data.datasets[0]?.version ?? "?")}`
+                      : `saved as v${String(save.data.value.datasets[0]?.version ?? "?")}`
                   }
                 />
               </div>
@@ -108,10 +156,19 @@ export function DatasetsScreen({ agentId }: { readonly agentId: string | undefin
               <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
                 {detail.error !== null ? (
                   <p className="text-xs text-red-700">{detail.error.message}</p>
-                ) : detail.data === undefined ? (
+                ) : dataset === undefined ? (
                   <p className="text-xs text-slate-400">Loading…</p>
                 ) : (
-                  <DatasetDetail dataset={detail.data} dimensions={dimensions} />
+                  <>
+                    {/*
+                      `dataset_get` warns `dataset_archived` for a dataset
+                      reached by explicit id. An archived dataset is hidden
+                      from `dataset_find` and still readable, so a reviewer
+                      following a link needs telling it has been withdrawn.
+                    */}
+                    <Warnings warnings={detail.data?.warnings ?? []} />
+                    <DatasetDetail dataset={dataset} dimensions={dimensions} />
+                  </>
                 )}
               </div>
             )}
