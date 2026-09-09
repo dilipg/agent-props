@@ -3703,3 +3703,28 @@ session suffix, and is never a value read from the URL.
 Worth writing down mainly because of how close it came to being reported as a result. A 14-failure
 Mongo run, in the round that exists because a number was not reproducible, would have been the same
 mistake in a new costume.
+
+## [M7, fix round 2] Where `hypothesis` actually is, and a summary sentence that denied it
+`build-handoff.md` line 290 reads "Property-based testing with `hypothesis` is worth it in exactly
+one place: the seeded expansion". The tree has **eight** property tests in **three** files:
+`tests/unit/test_seeded.py` (5, the primitive), `tests/unit/test_service_expansion.py` (1,
+`jittered_range`, added in fix round 1) and `tests/unit/test_mongo_key_codec.py` (2, the escape
+codec).
+
+The first two are the subject line 290 names. The codec is not, and it is a deliberate deviation:
+its whole property is injectivity over an adversarial alphabet - `%.$2E45abc`, almost entirely
+escape characters - which is exactly what a property test buys and exactly what an example table
+cannot cover, since the interesting inputs are the ones nobody thinks to write down. Two tests, one
+file. Recorded when it was made, above, and described in section 4 of the M7 report.
+
+**What was wrong was the summary sentence.** Section 2 of that report claimed `hypothesis` "is used
+in exactly the one place `build-handoff.md` names - five property tests in `tests/unit/test_seeded.py`",
+and section 4 of the same report then describes the codec property test in plain words. The report
+contradicted itself from the day it was written, and the false half was the half a reader auditing
+the constraint would stop at. A summary that denies the detail beneath it is worse than no summary,
+because the summary is the part that gets quoted.
+
+Corrected in the fix-round-2 appendix rather than edited in place, the same way the superseded test
+counts are listed rather than silently rewritten. If line 290 is meant as a cap on the total rather
+than as a naming of the subject, this needs a ruling; either way it needed stating rather than
+denying.
