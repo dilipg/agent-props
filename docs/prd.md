@@ -57,7 +57,7 @@ Positioning line to test: *record-and-replay can only test what already happened
 | Real data | **Fake only in phase 1.** | No PII means no redaction, no residency question, no security review. |
 | Access control | **None. Flat, single-tenant, no auth.** | Internal tool for dev, product and QA. Enforced by the fake-only rule and internal-only deployment, not by permissions. |
 | CI behaviour | **Never gates. Records only.** | It provisions data and records what happened. Teams build their own gates on top. |
-| Client library | **Python only in phase 1.** TypeScript client is the closing milestone. | Astra's eval side is Python. TS follows for the product stack. |
+| Client library | **Python only in phase 1.** ~~TypeScript client is the closing milestone.~~ **The TypeScript client was descoped by the owner on 2026-09-09 — see `docs/spec-rulings.md` R-68. Phase 1 ends at M10.** | Astra's eval side is Python. TS follows for the product stack. |
 | Authoring UI | **JSON editor with live schema validation**, not a graph builder. | Cheapest thing that works. Library recommendation in 10.4. |
 | CLI | **Deferred out of phase 1.** | The MCP server, the Python client and the web app cover the phase 1 jobs. No daemon-mode question to answer yet. |
 | Distribution | **Delightree internal first**, open source later. | Astra is the design partner and the requirement source. |
@@ -377,7 +377,7 @@ Stated explicitly so they do not creep back in:
 - **No owned dashboards or comparison UI.** Publish outward.
 - **No interception of tool calls.** Pull only.
 - **No graph authoring UI.** JSON editor with live validation, plus a read-only graph view.
-- **No TypeScript client.** Python only, TS is the closing milestone.
+- **No TypeScript client.** Python only. ~~TS is the closing milestone.~~ **Descoped entirely by the owner (R-68); it is not a later milestone, it is out of phase 1.**
 - **No CLI.** Deferred. The MCP server, Python client and web app cover phase 1.
 - **No writes from a running agent to a dataset.** Ever, in any phase, not just phase 1.
 - **No hard delete.** Archive only.
@@ -393,7 +393,7 @@ Exit criteria: the location-onboarding workflow has a published blueprint; at le
 **Phase 1.5: adoption unblockers**
 `blueprint_infer` from OpenAPI, MCP `tools/list`, LangGraph graph, or a recorded trace. Deterministic `dataset_expand`. Export as agent-vcr `.vcr` cassettes and AIMock fixture configs so teams already on those tools adopt without a rip-and-replace.
 
-**Milestone: TypeScript client.** Parity with the Python client (run id generation, fetch, record, the three comparison helpers). Closes out the phase 1 line and unblocks the product stack. Deliberately last, so the client contract is settled by real Python usage before a second implementation has to track it.
+**Milestone: TypeScript client — DESCOPED (R-68), retained for the record.** Parity with the Python client (run id generation, fetch, record, the three comparison helpers). Closes out the phase 1 line and unblocks the product stack. Deliberately last, so the client contract is settled by real Python usage before a second implementation has to track it.
 
 **Phase 2: run lifecycle**
 Per-step recording, full chain persistence, the evidence bundle, load-test dataset **assignment** strategies (round-robin, random-from-seed, label query over a pool), replay of a stored run. Note there is no reservation or locking: 5.6 makes datasets immutable, so concurrent runs sharing a dataset is safe by construction.

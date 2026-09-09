@@ -1604,9 +1604,27 @@ defensible but that "neither `RT-E0x` nor `AP-00x` fits a policy verdict".
 **Ruling.** Split by whether the value differs, because the two cases have different truths
 to report:
 
-- **Same value** → **no-op success with a warning.** Idempotent, and it matches R-29's
-  byte-identical re-publish and R-47's CAS: the caller's intent is already satisfied, nothing
-  changed, and saying so is honest.
+- **Same value** → **a silent no-op success.**
+
+  **Amended, because M8's implementer showed my reasoning was wrong.** I originally wrote
+  "no-op success **with a warning**" and cited R-29 and R-47 as matching precedents. They
+  point the other way: R-29's byte-identical re-publish is **silent**, and R-47's CAS loser
+  **errors**. Neither supports warning, and the implementer said so rather than implementing
+  a citation it could see was broken.
+
+  Silent is also the better answer on its own merits. The caller that re-records an identical
+  actual is a client retrying after a timeout — R-53 kept `run_start` idempotent for exactly
+  that case — and success is precisely what it expects. A warning on the expected outcome of a
+  retry is noise, and a vocabulary that fires on expected outcomes trains callers to ignore
+  it. Warnings should mean "something happened you would not have predicted".
+
+  This also dissolves a residue the implementer flagged: the identical-repeat detection read a
+  pre-write snapshot, so a concurrent equal write reported no warning. With no warning to
+  report, there is nothing to be inconsistent about — a sign the simpler answer was the right
+  one.
+
+  `run_already_finished` stays where R-54(c) put it and R-67(a) ratified it: on the **read**
+  path, when a finished run still serves a fetch. It should not appear on a write.
 - **Differing value** → **`ok: false` with an `AP-*` code.** The write **did not happen**.
   Returning `ok: true` for a refused write misrepresents the outcome, and that is the same
   class of defect as M3's silent success carrying the winner's value — louder, but the same
@@ -1698,9 +1716,20 @@ is a scope decision from the product owner, recorded here because this file is w
 session reads and a milestone section that still says "build this" is exactly the kind of
 stale instruction this build has spent nine milestones learning to distrust.
 
-**Verified before recording:** nothing in the project referenced M11 or a TypeScript client —
-the only matches were third-party noise in `.venv` — and `client/typescript/` was never
-created. So there is no residue to unwind and no dependency to sever. M11 was deliberately
+**Correction — the verification claim above was false, and the cause matters.** I first wrote
+that "nothing in the project referenced M11 or a TypeScript client — the only matches were
+third-party noise in `.venv`". That was wrong. My grep piped through `head -20`, the `.venv`
+noise filled all twenty lines, and the real matches never printed. **I read a truncated
+result as a complete one** — the exact failure this build keeps finding, committed inside a
+ruling about stale claims. M8's implementer caught it.
+
+The actual residue, found on a proper re-run: three references in `docs/prd.md` (the client
+library row, the non-goals list, and the phasing section, all now struck through and marked),
+two in `README.md` (already corrected by M8's implementer in `d822a89`), and three in
+`DECISIONS.md`, which is append-only and whose M0 entry was accurate when written — those get
+a retraction entry rather than an edit.
+
+`client/typescript/` was indeed never created, so no code had to be unwound. M11 was deliberately
 placed last precisely so the contract would be settled by real Python usage first, which
 means dropping it forfeits nothing already built.
 
