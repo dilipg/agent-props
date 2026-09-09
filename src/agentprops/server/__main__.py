@@ -8,9 +8,14 @@ cannot be demonstrated to work.
 Four arguments and no configuration file, on purpose::
 
     python -m agentprops.server --store ./agentprops.db
-    python -m agentprops.server --store mongodb://localhost:27017/agentprops
-    python -m agentprops.server --store postgresql://user:pw@localhost/agentprops
+    python -m agentprops.server --store mongodb://localhost:27117/agentprops
+    python -m agentprops.server --store postgresql://user:pw@localhost:5442/agentprops
     python -m agentprops.server --transport http --port 8931
+
+The two database ports here are 27117 and 5442 rather than the defaults, because
+those are what `docker-compose.yml` publishes - ruling R-60. A copied example
+that dialled 27017 would reach whatever foreign server happens to be listening,
+which is the hazard the ruling exists to remove.
 
 ``--store`` takes **any of the three backends**, which is M7's change: a Mongo
 URL, a Postgres URL, a SQLite URL or a bare SQLite file path, dispatched by

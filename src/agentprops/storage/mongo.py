@@ -330,7 +330,7 @@ class MongoStore:
 
         ``database`` defaults to the URL's path when it names one and to
         :data:`DEFAULT_DATABASE` otherwise, which is what makes
-        ``mongodb://localhost:27017/`` a complete argument.
+        ``mongodb://localhost:27117/`` a complete argument.
         """
         client: MongoClient[dict[str, Any]] = MongoClient(
             url,
@@ -1167,8 +1167,8 @@ def datetime_of(value: Any) -> datetime:
 def _database_in(url: str) -> str | None:
     """The database named in a Mongo URL's path, if it names one.
 
-    ``mongodb://host:27017/agentprops`` gives ``agentprops``;
-    ``mongodb://host:27017/`` and ``mongodb://host:27017`` give ``None``. Query
+    ``mongodb://host:27117/agentprops`` gives ``agentprops``;
+    ``mongodb://host:27117/`` and ``mongodb://host:27117`` give ``None``. Query
     parameters are stripped, because ``?replicaSet=rs0`` is not part of a
     database name.
     """
