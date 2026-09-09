@@ -1,4 +1,4 @@
-"""The six run tools. contracts section 4, Run table.
+"""The eight run tools. contracts section 4, Run table.
 
 ``run_start`` and ``fetch_step`` are the runtime read path: neither writes a
 dataset, and `service/runs.py` is where that is enforced and
@@ -11,8 +11,16 @@ section 4 tags them phase 2, and R-15 reads that tag as "not required for a
 working phase-1 runtime" rather than "must not exist" - M8's gate needs a
 recorded outcome to grade. Both write to the **run** and can reach no dataset,
 so ground rule 1 is untouched; the read-only guard's call graph covers them
-alongside the other four. ``run_evidence`` and ``run_export`` are M10's and stay
-in `tests/unit/test_tool_surface.py`'s ``DEFERRED`` until then.
+alongside the other four.
+
+``run_evidence`` and ``run_export`` are M10's, by the same ruling, and they are
+the last two entries `tests/unit/test_tool_surface.py`'s ``DEFERRED`` list gave
+up. Both are **reads** - and reads in the stricter sense the other six are not:
+the read-only guard asserts they reach no store mutator at all, not even the
+five run writes, which is what makes ``run_export`` a publication rather than a
+side effect. Neither grades. ``run_evidence`` hands out the expectation and the
+actual side by side and applies no comparison; ``run_export`` puts the same two
+on a span with nothing between them.
 
 Neither of M8's two tools grades anything (ground rule 2). Both split a repeated
 write by whether the value differs, per ruling R-65: an **identical** re-record
@@ -46,9 +54,18 @@ from agentprops.server.args import (
     TextArg,
     reply,
 )
-from agentprops.service import failure, runs
+from agentprops.service import evidence, failure, runs
 
-__all__ = ["fetch_step", "record_step", "run_find", "run_finish", "run_get", "run_start"]
+__all__ = [
+    "fetch_step",
+    "record_step",
+    "run_evidence",
+    "run_export",
+    "run_find",
+    "run_finish",
+    "run_get",
+    "run_start",
+]
 
 
 @mcp.tool()
@@ -231,3 +248,55 @@ def run_find(
     if args.errors:
         return reply(failure(args.errors))
     return reply(runs.find(bound(), query))
+
+
+@mcp.tool()
+def run_evidence(run_id: TextArg) -> dict[str, Any]:
+    """Everything an external grader needs for one run, with no further calls.
+
+    The expectation the dataset author wrote, the outcome your agent produced,
+    per-node expected against actual, the traversed path beside the authored
+    `expected_path`, the declared comparison mode, the blueprint's
+    `outcome_schema` **itself**, and the run's warnings.
+
+    Nothing here is a verdict. The three comparison helpers in
+    `agentprops_client.compare` take exactly what this returns -
+    `grade(bundle["comparison"], bundle["expected"]["final"], bundle["actual"],
+    outcome_schema=bundle["outcome_schema"])` is the whole call - and the two
+    paths are handed over side by side for you to compare, because deciding
+    whether a run passed happens outside this service by design.
+    """
+    args = ArgReader()
+    identifier = args.text("run_id", run_id)
+    if args.errors:
+        return reply(failure(args.errors))
+    return reply(evidence.evidence(bound(), identifier))
+
+
+@mcp.tool()
+def run_export(run_id: TextArg, target: TextArg) -> dict[str, Any]:
+    """Publish one run to an OTLP collector as a trace. One span per step.
+
+    `target` is `otel` for a vendor-neutral trace, or `langfuse` for the same
+    trace plus the `langfuse.*` experiment attributes that make it arrive as a
+    dataset run. Anything else is `AP-001` naming the two.
+
+    Where it goes is the OpenTelemetry SDK's own environment convention:
+    `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, else `OTEL_EXPORTER_OTLP_ENDPOINT`,
+    else `http://localhost:4318/v1/traces`. An API key belongs in
+    `OTEL_EXPORTER_OTLP_HEADERS`, which the exporter reads and this service
+    never touches.
+
+    Returns `external_ref` - the target, the trace id, the endpoint it posted
+    to and the span count. The trace id is derived from the run id, so
+    exporting the same run twice lands in the same trace rather than making a
+    second one. A collector that refuses or is not listening is `AP-008` with
+    the endpoint in its context: nothing was published, and the run is
+    unchanged either way.
+    """
+    args = ArgReader()
+    identifier = args.text("run_id", run_id)
+    destination = args.text("target", target)
+    if args.errors:
+        return reply(failure(args.errors))
+    return reply(evidence.export(bound(), identifier, destination))
