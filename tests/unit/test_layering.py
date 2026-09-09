@@ -620,7 +620,7 @@ def test_the_server_file_table_is_not_empty() -> None:
 
 def test_the_tool_module_table_is_not_empty() -> None:
     """``TOOL_MODULES`` is what makes the guards below cover a *new* tool module."""
-    assert len(TOOL_MODULE_FILES) == 3, f"expected three tool modules, got {TOOL_MODULE_FILES}"
+    assert len(TOOL_MODULE_FILES) == 4, f"expected four tool modules, got {TOOL_MODULE_FILES}"
 
 
 @pytest.mark.parametrize("path", SERVICE_FILES, ids=lambda p: p.name)

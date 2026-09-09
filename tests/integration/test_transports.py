@@ -41,7 +41,7 @@ from pathlib import Path
 import pytest
 from mcp import Client, StdioServerParameters
 
-from agentprops.server import DEFAULT_HTTP_PATH, binding, serve_http
+from agentprops.server import DEFAULT_HTTP_PATH, binding, mcp, serve_http
 from agentprops.service import sqlite_context
 
 pytestmark = pytest.mark.integration
@@ -141,13 +141,20 @@ async def test_the_streamable_http_transport_serves_the_whole_tool_surface(
 
     ``store_status`` alone would leave open whether a tool taking arguments, or
     one returning a failure envelope, survives the transport's serialisation.
+
+    The count is taken from the in-process server rather than written down, so
+    the claim is "HTTP reports the same surface" rather than "HTTP reports the
+    sixteen tools that existed when this was written" - which is the assertion
+    that went stale the moment M6 registered four more.
     """
     database = tmp_path / "http-surface.db"
     async with http_server(database, free_port()) as url:
         await connect_when_ready(url)
         async with Client(url) as client:
             listed = await client.list_tools()
-            assert len(listed.tools) == 16
+            assert {tool.name for tool in listed.tools} == {
+                tool.name for tool in await mcp.list_tools()
+            }
 
             missing = await client.call_tool("blueprint_get", {"agent_id": "nobody"})
             assert missing.structured_content is not None
@@ -160,3 +167,12 @@ async def test_the_streamable_http_transport_serves_the_whole_tool_surface(
             )
             assert diffed.structured_content is not None
             assert diffed.structured_content["ok"] is True, "blueprint_diff never fails"
+
+            started = await client.call_tool(
+                "run_start",
+                {"run_id": "http-run-1", "agent_id": "nobody", "selector": {"labels": {}}},
+            )
+            assert started.structured_content is not None
+            assert started.structured_content["errors"][0]["rule"] == "RT-E04", (
+                "the runtime module answers over HTTP too"
+            )

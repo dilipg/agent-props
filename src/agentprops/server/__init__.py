@@ -1,10 +1,10 @@
 """MCP surface. Thin. No business logic.
 
-The ``MCPServer`` instance, the two transports, and thirteen tools across three
+The ``MCPServer`` instance, the two transports, and twenty tools across four
 modules. Importing this package is what *registers* the tools: each
 `tools_*.py` module decorates its functions with ``@mcp.tool()`` at import time,
-so the three imports below are the registration, and removing one silently
-removes five tools from the surface.
+so the four imports below are the registration, and removing one silently
+removes its tools from the surface.
 
 ``tests/unit/test_tool_surface.py`` is what makes that safe. It enumerates the
 tools the running server actually reports and asserts that every one of them is
@@ -12,7 +12,7 @@ exercised by a test, in the same way `test_validation_drift.py` asserts that
 every catalogue rule has an implementation and a fixture. A tool added without a
 test fails; a tool whose test is deleted fails.
 
-How to add a tool - for M5, M6 and M7
+How to add a tool - for M7 and after
 -------------------------------------
 
 1. Write the service function in `service/`. All of the behaviour goes here:
@@ -49,7 +49,7 @@ What a new tool inherits, and therefore need not build
 
 from typing import Final
 
-from agentprops.server import tools_admin, tools_blueprint, tools_dataset
+from agentprops.server import tools_admin, tools_blueprint, tools_dataset, tools_run
 from agentprops.server.app import (
     DEFAULT_HTTP_HOST,
     DEFAULT_HTTP_PATH,
@@ -67,7 +67,7 @@ from agentprops.server.app import (
 #: Every module that registers tools. Read by `tests/unit/test_layering.py` and
 #: by `tests/unit/test_tool_surface.py`, so a new tool module is covered by
 #: adding one name here rather than by remembering to update two test files.
-TOOL_MODULES: Final = (tools_blueprint, tools_dataset, tools_admin)
+TOOL_MODULES: Final = (tools_blueprint, tools_dataset, tools_admin, tools_run)
 
 __all__ = [
     "DEFAULT_HTTP_HOST",

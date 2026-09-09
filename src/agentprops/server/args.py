@@ -215,6 +215,18 @@ class ArgReader:
         self._reject(name, value, "an object")
         return {}
 
+    def optional_mapping(self, name: str, value: object) -> dict[str, Any] | None:
+        """A JSON object, or ``None`` when the argument was omitted.
+
+        The optional counterpart of :meth:`mapping`, for ``run_start``'s
+        ``model``. Absence and emptiness are different answers here and only a
+        *non-object* is rejected: ``{}`` is a caller saying "no model
+        recorded", which is what the field's own optionality means.
+        """
+        if value is None:
+            return None
+        return self.mapping(name, value)
+
     def required_labels(self, name: str, value: object) -> dict[str, str]:
         """A required ``{dimension: value}`` object of strings.
 
