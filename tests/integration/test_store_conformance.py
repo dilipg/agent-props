@@ -16,6 +16,15 @@ reach.
 **Identical results, never identical query plans.** Contracts section 7 says so
 of the label and ``q`` filters, whose SQLite implementation is a scan where
 Postgres has a GIN index. Every assertion here is about returned rows.
+
+M7 ran this file against a real Postgres 17 and a real MongoDB 8 and **changed
+nothing in it**, which was the point of writing it against the Protocol at M3.
+It *added* three tests at the end, for three properties that only became
+checkable once there were three servers to disagree: the ``find_runs``
+tie-break, which a locale-collated Postgres gets wrong; the ``ß``/``ss`` fold,
+which no SQL ``lower()`` or ``ILIKE`` reproduces; and the promise that no
+backend silently truncates an oversized ``seed``. Each one names the
+measurement it came from.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ from agentprops.models import (
     StepRecord,
     Warning,
 )
+from agentprops.service.limits import MAX_STORED_INT
 from agentprops.storage import (
     PublishedVersionImmutableError,
     RecordNotFoundError,
@@ -1174,3 +1184,108 @@ def test_health_counts_every_version_and_includes_archived(
         row for row in store.find_datasets(DatasetQuery()) if row.archived is False
     ]
     assert len(store.find_datasets(DatasetQuery())) == 1
+
+
+# --------------------------------------------------------------------------
+# M7: three properties three backends have to agree on, added when a real
+# Postgres and a real Mongo made them checkable
+# --------------------------------------------------------------------------
+
+
+def test_find_runs_breaks_a_tie_by_byte_order(store: Store, pinned: Dataset) -> None:
+    """Ruling R-35's "total, so identical inputs give byte-identical output".
+
+    **Added at M7 because it fails on Postgres without a fix**, and it is the
+    only ordering in the Protocol whose tie-break is a ``TEXT`` column that
+    actually decides cases. Two runs sharing a ``started_at`` are ordered by id,
+    and the three backends do not agree about what that means:
+
+    - SQLite compares with ``BINARY`` - ``memcmp`` over UTF-8;
+    - Mongo compares strings byte-wise;
+    - Postgres uses the database's ``LC_COLLATE``, and ``en_US.utf8`` - the
+      default on the official image - weights punctuation below letters, so
+      ``'runa' < 'run-b'``, the opposite of the other two.
+
+    Measured against Postgres 17: ``SELECT 'run-b' < 'runa'`` returns false.
+    So ``storage/sql.py`` collates the tie-break as ``C`` on Postgres, and this
+    is the test that says so - the ids differ only in a hyphen against a letter,
+    which is the one input that separates the two answers.
+    """
+    store.put_run(make_run("run-b", pinned, started_at=FROZEN_NOW))
+    store.put_run(make_run("runa", pinned, started_at=FROZEN_NOW))
+    assert [row.id for row in store.find_runs(RunQuery())] == ["run-b", "runa"]
+
+
+def test_find_q_folds_the_way_python_does_and_not_the_way_sql_does(
+    store: Store, published: Blueprint, dataset: Dataset
+) -> None:
+    """The sharpest case-folding case there is, and the reason ``q`` is not SQL.
+
+    ``str.casefold`` folds ``ß`` to ``ss``; no SQL ``lower()`` and no ``ILIKE``
+    does. Measured against Postgres 17 (UTF8, ``en_US.utf8``):
+
+        SELECT 'Straße operator' ILIKE '%strasse%'   ->  false
+        SELECT lower('Straße operator') LIKE '%strasse%'  ->  false
+
+    while Python matches, in **both** directions. Ruling R-36 makes substring
+    semantics the contract and R-39(a) puts the fold in Python on every backend
+    for exactly this reason, so this is the assertion that stops an ``ILIKE``
+    prefilter being added later as an "optimisation": it is not a superset of
+    what the contract promises, and adding it would silently drop rows.
+
+    ``test_find_q_folds_case_the_same_way_on_every_backend`` above is the
+    accented-vowel version, which Postgres *does* fold correctly - so it passes
+    against a SQL fold and this one does not. Both are needed; only one of them
+    is load-bearing.
+    """
+    german = _relabelled(dataset, "3f8c1a20-0000-4000-8000-0000000000c2")
+    german = german.model_copy(
+        update={
+            "provenance": german.provenance.model_copy(
+                update={"title": "Straße operator, first-time franchisee"}
+            )
+        }
+    )
+    store.put_dataset(german)
+
+    assert [row.id for row in store.find_datasets(DatasetQuery(q="strasse"))] == [german.id]
+    assert [row.id for row in store.find_datasets(DatasetQuery(q="STRASSE"))] == [german.id]
+    assert [row.id for row in store.find_datasets(DatasetQuery(q="Straße"))] == [german.id]
+
+
+def test_an_oversized_seed_is_never_silently_truncated(
+    store: Store, published: Blueprint, dataset: Dataset
+) -> None:
+    """Ruling R-50's bound, from the storage side: every backend refuses or keeps.
+
+    ``seed`` is a ``BIGINT`` on both SQL dialects and a BSON ``long`` on Mongo,
+    and the three drivers disagree about how they say so: pysqlite raises
+    ``OverflowError``, psycopg raises a ``DataError``, and bson raises
+    ``OverflowError`` of its own. R-50 bounds the value at the *boundary* for
+    that reason, and `test_bounded_integers.py` asserts the envelope there.
+
+    What this asserts is the property underneath, which is the one no backend
+    may get wrong: a seed either **round-trips exactly** or **is not stored at
+    all**. A truncated or wrapped seed would be the worst possible failure -
+    every id in the dataset is derived from it, so a silently altered seed makes
+    a dataset that can never be regenerated and never be shown to be wrong.
+
+    The exception type is deliberately not asserted: it is three different types
+    for one condition, which is precisely what a Protocol-level test must not
+    depend on.
+    """
+    assert store.put_dataset(dataset.model_copy(update={"seed": MAX_STORED_INT})).seed == (
+        MAX_STORED_INT
+    )
+
+    oversized = _relabelled(dataset, "3f8c1a20-0000-4000-8000-0000000000d1").model_copy(
+        update={"seed": MAX_STORED_INT + 1}
+    )
+    try:
+        stored = store.put_dataset(oversized)
+    except Exception:  # every driver spells this differently; see the docstring
+        assert store.get_dataset(str(oversized.id), None) is None, (
+            "the write failed and left a row behind"
+        )
+    else:
+        assert stored.seed == MAX_STORED_INT + 1, "the seed was silently altered"

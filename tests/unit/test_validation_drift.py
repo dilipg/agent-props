@@ -41,6 +41,7 @@ from typing import Final
 
 from agentprops.models import RUNTIME_ERROR_CODES, RUNTIME_WARNING_CODES
 from agentprops.service.blueprints import WARNING_BLUEPRINT_VERSION_MISSING
+from agentprops.service.expansion import WARNING_EXPANSION_ADDED_NOTHING
 from agentprops.service.runs import (
     WARNING_DATASET_SELECTION_AMBIGUOUS,
     WARNING_RUN_START_MISMATCH,
@@ -287,8 +288,11 @@ def test_the_warning_vocabulary_is_the_documented_three_plus_named_additions() -
     than only what it forbids: ``blueprint_version_missing`` on
     ``blueprint_diff`` (M4), and ``dataset_selection_ambiguous`` and
     ``run_start_mismatch`` on ``run_start`` (M6, rulings R-54(a) and R-53).
-    PRD 5.4's ``unresolved_step`` is **not** among them: R-22 records that it
-    was superseded by RT-E01/RT-E02 rather than dropped by accident.
+    ``expansion_added_nothing`` is M7's, on ``dataset_expand``: a ``count`` of
+    zero is a well-formed request that adds nothing, and the service does not
+    refuse well-formed requests. PRD 5.4's ``unresolved_step`` is **not** among
+    them: R-22 records that it was superseded by RT-E01/RT-E02 rather than
+    dropped by accident.
 
     And each addition has to be *documented*, which the table guard cannot see:
     a code attached by a tool and described nowhere is a code the next
@@ -298,6 +302,7 @@ def test_the_warning_vocabulary_is_the_documented_three_plus_named_additions() -
     additions = {
         WARNING_BLUEPRINT_VERSION_MISSING,
         WARNING_DATASET_SELECTION_AMBIGUOUS,
+        WARNING_EXPANSION_ADDED_NOTHING,
         WARNING_RUN_START_MISMATCH,
     }
     assert additions & RUNTIME_WARNING_CODES == set(), (

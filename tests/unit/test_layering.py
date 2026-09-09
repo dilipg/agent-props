@@ -134,8 +134,10 @@ MAX_TOOL_FUNCTION_LINES = 20
 #: this is doing something `service/` should be doing.
 MAX_TOOL_FUNCTION_STATEMENTS = 12
 
-#: Calls that read a clock or a random source, by dotted suffix.
-FORBIDDEN_CALLS = frozenset(
+#: Calls that read a clock. Dotted, so ``context.clock.now()`` - the injected
+#: port every stamped timestamp is supposed to come from - is not an offence
+#: while ``datetime.now()`` is.
+FORBIDDEN_CLOCK_CALLS = frozenset(
     {
         "datetime.now",
         "datetime.utcnow",
@@ -143,19 +145,72 @@ FORBIDDEN_CALLS = frozenset(
         "date.today",
         "time.time",
         "time.monotonic",
+    }
+)
+
+#: Calls that draw from an **unseeded** random source, matched by dotted
+#: *suffix* - so ``from uuid import uuid4; uuid4()`` is caught as well as
+#: ``uuid.uuid4()``. Every name here is distinctive enough that no method on the
+#: sanctioned seeded source shares it.
+#:
+#: ``choice`` is deliberately **not** here, and that is M7's change. Ground rule
+#: 9 is "all randomness inside the service flows through ``Seeded``", and
+#: contracts section 9 names ``Seeded.choice`` as one of its methods - so
+#: ``source.choice(templates)`` in `service/expansion.py` is the sanctioned
+#: source being used correctly, and a bare-suffix match cannot tell it from
+#: ``random.choice``. The two halves that replace it are strictly stronger than
+#: the suffix was: ``random.choice`` and ``secrets.choice`` are matched by their
+#: **dotted** names below, and :data:`FORBIDDEN_RANDOM_MODULES` forbids the
+#: *import* that a bare ``choice(...)`` would need. There is no third route.
+#:
+#: ``shuffle`` stays, and does not collide: the seeded method is ``shuffled``.
+FORBIDDEN_RANDOM_CALLS = frozenset(
+    {
         "uuid1",
         "uuid3",
         "uuid4",
         "uuid5",
-        "random",
         "randint",
-        "choice",
-        "shuffle",
+        "randrange",
+        "randbytes",
+        "randbelow",
         "getrandbits",
+        "shuffle",
+        "urandom",
         "token_hex",
         "token_bytes",
+        "token_urlsafe",
     }
 )
+
+#: Random-source calls that are offences only in their dotted form, because
+#: their last segment is a legitimate name on the seeded source or elsewhere.
+FORBIDDEN_DOTTED_RANDOM_CALLS = frozenset(
+    {
+        "random.random",
+        "random.choice",
+        "random.sample",
+        "random.uniform",
+        "secrets.choice",
+        "os.urandom",
+    }
+)
+
+#: Modules whose *import* is the offence, in every layer this file guards.
+#:
+#: This is the half that lets ``choice`` come off the suffix list without
+#: weakening anything. ``random.choice`` cannot be reached without naming
+#: ``random``: either as ``import random`` - and then the call is dotted and
+#: caught above - or as ``from random import choice``, and then this catches the
+#: import. Forbidding the import is also the earlier warning of the two: it
+#: fails on the line that made the mistake possible rather than on the line that
+#: made it.
+FORBIDDEN_RANDOM_MODULES = frozenset({"random", "secrets"})
+
+#: The union both call guards match against. One name, because every guard below
+#: asks the same question - "is this a clock or an unseeded random source" - and
+#: splitting the *check* as well as the data would be two places to update.
+FORBIDDEN_CALLS = FORBIDDEN_CLOCK_CALLS | FORBIDDEN_RANDOM_CALLS | FORBIDDEN_DOTTED_RANDOM_CALLS
 
 #: Calls that touch the filesystem or the network.
 FORBIDDEN_IO_CALLS = frozenset(
@@ -449,6 +504,102 @@ def test_the_expansion_guard_would_catch_a_random_source(tmp_path: Path) -> None
         if name in FORBIDDEN_CALLS or name.rsplit(".", 1)[-1] in FORBIDDEN_CALLS:
             offences.append(name)
     assert offences == ["random.choice", "uuid.uuid4", "datetime.now"]
+
+
+#: Every module the two random-source guards cover. All six layers, because
+#: ground rule 9 is stated absolutely - no bare ``random``, ``uuid4()`` or
+#: ``datetime.now()`` in any generation or expansion path - and "which modules
+#: are a generation path" is not a question a guard should have to answer.
+GUARDED_FILES = (
+    MODEL_FILES + VALIDATION_FILES + STORAGE_FILES + EXPANSION_FILES + SERVICE_FILES + SERVER_FILES
+)
+
+
+def random_module_imports(tree: ast.Module) -> list[str]:
+    """Every import of a module in :data:`FORBIDDEN_RANDOM_MODULES`, either spelling."""
+    offences: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            offences.extend(
+                f"line {node.lineno}: import {alias.name}"
+                for alias in node.names
+                if alias.name.split(".")[0] in FORBIDDEN_RANDOM_MODULES
+            )
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module
+            and node.module.split(".")[0] in FORBIDDEN_RANDOM_MODULES
+        ):
+            offences.append(f"line {node.lineno}: from {node.module}")
+    return offences
+
+
+@pytest.mark.parametrize("path", GUARDED_FILES, ids=lambda p: f"{p.parent.name}/{p.name}")
+def test_no_module_imports_an_unseeded_random_source(path: Path) -> None:
+    """Ground rule 9's other half, and the reason ``choice`` left the suffix list.
+
+    ``Seeded.choice`` is the sanctioned random source (contracts section 9), so
+    a guard matching the bare suffix ``choice`` reported `service/expansion.py`
+    for doing exactly what ground rule 9 requires. The replacement is this:
+    ``random`` and ``secrets`` may not be *imported* in any of the six layers,
+    which closes the only route a bare ``choice(...)`` could have taken, while
+    the dotted forms stay in :data:`FORBIDDEN_DOTTED_RANDOM_CALLS`.
+
+    Strictly stronger than what it replaced rather than weaker: the suffix match
+    could only see a call, and this sees the import that makes any call
+    possible - including one this file has not thought of.
+    """
+    offences = random_module_imports(parse(path))
+    assert not offences, (
+        f"{path.name} imports an unseeded random source; the only randomness in this "
+        f"service flows through expansion/seeded.py (ground rule 9): {offences}"
+    )
+
+
+def test_the_import_guard_would_catch_a_random_source_imported_by_name(tmp_path: Path) -> None:
+    """The guard for the guard, in the shape the expansion one already has.
+
+    Feeds it the exact spelling the suffix match used to catch and the call
+    guard now cannot - ``from secrets import choice`` - and asserts both the
+    module form and the by-name form are reported. Then feeds it the sanctioned
+    source and asserts **neither** guard reports that, which is the half that
+    makes removing ``choice`` from the suffix list a trade rather than a silent
+    widening.
+    """
+    offending = tmp_path / "smuggled.py"
+    offending.write_text(
+        "import random\n"
+        "from secrets import choice as pick\n"
+        "\n"
+        "def draw() -> object:\n"
+        "    return pick([1, 2])\n",
+        encoding="utf-8",
+    )
+    offences = random_module_imports(parse(offending))
+    assert len(offences) == 2, offences
+    assert "import random" in offences[0]
+    assert "from secrets" in offences[1]
+
+    clean = tmp_path / "seeded_use.py"
+    clean.write_text(
+        "from agentprops.expansion.seeded import Seeded\n"
+        "\n"
+        "def draw() -> object:\n"
+        "    return Seeded(1).choice([1, 2])\n",
+        encoding="utf-8",
+    )
+    assert random_module_imports(parse(clean)) == [], "the guard rejects the sanctioned source"
+    reported = [
+        dotted(node.func)
+        for node in ast.walk(parse(clean))
+        if isinstance(node, ast.Call)
+        and dotted(node.func)
+        and (
+            dotted(node.func) in FORBIDDEN_CALLS
+            or dotted(node.func).rsplit(".", 1)[-1] in FORBIDDEN_CALLS
+        )
+    ]
+    assert reported == [], "Seeded.choice is reported as an unseeded random source"
 
 
 def test_the_storage_file_table_is_not_empty() -> None:

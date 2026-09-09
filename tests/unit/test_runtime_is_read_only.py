@@ -377,18 +377,46 @@ def put_dataset_call_sites() -> set[tuple[str, str]]:
     return sites
 
 
-def test_put_dataset_has_exactly_one_call_site() -> None:
-    """Ground rule 1, as the M6 brief states it.
+#: Every function in `src/` that may call ``put_dataset``, with the tool it
+#: serves. An **enumeration**, not a module list, and that is M7's change:
+#: until M7 there was exactly one dataset writer, and "one call site" was both
+#: the invariant and the test. M7 added two more - ``dataset_expand`` and
+#: ``dataset_import``, both of them the authoring flow - so the invariant is now
+#: "every call site is a named authoring writer" and the test says which.
+#:
+#: The two adapter modules are excluded because they *implement* the method
+#: rather than call it.
+AUTHORING_DATASET_WRITERS: Final[dict[tuple[str, str], str]] = {
+    ("skeletons.py", "_store"): "dataset_submit",
+    ("expansion.py", "_write_expanded"): "dataset_expand",
+    ("promotion.py", "_write_bundle"): "dataset_import",
+}
 
-    ``put_dataset`` is called from one function in `src/`, in
-    `service/skeletons.py`, and that function is reachable from
-    ``dataset_submit`` - the authoring flow - and from nothing the runtime
-    touches. ``sql.py`` is exempt because that is the *implementation* of the
-    method, not a caller of it.
+#: The adapters. Each defines ``put_dataset``; neither calls one.
+ADAPTER_MODULES: Final[frozenset[str]] = frozenset({"sql.py", "mongo.py"})
+
+
+def test_every_put_dataset_call_site_is_a_named_authoring_writer() -> None:
+    """Ground rule 1, widened from "one site" to "these three sites" at M7.
+
+    ``put_dataset`` is called from exactly the functions in
+    :data:`AUTHORING_DATASET_WRITERS`, each of which serves one authoring tool,
+    and from nothing the runtime touches -
+    :func:`test_no_runtime_entry_point_reaches_a_world_write` is the half that
+    asserts the second clause, over the call graph, per entry point.
+
+    Kept as an enumeration rather than relaxed to "anything in `service/`",
+    because the thing worth noticing is a **fourth** writer appearing. Adding
+    one now means adding a row here and saying which tool it serves, which is a
+    visible decision; without this, M8 could add a dataset write and only the
+    call-graph guard would have an opinion - and only if the new writer happened
+    to be reachable from a runtime entry point.
     """
-    sites = {site for site in put_dataset_call_sites() if site[0] != "sql.py"}
-    assert {module for module, _ in sites} == {"skeletons.py"}, (
-        f"put_dataset is called outside the authoring flow: {sorted(sites)}"
+    sites = {site for site in put_dataset_call_sites() if site[0] not in ADAPTER_MODULES}
+    assert sites == set(AUTHORING_DATASET_WRITERS), (
+        f"the put_dataset call sites are not the named authoring writers. "
+        f"unexpected: {sorted(sites - set(AUTHORING_DATASET_WRITERS))}; "
+        f"missing: {sorted(set(AUTHORING_DATASET_WRITERS) - sites)}"
     )
     reachable_from_submit = reachable({AUTHORING_SUBMIT})
     assert "put_dataset" in reachable_from_submit, "dataset_submit no longer writes a dataset"

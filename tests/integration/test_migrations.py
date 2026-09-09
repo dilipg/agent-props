@@ -2,12 +2,25 @@
 
 A migration nobody runs is not a migration. These tests run one.
 
-This suite is deliberately *not* parameterised over backends, unlike
-`test_store_conformance.py`. Alembic is SQL-only - contracts section 8 gives
-Mongo collections and indexes, not DDL - so there is nothing here for a
-document store to conform to. It runs against SQLite, which is the dialect M3
-ships; the same assertions hold against Postgres at M7 by pointing
-``AGENTPROPS_DB_URL`` at one.
+This suite is parameterised over the two **SQL dialects** and not over the
+three backends, unlike `test_store_conformance.py`. Alembic is SQL-only -
+contracts section 8 gives Mongo collections and indexes, not DDL - so there is
+nothing here for a document store to conform to, and `mongo.py` declares its
+indexes through ``MongoStore.create_schema()`` instead, which
+`test_store_conformance.py` exercises on every test.
+
+**M7 added the Postgres half, and it was the point of the exercise.** M3 left a
+note saying ``alembic check`` might report a false positive against a real
+Postgres, because ``METADATA`` declares ``desc(runs.c.started_at)`` while the
+migration writes ``sa.text("started_at DESC")`` and autogenerate cannot reliably
+reflect an expression index. Against a real Postgres 17 it is **clean** - the
+index is created as ``btree (agent_id, run_class, started_at DESC)`` and no
+operation is detected - so the note is closed rather than worked around. The
+Postgres parameter is what keeps it closed.
+
+The Postgres case skips with a reason when there is no server, exactly as the
+conformance suite does; ``uv run pytest`` with no flags still runs the SQLite
+half, which is the containerless mode CI uses.
 
 The comparison is Alembic's own autogenerate diff, which is exactly what
 ``alembic check`` runs. Reflecting the database and eyeballing column names
@@ -26,10 +39,16 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from agentprops.models import Blueprint, Dataset, DatasetQuery
-from agentprops.storage import METADATA, SqlStore, create_engine_for, sqlite_url
+from agentprops.storage import (
+    METADATA,
+    POSTGRES_ONLY_INDEXES,
+    SqlStore,
+    create_engine_for,
+    sqlite_url,
+)
 from agentprops.storage.sql import include_object
 from integration.conftest import make_run
 
@@ -56,12 +75,44 @@ def alembic_config(url: str) -> Config:
     return config
 
 
-@pytest.fixture
-def migrated(tmp_path: Path) -> str:
-    """A fresh database with ``alembic upgrade head`` applied. Returns its URL."""
-    url = sqlite_url(tmp_path / "migrated.db")
+#: The two SQL dialects this suite runs against. Not a backend list - Mongo is
+#: absent because there is no Alembic for a document store, which contracts
+#: section 8 settles by giving collections and indexes rather than DDL.
+SQL_DIALECTS = ("sqlite", "postgres")
+
+
+@pytest.fixture(params=SQL_DIALECTS, ids=lambda name: str(name))
+def migrated(request: pytest.FixtureRequest, tmp_path: Path) -> str:
+    """A fresh database with ``alembic upgrade head`` applied. Returns its URL.
+
+    SQLite gets a new file. Postgres gets its ``public`` schema dropped and
+    recreated first, which is the equivalent of a new file and is what makes
+    ``test_the_migration_creates_every_table`` meaningful there: a shared
+    database carrying a previous run's tables would satisfy that assertion
+    without the migration having done anything.
+
+    Dropping a schema is DDL on a throwaway database rather than the deletion of
+    a row anyone authored, so ground rule 6 is untouched - the same reasoning
+    ``test_the_migration_is_reversible`` records for ``downgrade base``.
+    """
+    dialect = str(request.param)
+    if dialect == "sqlite":
+        url = sqlite_url(tmp_path / "migrated.db")
+        command.upgrade(alembic_config(url), "head")
+        return url
+
+    engine = request.getfixturevalue("postgres_engine")
+    url = str(engine.url.render_as_string(hide_password=False))
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
     command.upgrade(alembic_config(url), "head")
     return url
+
+
+def dialect_of(url: str) -> str:
+    """``sqlite`` or ``postgres``, from the URL the ``migrated`` fixture returned."""
+    return "sqlite" if url.startswith("sqlite") else "postgres"
 
 
 def test_alembic_ini_is_at_the_repository_root() -> None:
@@ -99,6 +150,11 @@ def test_the_migrated_schema_matches_sql_py(migrated: str) -> None:
     would be re-stamped on re-import and ``dataset_find``'s ordering would stop
     being reproducible. Without this flag that is the one load-bearing default
     in the schema sitting outside the drift gate.
+
+    **Run against both dialects from M7**, which closes M3's open note: the
+    suspicion was that ``runs_lookup``'s ``DESC`` column would make this report
+    a false positive on Postgres, since autogenerate cannot reliably reflect an
+    expression index. Against Postgres 17 it reports nothing.
     """
     engine = create_engine_for(migrated)
     try:
@@ -144,29 +200,113 @@ def test_the_migration_produces_the_declared_keys_and_indexes(migrated: str) -> 
         assert dataset_fk[0]["constrained_columns"] == ["agent_id", "bp_version"]
         run_fk = {fk["referred_table"] for fk in inspector.get_foreign_keys("runs")}
         assert run_fk == {"datasets"}
-        assert {index["name"] for index in inspector.get_indexes("datasets")} == {
-            "datasets_lookup",
-            "datasets_author",
-        }
+        portable = {"datasets_lookup", "datasets_author"}
+        # The dialect-specific ones are asserted by name in their own test; here
+        # the claim is that the *portable* indexes exist on both dialects and
+        # that nothing unexpected joined them.
+        assert (
+            {index["name"] for index in inspector.get_indexes("datasets")} - POSTGRES_ONLY_INDEXES
+        ) == portable
         assert {index["name"] for index in inspector.get_indexes("runs")} == {"runs_lookup"}
     finally:
         engine.dispose()
 
 
-def test_the_postgres_only_indexes_are_absent_on_sqlite(migrated: str) -> None:
-    """Contracts section 7: ``datasets_labels_gin`` and ``datasets_search`` have
-    no SQLite equivalent, and SQLite falls back to a scan.
+def test_the_postgres_only_index_is_present_on_postgres_and_absent_on_sqlite(
+    migrated: str,
+) -> None:
+    """Contracts section 7's one remaining dialect-specific index, both directions.
 
-    The fallback is what ``find_datasets`` implements, and the conformance suite
-    asserts its results - so the absence of the indexes is a documented property
-    of this dialect rather than a gap.
+    ``datasets_labels_gin`` has no SQLite equivalent, and SQLite falls back to
+    JSON extraction - which is what ``find_datasets`` implements and what the
+    conformance suite asserts the *results* of. So its absence on SQLite is a
+    documented property rather than a gap, and its presence on Postgres is the
+    half M3 could not check.
+
+    Both directions in one test, deliberately: an "absent on SQLite" assertion
+    alone passes just as well against a migration that creates the index
+    nowhere, which is a real way to lose a GIN index and never notice.
+
+    ``datasets_search`` is asserted absent on **both**. It was contracts section
+    7's ``to_tsvector`` index; ruling R-36 superseded it and M7 dropped it,
+    because ``find_datasets`` issues no SQL text match for any such index to
+    serve. See ``POSTGRES_ONLY_INDEXES``.
     """
     engine = create_engine_for(migrated)
     try:
         names = {index["name"] for index in inspect(engine).get_indexes("datasets")}
     finally:
         engine.dispose()
-    assert names.isdisjoint({"datasets_labels_gin", "datasets_search"})
+
+    assert "datasets_search" not in names, "the dead to_tsvector index is back"
+    if dialect_of(migrated) == "postgres":
+        assert names >= POSTGRES_ONLY_INDEXES, f"the Postgres-only indexes are missing: {names}"
+    else:
+        assert names.isdisjoint(POSTGRES_ONLY_INDEXES)
+
+
+def test_the_runs_index_keeps_its_descending_column(migrated: str) -> None:
+    """M3's open note, closed: ``started_at DESC`` survives and ``alembic check`` is clean.
+
+    ``METADATA`` declares ``desc(runs.c.started_at)`` and the migration writes
+    ``sa.text("started_at DESC")``, and Alembic's autogenerate cannot reliably
+    reflect or compare an expression index column - so M3 recorded a suspicion
+    that ``alembic check`` would report a false positive against a real
+    Postgres. It does not, which
+    :func:`test_the_migrated_schema_matches_sql_py` establishes on both
+    dialects. This is the other half: the index exists, and on Postgres it
+    really is descending.
+
+    Read from the reflected definition rather than from the index's column list,
+    because a column list is where the ``DESC`` gets lost - which is exactly why
+    the suspicion was reasonable.
+    """
+    engine = create_engine_for(migrated)
+    try:
+        assert "runs_lookup" in {index["name"] for index in inspect(engine).get_indexes("runs")}
+        if dialect_of(migrated) == "postgres":
+            with engine.connect() as connection:
+                definition = connection.execute(
+                    text("select indexdef from pg_indexes where indexname = 'runs_lookup'")
+                ).scalar_one()
+            assert "started_at DESC" in definition, definition
+    finally:
+        engine.dispose()
+
+
+def test_the_json_and_boolean_defaults_execute_on_this_dialect(migrated: str) -> None:
+    """M3's second open note, closed by *executing* it rather than compiling it.
+
+    ``skeletons.parts``, ``runs.warnings`` and ``runs.external_refs`` declare
+    ``server_default=sa.text("'{}'")`` and ``"'[]'"``, and
+    ``datasets.archived`` declares ``sa.false()``. All four were verified only
+    as **compiled SQL** at M3: "Postgres coerces an unknown-type literal to
+    ``jsonb``, which is why they are written that way, but 'coerces' is a claim
+    about the server and no server has been asked."
+
+    Asked here, on both dialects, by inserting a row that omits every one of
+    them and reading the values back. A ``DEFAULT 0`` on a boolean - which is
+    what autogenerate rendered for SQLite - is an error on Postgres, and that is
+    the shape of failure this catches.
+    """
+    engine = create_engine_for(migrated)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "insert into skeletons (id, agent_id, bp_version, labels, seed, manifest) "
+                    "values (:id, 'a', '1.0.0', :labels, 1, :manifest)"
+                ),
+                {
+                    "id": "3f8c1a20-0000-4000-8000-0000000000b1",
+                    "labels": "{}",
+                    "manifest": "[]",
+                },
+            )
+            parts = connection.execute(text("select parts from skeletons")).scalar_one()
+        assert parts in ({}, "{}"), f"the parts default did not execute: {parts!r}"
+    finally:
+        engine.dispose()
 
 
 def test_a_write_journey_runs_against_a_migrated_database(

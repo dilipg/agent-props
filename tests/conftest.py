@@ -27,6 +27,7 @@ milestone has to invent it.
 """
 
 import json
+import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,16 +51,42 @@ FROZEN_NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=UTC)
 #: parameterised over all three backends".
 STORE_BACKENDS = ("sqlite", "postgres", "mongo")
 
-#: The backends that exist. M7 adds the other two, by extending this tuple and
-#: the fixture in `tests/integration/conftest.py` - not by writing a second
-#: suite. A selected-but-unimplemented backend skips with a reason rather than
-#: erroring, so ``--store postgres`` is a meaningful command today and a
-#: passing one at M7.
-IMPLEMENTED_STORE_BACKENDS = ("sqlite",)
+#: The backends that exist. **All three, from M7.** The mechanism M3 built for
+#: this is the whole reason the conformance suite did not change: extend this
+#: tuple and add a branch to the ``store`` fixture in
+#: `tests/integration/conftest.py`, and every test in that directory runs
+#: against the new backend.
+IMPLEMENTED_STORE_BACKENDS = STORE_BACKENDS
 
 #: What ``--store`` defaults to. Plain ``uv run pytest`` therefore runs the
-#: whole conformance suite rather than skipping it.
+#: whole conformance suite rather than skipping it - and it runs it against
+#: SQLite only, because that is the containerless mode CLAUDE.md describes and
+#: the one CI uses. Postgres and Mongo are opt-in with ``--store``, and each
+#: **skips with a reason** when its server is unreachable rather than failing
+#: a run that never asked for a container.
 DEFAULT_STORE_BACKENDS = ("sqlite",)
+
+#: Where ``--store postgres`` and ``--store mongo`` look for their servers.
+#:
+#: Defaults match `docker-compose.yml`'s published ports, so
+#: ``docker compose --profile shared up -d postgres`` followed by
+#: ``uv run pytest -m integration --store postgres`` needs no environment at
+#: all. Both are overridable, because a developer with a Postgres already
+#: running on 5432 should not have to stop it.
+POSTGRES_URL_ENV_VAR = "AGENTPROPS_TEST_POSTGRES_URL"
+MONGO_URL_ENV_VAR = "AGENTPROPS_TEST_MONGO_URL"
+DEFAULT_TEST_POSTGRES_URL = "postgresql://agentprops:agentprops@localhost:5432/agentprops"
+DEFAULT_TEST_MONGO_URL = "mongodb://localhost:27017"
+
+
+def postgres_test_url() -> str:
+    """The Postgres the integration suite should use."""
+    return os.environ.get(POSTGRES_URL_ENV_VAR) or DEFAULT_TEST_POSTGRES_URL
+
+
+def mongo_test_url() -> str:
+    """The Mongo the integration suite should use."""
+    return os.environ.get(MONGO_URL_ENV_VAR) or DEFAULT_TEST_MONGO_URL
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

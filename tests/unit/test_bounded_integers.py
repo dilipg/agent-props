@@ -28,8 +28,18 @@ rather than being silently skipped. That is the same arrangement
 
 M6 added `iteration` on `fetch_step` and `limit`/`offset` on `run_find`, and it
 **did** find out here: the enumeration failed with those three pairs named
-before any of them had a case. That is the guard working as designed rather
-than a story about how it would have.
+before any of them had a case. M7 added `count` on `dataset_expand` and found
+out the same way. That is the guard working as designed rather than a story
+about how it would have.
+
+`count` answers a *third* way, which is why the distinction in `limits.py` is
+worth three names rather than two. A value above `2**63` is `AP-001`, like
+`seed`: a count is not an identifier, but it is not a quantity that means the
+same as the largest representable one either - "make 2**63 pool entries" and
+"make 2**63 - 1" are both impossible rather than equivalent. And a value above
+the *per-call* maximum is also `AP-001`, naming that maximum, because ruling
+R-56 forbids silently serving a smaller expansion than the caller asked for.
+Only a **negative** count is clamped, to zero, where it means what zero means.
 
 The three answer differently, and the difference is the distinction
 `limits.py` draws. `run_find`'s `limit` and `offset` are *quantities* and are
@@ -139,6 +149,10 @@ def labels() -> dict[str, str]:
 #: Adding a tool that takes an integer means adding a row here. The enumeration
 #: test is what makes that unavoidable.
 COVERED: Final[dict[tuple[str, str], tuple[dict[str, Any], int]]] = {
+    ("dataset_expand", "count"): (
+        {"dataset_id": dataset_id(), "node_id": POOL_NODE},
+        1,
+    ),
     ("dataset_find", "limit"): ({}, 50),
     ("dataset_find", "offset"): ({}, 0),
     ("dataset_get", "version"): ({"dataset_id": dataset_id()}, 1),
