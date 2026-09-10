@@ -129,3 +129,111 @@ export interface DatasetFilter {
   readonly limit?: number;
   readonly offset?: number;
 }
+
+// ------------------------------------------------------------------ runs
+
+/**
+ * One row of `run_find`. What the run picker needs and nothing more.
+ *
+ * There is no step count here, deliberately: `run_find` does not return one and
+ * deriving it would mean a `run_get` per row — the same per-row detail fetch
+ * M9's third acceptance clause rules out for the dataset list.
+ */
+export interface RunSummary {
+  readonly id: string;
+  readonly agent_id: string;
+  /** `running` or `finished` today. Widened to `string` because the service
+   * owns this vocabulary and a client that narrowed it would break on the
+   * first status added. `RunList` styles the known ones and falls back. */
+  readonly status: string;
+  readonly dataset_id: string;
+  readonly dataset_ver: number;
+  readonly bp_version: string;
+  readonly run_class: string;
+  readonly model: string | null;
+  readonly started_at: string;
+  readonly finished_at: string | null;
+  readonly external_refs: Readonly<Record<string, string>>;
+  readonly warnings: readonly string[];
+}
+
+/**
+ * One node's whole story, out of `run_evidence`'s `nodes` list.
+ *
+ * The three payloads answer three different questions and the run view keeps
+ * them apart on purpose:
+ *
+ * - `served` — the fixture agent-props handed over. The *fake data used*.
+ * - `actual` — what the agent reported through `record_step`. The *output*.
+ * - `expected` — what the dataset author said this step should produce.
+ *
+ * `served` is not `expected`. A `tool_call` node's fixture is the tool's reply
+ * going *in* to the agent; `expected` is the author's claim about what comes
+ * *out*. Collapsing them would make the view lie about the direction of data.
+ */
+export interface EvidenceNode {
+  readonly node_id: string;
+  readonly iteration: number;
+  readonly seq: number;
+  /** The blueprint node kind. Displayed, never switched on, so `string`. */
+  readonly kind: string;
+  readonly tool_name: string | null;
+  /** False when the agent fetched the step and never reported back. */
+  readonly recorded: boolean;
+  readonly served: JsonDocument | null;
+  readonly actual: JsonDocument | null;
+  readonly expected: JsonDocument | null;
+  readonly node_expectation: JsonDocument | null;
+  /** The fault the dataset author injected at this step, if any. */
+  readonly fault: JsonDocument | null;
+  readonly fetched_at: string | null;
+  readonly recorded_at: string | null;
+}
+
+/**
+ * The `run_evidence` bundle.
+ *
+ * Everything a grader needs in one call, and no verdict — the tool's own
+ * contract. `comparison` is the mode the dataset declared, which is why the run
+ * view shows it rather than computing a pass: under `subset`, an `actual` that
+ * differs textually from `expected` can still be correct, so a "differs" badge
+ * would be actively misleading.
+ */
+export interface EvidenceBundle {
+  readonly run: {
+    readonly id: string;
+    readonly agent_id: string;
+    readonly status: string;
+    readonly run_class: string;
+    readonly model: string | null;
+    readonly started_at: string;
+    readonly finished_at: string | null;
+    readonly declared_blueprint_version: string | null;
+    readonly external_refs: Readonly<Record<string, string>>;
+  };
+  readonly pin: {
+    readonly dataset_id: string;
+    readonly dataset_version: number;
+    readonly blueprint_version: string;
+  };
+  readonly dataset: JsonDocument & {
+    readonly id: string;
+    readonly intent?: string;
+    readonly archived?: boolean;
+  };
+  readonly comparison: string;
+  readonly expected: JsonDocument & {
+    readonly final?: JsonDocument;
+    readonly rationale?: string;
+    readonly expected_path?: readonly string[];
+  };
+  readonly actual: JsonDocument | null;
+  readonly outcome_schema: JsonDocument | null;
+  readonly nodes: readonly EvidenceNode[];
+  readonly path: {
+    readonly expected: readonly string[];
+    readonly actual: readonly string[];
+    readonly traversed: readonly string[];
+  };
+  readonly warnings: readonly string[];
+}

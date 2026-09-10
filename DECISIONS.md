@@ -5959,3 +5959,47 @@ Also rejected: putting it in `README.md` alone. It was already there, and a file
 reachable over MCP — which is what "no documentation available" meant.
 `wire-an-agent` gained the read-back tail in the same change; its sequence stopped at `run_finish`,
 which left the three inspection tools reachable only by reading the tool list closely.
+
+## [post-M10] A runs screen, in two views, because a run answers two shaped questions
+M9 scoped the web app to browsing what had been *authored* - agents, blueprints, datasets - so
+reading a run meant calling `run_find`, `run_get` and `run_evidence` by hand. An owner asked for it
+on the dashboard, in two forms, and the two are not redundant:
+
+- **graph** reuses the blueprint topology with the run folded onto it. Each node wears the step
+  number it first ran at, a visit count when the run went round more than once, and a fault flag;
+  a node the run never reached is dimmed. Clicking one opens its evidence. This answers "which way
+  did it branch" - a question no list can answer.
+- **sequence** is the run in `seq` order, one entry per *step* rather than per node, so a loop node
+  appears once per iteration where it actually ran. This answers "walk me through it", which the
+  graph makes you hunt for.
+
+Both render through one `StepEvidence`, so a step cannot say different things in the two views, and
+`RunsScreen.test.tsx` asserts exactly that by reading a step's output in one view and comparing it
+to the same step reached through the other.
+
+**Three payloads, kept apart.** `served` is the fixture agent-props handed over, `actual` is what
+`record_step` stored, `expected` is the author's claim. `served` is not `expected` - a tool_call
+node's fixture is the reply going *in*, the expectation is about what comes *out* - and a view that
+merged them would be wrong about the direction of data. The test asserts they differ in the fixture
+before asserting the panels differ, or it would pass against a view rendering one payload thrice.
+
+**No pass/fail badge, deliberately.** The bundle declares `comparison`, and under `subset` an
+`actual` that differs from `expected` is correct. A "differs" marker would be most misleading on
+exactly the runs it looked most useful on. The header names the mode and points at
+`compare.grade`; ground rule 2 holds on this surface too.
+
+**Only reads.** `run_find` and `run_evidence` are the two tools named; both are classified reads by
+`test_web_writes_through_tools.py`'s walk to the `Store` mutators. `run_start`, `record_step` and
+`run_finish` appear nowhere in `web/src` - a reviewer reads runs, the agent under test makes them.
+`run_get` is not called either: `run_evidence` already carries the steps, so fetching both would
+read them twice.
+
+Three defects the work surfaced, all in the graph and all invisible without a click path:
+- React Flow puts `pointer-events: none` on a node that is not draggable, selectable or
+  connectable - which is every node here. A clickable node needs `pointerEvents: "auto"` inline
+  (a utility class is absent in a jsdom test, so it must not be one) or the click does nothing.
+- The pane beneath is a d3-zoom surface. Without React Flow's own `nopan` class the mousedown
+  begins a pan and the graph lurches as the panel opens. Stopping the React event does **not**
+  work: React dispatches at the root container, after the pane's native listener has run.
+- `fitView` will not zoom out past `minZoom`, default `0.5`. A ten-node vertical topology in half a
+  pane therefore rendered clipped at both ends, silently. Now `0.15`.

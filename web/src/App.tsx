@@ -1,20 +1,25 @@
 /**
- * The app shell: agents, blueprints, datasets. Three screens, one selection.
+ * The app shell: agents, blueprints, datasets, runs. Four screens, one selection.
  *
  * Routing is deliberately absent. Phase 1's scope is "browse and edit"
  * (PRD 10.4) and a router would be a fifth library in a locked five-library
- * stack for three screens with one selected agent between them. The selected
- * agent, blueprint and dataset live in this component's state; a URL scheme is
- * the obvious next addition and the shape here does not block it.
+ * stack for four screens with one selected agent between them. The selected
+ * agent, blueprint, dataset and run live in this component's state; a URL
+ * scheme is the obvious next addition and the shape here does not block it.
+ *
+ * The runs screen is not M9's. That milestone scoped the app to browsing what
+ * had been *authored*; a run is what an agent did with it, and the surface for
+ * reading one was the tool layer alone until an owner asked for it here.
  */
 
 import { useEffect, useState } from "react";
 
 import { BlueprintScreen } from "./screens/BlueprintScreen";
 import { DatasetsScreen } from "./screens/DatasetsScreen";
+import { RunsScreen } from "./screens/RunsScreen";
 import { useAgents, useStoreStatus } from "./queries";
 
-type Screen = "datasets" | "blueprint";
+type Screen = "datasets" | "blueprint" | "runs";
 
 export function App(): React.JSX.Element {
   const status = useStoreStatus();
@@ -55,7 +60,7 @@ export function App(): React.JSX.Element {
         </label>
 
         <nav className="flex gap-1 text-xs">
-          {(["datasets", "blueprint"] as const).map((option) => (
+          {(["datasets", "blueprint", "runs"] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -84,11 +89,9 @@ export function App(): React.JSX.Element {
       </header>
 
       <main className="min-h-0 flex-1">
-        {screen === "datasets" ? (
-          <DatasetsScreen agentId={agentId} />
-        ) : (
-          <BlueprintScreen agentId={agentId} />
-        )}
+        {screen === "datasets" && <DatasetsScreen agentId={agentId} />}
+        {screen === "blueprint" && <BlueprintScreen agentId={agentId} />}
+        {screen === "runs" && <RunsScreen agentId={agentId} />}
       </main>
     </div>
   );

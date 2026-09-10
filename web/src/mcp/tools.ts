@@ -47,8 +47,10 @@ import type {
   DatasetFilter,
   DatasetSummary,
   DatasetView,
+  EvidenceBundle,
   JsonDocument,
   LabelVocabulary,
+  RunSummary,
   StoreStatus,
 } from "./types";
 
@@ -169,6 +171,37 @@ export async function blueprintValidate(document: JsonDocument): Promise<readonl
  */
 export async function datasetValidate(document: JsonDocument): Promise<readonly RuleError[]> {
   return findingsIn("dataset_validate", await callTool("dataset_validate", { dataset: document }));
+}
+
+/**
+ * Runs for one agent, newest first. A read: `run_find` touches no mutator.
+ *
+ * The two run tools this app names — `run_find` and `run_evidence` — are both
+ * reads, which is what lets them be here at all.
+ * `tests/unit/test_web_writes_through_tools.py` derives the write set by
+ * walking each tool to the `Store` Protocol's mutators, and the run *writes*
+ * (`run_start`, `run_finish`) are not named anywhere in `web/src`: a run is
+ * created by the agent under test, never by a reviewer looking at one.
+ */
+export async function runFind(agentId?: string): Promise<readonly RunSummary[]> {
+  const args = agentId === undefined || agentId === "" ? {} : { agent_id: agentId };
+  return payload("run_find", await callTool("run_find", args));
+}
+
+/**
+ * One run's evidence bundle: per-node served, actual and expected, both paths,
+ * the declared comparison mode and the pinned `outcome_schema`.
+ *
+ * One call, not two. `run_get` returns the run and its steps; `run_evidence`
+ * returns that *plus* the dataset's expectations joined onto it, which is
+ * everything the run view draws. Calling both would fetch the steps twice.
+ */
+export async function runEvidence(runId: string): Promise<WithWarnings<EvidenceBundle>> {
+  const envelope = await callTool("run_evidence", { run_id: runId });
+  return {
+    value: payload<EvidenceBundle>("run_evidence", envelope),
+    warnings: warningsIn(envelope),
+  };
 }
 
 // --------------------------------------------------------------------- writes

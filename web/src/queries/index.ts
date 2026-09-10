@@ -21,7 +21,9 @@ import type {
   DatasetFilter,
   DatasetSummary,
   DatasetView,
+  EvidenceBundle,
   LabelVocabulary,
+  RunSummary,
   StoreStatus,
 } from "@/mcp/types";
 import {
@@ -33,6 +35,8 @@ import {
   datasetGet,
   datasetSave,
   labelVocabulary,
+  runEvidence,
+  runFind,
   storeStatus,
 } from "@/mcp/tools";
 import type { ImportedDatasets, WithWarnings } from "@/mcp/tools";
@@ -139,5 +143,33 @@ export function useSaveDataset(
       void client.invalidateQueries({ queryKey: ["dataset_get"] });
       void client.invalidateQueries({ queryKey: ["label_vocabulary"] });
     },
+  });
+}
+
+
+/**
+ * Runs for the selected agent. Undefined agent means every run in the store,
+ * which is the right answer for a reviewer who has not chosen one yet.
+ */
+export function useRuns(agentId: string | undefined): UseQueryResult<readonly RunSummary[]> {
+  return useQuery({
+    queryKey: ["run_find", agentId ?? null],
+    queryFn: () => runFind(agentId),
+    ...NO_RETRY,
+  });
+}
+
+/**
+ * One run's evidence. Disabled until a run is picked, so mounting the screen
+ * with nothing selected makes one call rather than two.
+ */
+export function useRunEvidence(
+  runId: string | undefined,
+): UseQueryResult<WithWarnings<EvidenceBundle>> {
+  return useQuery({
+    queryKey: ["run_evidence", runId ?? null],
+    queryFn: () => runEvidence(runId as string),
+    enabled: runId !== undefined,
+    ...NO_RETRY,
   });
 }

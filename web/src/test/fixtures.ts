@@ -17,7 +17,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import type { BlueprintView, DatasetSummary, DatasetView, LabelVocabulary } from "@/mcp/types";
+import type {
+  BlueprintView,
+  DatasetSummary,
+  DatasetView,
+  EvidenceBundle,
+  LabelVocabulary,
+} from "@/mcp/types";
 
 /**
  * Resolved from the Vitest root (`web/`) rather than from `import.meta.url`,
@@ -34,6 +40,17 @@ function load<T>(relative: string): T {
 export const GOLDEN_BLUEPRINT = load<BlueprintView>(
   "blueprints/location-onboarding-1.0.0.json",
 );
+/**
+ * The committed `run_evidence` bundle for the worked example.
+ *
+ * The same file `tests/unit/test_evidence_grading.py` grades in an interpreter
+ * where importing `agentprops` raises, so it is a real bundle the service
+ * produced rather than a shape invented for the UI. It carries the two things
+ * the run views exist to show: `request_docs` visited twice, and `check_docs`
+ * fetched but never recorded.
+ */
+export const GOLDEN_EVIDENCE = load<EvidenceBundle>("evidence/priya-missing-docs-run.json");
+
 export const PRIYA = load<DatasetView>("datasets/priya-missing-docs.json");
 export const ARUN = load<DatasetView>("datasets/arun-escalated.json");
 
