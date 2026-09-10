@@ -53,6 +53,13 @@ phase 1.5; `tests/unit/test_tool_surface.py` is where that deferral is recorded,
 
 ## Use it against your own agent repo
 
+**Handing this to a coding agent in another repository?**
+[`docs/connect-your-agent-repo.md`](docs/connect-your-agent-repo.md) is that brief — the MCP config
+for a harness that is not this one, the client install, and which prompt drives which step. Point
+the other harness at that path; both repos are on one machine, so it reads the file rather than a
+copy that can drift. The rest of this section is the same four steps written for a reader of *this*
+repo.
+
 Both repos on one machine. Every command below was run end to end; the closing
 example is a real agent process talking to a real service over a real MCP session.
 
