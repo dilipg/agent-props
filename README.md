@@ -39,7 +39,7 @@ graph read-only with React Flow, and the M9.5 prompt and resource surfaces — f
 MCP prompts in `src/agentprops/server/prompts.py`, composed against the store in
 `src/agentprops/service/prompts.py`, plus the canonical examples read *from the store* in
 `src/agentprops/service/examples.py`, and M10's outward publishing — `run_evidence`, `run_export`
-and `src/agentprops/export/`. **Twenty-seven tools, four prompts, five resources, three
+and `src/agentprops/export/`. **Twenty-seven tools, four prompts, six resources, three
 backends, two packages, one web app.**
 
 M9.5 is an additive milestone between M9 and M10, approved by the owner and recorded as ruling
@@ -240,8 +240,8 @@ Both are registered now, and the four steps above point at them instead of resta
 
 ```text
 prompts  : ['author-a-blueprint', 'fill-a-dataset', 'cover-the-label-space', 'wire-an-agent']
-resources: ['agentprops://catalogue', 'agentprops://examples/blueprint',
-            'agentprops://examples/dataset']
+resources: ['agentprops://orientation', 'agentprops://catalogue',
+            'agentprops://examples/blueprint', 'agentprops://examples/dataset']
 templates: ['agentprops://blueprint/{agent_id}/{version}',
             'agentprops://dataset/{agent_id}/example']
 tools    : 25
@@ -256,6 +256,13 @@ tools    : 25
   yourself on a known-good example" needs no hard-coded id at all. On an empty store the bodies
   say `"available": false` and what to do next, because a resource that promised an example
   this store does not hold would be worse than no resource.
+- **`agentprops://orientation`** is the one to read first, and it answers the question the other
+  twenty-six surfaces structurally cannot: *in what order*. Each tool describes itself and none
+  of them knows which tool follows it, so a harness that lists all twenty-seven learns everything
+  except the sequence. This one carries the five phases — orient, author a blueprint, author
+  datasets, run, inspect — with the tools belonging to each, the practices that save a rework
+  cycle, and which phase your store has reached. `test_prompts_contract.py` asserts every tool it
+  names against the live registry, so it cannot send you after a tool that does not exist.
 
 Neither changed a tool, a rule, or the storage contract; both are additive surface on a
 capability the SDK already advertised. What removes the boilerplate is registering the prompts
@@ -277,7 +284,7 @@ matter, where the seam goes.
   anyway. That is ground rule 3, not a bug.
 - **Fetch before you record.** `record_step` on an unserved step is `AP-004`, by design.
 - **Warnings are typed objects**, so `w.code`, not `w["code"]`.
-- **`resources/list` is a fixed set of three, not one entry per stored document.**
+- **`resources/list` is a fixed set of four, not one entry per stored document.**
   `agentprops://catalogue` is the index that names the rest; the per-agent URIs are resource
   *templates* and appear under `resources/templates/list`. The SDK serves `resources/list` from
   a registry built at import time; a live per-document list *is* reachable, by subclassing

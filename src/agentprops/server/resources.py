@@ -5,13 +5,15 @@ where store reads live, and every URI string comes from there too so the
 decorator and the prose that names it cannot drift - the module docstring there
 explains why that is the workable arrangement rather than the tidy one.
 
-Three static resources and two templates
-----------------------------------------
+Four static resources and two templates
+---------------------------------------
 
-``resources/list`` returns the three static ones, and that is what makes ruling
+``resources/list`` returns the four static ones, and that is what makes ruling
 R-76's "find something to imitate **without being told an id**" true: two of
-them *are* documents to imitate and need no argument, and the third names every
-other URI this store can serve. The two templates carry the per-agent forms
+them *are* documents to imitate and need no argument, the third names every
+other URI this store can serve, and the fourth gives the order to call things
+in - the one question a per-tool description structurally cannot answer, since
+no tool knows which tool follows it. The two templates carry the per-agent forms
 R-76 asks for - every published blueprint, and one example dataset per agent -
 and appear under ``resources/templates/list``.
 
@@ -58,7 +60,13 @@ from typing import Any, Final
 from agentprops.server.app import bound, mcp
 from agentprops.service import examples
 
-__all__ = ["agent_example_dataset", "blueprint", "catalogue", "example_blueprint"]
+__all__ = [
+    "agent_example_dataset",
+    "blueprint",
+    "catalogue",
+    "example_blueprint",
+    "orientation",
+]
 
 #: Every resource here is a JSON document. The SDK's default is ``text/plain``,
 #: so this has to be passed rather than assumed, and
@@ -81,6 +89,22 @@ def catalogue() -> dict[str, Any]:
     agent. An empty store answers `{"agents": []}` with the next step to take.
     """
     return examples.catalogue(bound())
+
+
+@mcp.resource(
+    examples.ORIENTATION_URI,
+    name="agentprops-orientation",
+    title="How to use this server, in order",
+    mime_type=JSON,
+)
+def orientation() -> dict[str, Any]:
+    """The five phases, the tools each one calls, and the practices that avoid rework.
+
+    Read this first. Every tool here documents itself and none of them says what
+    to call next, so the sequence is the thing a caller cannot assemble from the
+    tool list. Reports which phase this particular store is at.
+    """
+    return examples.orientation(bound())
 
 
 @mcp.resource(

@@ -5938,3 +5938,24 @@ Corrected in the report, with the commit message on `c506178` noted as carrying 
 Recording it because the attribution *matters*: one of those two guards holds ground rule 2 on the
 wire and the other holds the attribute encoding, and a reader who believed the wrong one could
 delete the one that works.
+
+## [post-M10] The tool surface documents twenty-seven verbs and no ordering, so one resource does
+A harness connecting for the first time got the envelope contract from the server's `instructions`,
+a description per tool from `tools/list`, and nothing at all about sequence. That is a structural
+gap rather than an oversight: each tool description is written from inside that tool, and no tool
+knows which one follows it. The four prompts each cover a single phase and never name the arc they
+sit in. So a competent agent could read every word this server serves and still not know that
+`run_start` precedes `fetch_step`, or that `run_evidence` exists.
+Chosen: a fourth static resource, `agentprops://orientation`, carrying the five phases with the
+tools belonging to each, the four runtime calls in order, the eight practices, and a
+`you_are_here` derived from what the store actually holds. `INSTRUCTIONS` points at it in the one
+channel a harness injects without being asked, and the catalogue names it.
+`test_prompts_contract.py` asserts every tool it names against the **live registry**, so a phase
+citing a tool that does not exist fails the day the name changes — an ordering document that sends
+a caller after a missing tool is worse than none, and proofreading does not catch that reliably.
+Rejected: a fifth prompt. The reported failure was a harness that surfaces tools but not prompts,
+and answering it with another prompt would have missed for exactly that caller.
+Also rejected: putting it in `README.md` alone. It was already there, and a file on disk is not
+reachable over MCP — which is what "no documentation available" meant.
+`wire-an-agent` gained the read-back tail in the same change; its sequence stopped at `run_finish`,
+which left the three inspection tools reachable only by reading the tool list closely.

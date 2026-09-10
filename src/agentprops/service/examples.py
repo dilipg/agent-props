@@ -79,6 +79,7 @@ __all__ = [
     "CATALOGUE_URI",
     "EXAMPLE_BLUEPRINT_URI",
     "EXAMPLE_DATASET_URI",
+    "ORIENTATION_URI",
     "agent_example_dataset_uri",
     "blueprint_body",
     "blueprint_uri",
@@ -87,6 +88,7 @@ __all__ = [
     "example_agent_id",
     "example_blueprint",
     "example_dataset",
+    "orientation",
     "published",
     "published_agent_ids",
     "published_blueprint",
@@ -96,6 +98,11 @@ __all__ = [
 #: a caller who has listed the resources needs no id told to them - which is the
 #: hard-coded ``location-onboarding`` R-76 removes.
 CATALOGUE_URI: Final = "agentprops://catalogue"
+
+#: The order of operations. Static text plus two store-derived facts, and the
+#: one surface that answers "what do I call, and when" without a prompt - a
+#: harness that lists resources but not prompts still finds it.
+ORIENTATION_URI: Final = "agentprops://orientation"
 
 #: One known-good published blueprint, in full, with no id needed to ask.
 EXAMPLE_BLUEPRINT_URI: Final = "agentprops://examples/blueprint"
@@ -304,6 +311,7 @@ def catalogue(context: ServiceContext) -> dict[str, Any]:
     return {
         "agents": agents,
         "start_here": {
+            "orientation": ORIENTATION_URI,
             "blueprint": EXAMPLE_BLUEPRINT_URI,
             "dataset": EXAMPLE_DATASET_URI,
         },
@@ -315,6 +323,166 @@ def catalogue(context: ServiceContext) -> dict[str, Any]:
             else "This store holds no published blueprint, so there is nothing to imitate "
             "yet. Run the `author-a-blueprint` prompt: whatever you publish becomes the "
             "example the next caller reads."
+        ),
+    }
+
+
+#: The five phases, each naming the tools that carry it. Ordered, because the
+#: order is the part a tool description cannot express: every tool documents
+#: itself and none of them says which one comes next.
+#:
+#: Phrasing is deliberately not lifted from any tracked document - ruling R-78's
+#: guard holds served text and markdown apart, and this is served text.
+_PHASES: Final[tuple[dict[str, Any], ...]] = (
+    {
+        "phase": "1. orient",
+        "goal": "Learn what this store already holds before adding to it.",
+        "tools": ["store_status", "agent_list", "blueprint_list", "dataset_find"],
+        "resources": [CATALOGUE_URI, EXAMPLE_BLUEPRINT_URI, EXAMPLE_DATASET_URI],
+        "notes": (
+            "Read the two example resources first. They are real documents out of this "
+            "store rather than illustrations, so their structure is safe to copy."
+        ),
+    },
+    {
+        "phase": "2. author a blueprint",
+        "goal": "Describe the agent's steps as a graph, once.",
+        "prompt": "author-a-blueprint",
+        "tools": ["blueprint_validate", "blueprint_upsert", "blueprint_get", "blueprint_diff"],
+        "notes": (
+            "Loop on blueprint_validate until it returns no error-severity finding, then "
+            "call blueprint_upsert with publish true. Model the agent from its source, "
+            "because each node's tool_name has to equal the string the agent really calls. "
+            "A published version can never be edited; publish a new version instead."
+        ),
+    },
+    {
+        "phase": "3. author datasets",
+        "goal": "One coherent world per scenario worth testing.",
+        "prompt": "fill-a-dataset, then cover-the-label-space",
+        "tools": [
+            "dataset_skeleton",
+            "dataset_fill_part",
+            "dataset_validate",
+            "dataset_submit",
+            "dataset_import",
+            "dataset_expand",
+            "label_vocabulary",
+        ],
+        "notes": (
+            "dataset_skeleton returns an instructions field that carries the fill order "
+            "and the repair loop; follow it. Aim at label coverage rather than a count - "
+            "label_vocabulary reports which values still have nothing behind them."
+        ),
+    },
+    {
+        "phase": "4. run the agent against fixtures",
+        "goal": "Serve one pinned world to a running agent.",
+        "prompt": "wire-an-agent",
+        "tools": ["run_start", "fetch_step", "record_step", "run_finish"],
+        "sequence": [
+            "run_start(selector) -> pins {dataset_id, dataset_version, blueprint_version} "
+            "for the whole run",
+            "fetch_step(node_id= or tool_name=, iteration=) -> that step's fixture",
+            "record_step(actual, node_id=) -> stores what the agent produced, verbatim",
+            "run_finish(outcome) -> closes the run and stores the final result, verbatim",
+        ],
+        "notes": (
+            "Repeat the middle pair once per step the agent takes. Both writes are "
+            "idempotent per key: recording the same value twice is a silent success, and "
+            "a different value returns AP-007 while the first value stays put."
+        ),
+    },
+    {
+        "phase": "5. inspect what happened",
+        "goal": "Read a finished run back and grade it yourself.",
+        "tools": ["run_find", "run_get", "run_evidence", "run_export"],
+        "sequence": [
+            "run_find(agent_id=, dataset_id=, status=) -> run summaries, newest first",
+            "run_get(run_id) -> the whole run: pin, path, every step, outcome, warnings",
+            "run_evidence(run_id) -> expected and actual side by side, plus the comparison "
+            "mode and the pinned outcome_schema",
+            "run_export(run_id) -> the same run as an OpenTelemetry trace",
+        ],
+        "notes": (
+            "run_evidence is the one to reach for: it returns everything the client's "
+            "three comparison helpers take as arguments, and computes no verdict itself. "
+            "There is no run view in the web app - inspection is these four tools."
+        ),
+    },
+)
+
+#: What a caller gets wrong when nothing tells them. Each entry is a property of
+#: this surface rather than advice about testing in general.
+_PRACTICES: Final[tuple[str, ...]] = (
+    "Fetch a step before you record one. record_step for a node that was never served "
+    "returns AP-004, because an actual with no serve behind it reports on nothing.",
+    "This service stores expectations and never judges them. record_step and run_finish "
+    "keep what you send unchecked; comparison belongs in your test, through "
+    "agentprops_client.compare.grade with the mode the dataset declared.",
+    "Nothing here refuses to serve. A policy problem arrives as a warning riding a "
+    "successful reply, and even a finished run keeps answering fetch_step. Read the "
+    "warnings; do not treat their absence as the only success signal.",
+    "Branch on rule and pointer, never on message. Every finding carries a stable rule id "
+    "and an RFC 6901 pointer at the offending field; the prose gets reworded.",
+    "Validation replies have a third envelope shape: ok true, an errors list holding only "
+    "warning-severity findings, and no data key at all. A client written for two shapes "
+    "breaks on the first clean-with-warnings validate.",
+    "Datasets are immutable and versioned. An edit writes a new version rather than "
+    "changing the old one, and a run reads the version it pinned at run_start for its "
+    "whole life. Nothing is ever deleted; dataset_archive hides a lineage and "
+    "dataset_restore brings it back.",
+    "Let the client mint the run id. It generates one when you construct it, before the "
+    "first call, so an id you invent yourself will not match what the run is filed under.",
+    "Point one store at everything. The MCP server your harness spawns and the HTTP "
+    "service your agent dials must name the same --store, or you will author into one "
+    "database and run against another.",
+)
+
+
+def orientation(context: ServiceContext) -> dict[str, Any]:
+    """The order of operations: which endpoint to call at each phase, and why.
+
+    The gap this fills is not a missing tool description - all twenty-seven carry
+    one - but the missing *sequence* between them. A harness that lists the tools
+    learns what each does and nothing about which comes first, and the four
+    prompts each cover one phase without ever naming the arc they sit in.
+
+    Store-aware in the one respect that changes the answer: ``you_are_here``
+    reports whether this store has a published blueprint and a dataset yet, so
+    the caller is pointed at the phase they are actually in rather than at
+    phase 1 forever.
+    """
+    agents = published(context)
+    has_dataset = any(
+        context.store.find_datasets(DatasetQuery(agent_id=agent_id)) for agent_id in agents
+    )
+    if not agents:
+        here = "Phase 2. This store has no published blueprint, so there is nothing to run yet."
+    elif not has_dataset:
+        here = (
+            "Phase 3. Blueprints are published here but no dataset has been submitted, so "
+            "run_start has nothing to pin."
+        )
+    else:
+        here = (
+            "Phase 4. This store holds published blueprints and at least one dataset, so an "
+            "agent can be pointed at it now."
+        )
+    return {
+        "what_this_is": (
+            "A fixture service. Describe an agent's steps once as a blueprint, author "
+            "immutable worlds against that graph as datasets, and let the agent read each "
+            "step from here at test time in place of whatever it would really have called."
+        ),
+        "you_are_here": here,
+        "published_agents": sorted(agents),
+        "phases": list(_PHASES),
+        "practices": list(_PRACTICES),
+        "prompts": (
+            "Every phase above names its prompt. Call prompts/get for the detail - the "
+            "prompts hold the blueprint and dataset contracts, and they read this store, so "
+            "what they tell you is true of the data in front of you."
         ),
     }
 

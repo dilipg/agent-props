@@ -20,7 +20,7 @@ criteria pass. **Phase 1 is complete: M0 through M10, plus M9.5** - the models, 
 three storage adapters, the MCP surface, the skeleton pipeline, the runtime read path, the
 containers, the promotion path, the Python client, the web app, the MCP prompt and resource
 surfaces, and M10's outward publishing.
-Twenty-seven tools, four prompts, five resources, three backends, two packages and one web app -
+Twenty-seven tools, four prompts, six resources, three backends, two packages and one web app -
 the service in `src/agentprops/`, `agent-props-client` in `client/python/`, which is separately
 installable and depends on nothing of the service's, and `web/`, which reaches the service through
 the tool surface and nothing else.

@@ -50,6 +50,7 @@ AGENT = "location-onboarding"
 VERSION = "1.0.0"
 
 CATALOGUE = "agentprops://catalogue"
+ORIENTATION = "agentprops://orientation"
 EXAMPLE_BLUEPRINT = "agentprops://examples/blueprint"
 EXAMPLE_DATASET = "agentprops://examples/dataset"
 ONE_BLUEPRINT = "agentprops://blueprint/location-onboarding/1.0.0"
@@ -550,22 +551,37 @@ async def test_the_catalogue_names_every_resource_a_caller_needs(
     """R-76's "without being told an id", as an assertion.
 
     Nothing in this test knows an id in advance except the ones it reads back
-    out of the catalogue, and every URI the catalogue names is one
-    ``resources/read`` answers with an available document.
+    out of the catalogue, and every URI the catalogue names resolves to
+    something a caller can use.
+
+    Two properties, because the catalogue now names two kinds of thing. The
+    document resources must report ``available``, which is the flag that
+    separates a real blueprint from a placeholder. The orientation is not drawn
+    from the store and carries no such flag, so what stands in for it is that it
+    resolves to a non-empty phase list - the exact-equality assertion on
+    ``start_here`` above is what stops a third kind slipping past both.
     """
     body = await resource_body(seeded, "agentprops://catalogue")
     assert [agent["agent_id"] for agent in body["agents"]] == [AGENT]
     assert body["agents"][0]["published_versions"] == [VERSION]
     assert body["agents"][0]["dataset_count"] == 2
-    assert body["start_here"] == {"blueprint": EXAMPLE_BLUEPRINT, "dataset": EXAMPLE_DATASET}
+    assert body["start_here"] == {
+        "orientation": ORIENTATION,
+        "blueprint": EXAMPLE_BLUEPRINT,
+        "dataset": EXAMPLE_DATASET,
+    }
 
     for uri in [
         *body["agents"][0]["blueprints"],
         body["agents"][0]["example_dataset"],
-        *body["start_here"].values(),
+        body["start_here"]["blueprint"],
+        body["start_here"]["dataset"],
     ]:
         named = await resource_body(seeded, uri)
         assert named["available"] is True, f"the catalogue names {uri}, which is not available"
+
+    guide = await resource_body(seeded, "agentprops://orientation")
+    assert guide["phases"], "the catalogue names the orientation, which resolves to no phases"
 
 
 async def test_the_catalogue_of_an_empty_store_is_empty_and_says_what_to_do(
@@ -750,3 +766,90 @@ async def test_the_prompts_and_the_resources_agree_about_the_example(
     body = await resource_body(seeded, "agentprops://examples/blueprint")
     assert body["uri"] in text
     assert f"`{body['agent_id']}` at `{body['version']}`" in text
+
+
+# ----------------------------------------------------- agentprops://orientation
+
+
+async def test_every_tool_the_orientation_names_is_a_registered_tool(
+    seeded: ServiceContext,
+) -> None:
+    """The ordering document, checked against the tool registry it orders.
+
+    This is the whole reason the resource is safe to write. A phase naming
+    `dataset_publish` - a plausible tool this server does not have - would send
+    a caller looking for it, and no amount of proofreading catches that
+    reliably. Asking the running server instead means a tool renamed on Tuesday
+    fails this on Tuesday.
+
+    ``tools/list`` is the authority rather than a constant in this file: a list
+    kept here would drift in exactly the way the resource is being guarded
+    against.
+    """
+    body = await resource_body(seeded, "agentprops://orientation")
+    async with connected(seeded) as client:
+        registered = {tool.name for tool in (await client.list_tools()).tools}
+
+    named = {tool for phase in body["phases"] for tool in phase["tools"]}
+    assert named, "the orientation names no tools at all, so this guard proves nothing"
+    assert named <= registered, (
+        f"the orientation names tools this server does not register: {sorted(named - registered)}"
+    )
+
+
+async def test_the_orientation_covers_the_run_lifecycle_in_order(
+    seeded: ServiceContext,
+) -> None:
+    """The four runtime calls, in the order a caller has to make them.
+
+    The sequence is the payload here - a caller who calls ``record_step`` before
+    ``fetch_step`` gets ``AP-004`` - so the assertion is on relative position
+    rather than on presence. The read-back phase follows, because a run nobody
+    reads back was not checked.
+    """
+    body = await resource_body(seeded, "agentprops://orientation")
+    flat = " | ".join(entry for phase in body["phases"] for entry in phase.get("sequence", []))
+    positions = [
+        flat.index(call) for call in ("run_start", "fetch_step", "record_step", "run_finish")
+    ]
+    assert positions == sorted(positions), f"the runtime calls are out of order: {flat}"
+    assert flat.index("run_finish") < flat.index("run_evidence"), (
+        "inspection is documented before the run it inspects is closed"
+    )
+
+
+async def test_the_orientation_sends_an_empty_store_to_the_authoring_phase(
+    context: ServiceContext,
+) -> None:
+    """``you_are_here`` with nothing published.
+
+    Takes ``context`` and never ``seeded``: the ``seeded`` fixture publishes into
+    that same object, so a test asking for both would be handed one full store
+    and would assert emptiness against a store that has two datasets in it.
+    """
+    body = await resource_body(context, "agentprops://orientation")
+    assert body["published_agents"] == []
+    assert "Phase 2" in body["you_are_here"]
+
+
+async def test_the_orientation_sends_a_stocked_store_to_the_running_phase(
+    seeded: ServiceContext,
+) -> None:
+    """The other end of the arc, which is what makes the field worth serving.
+
+    Paired with the test above: if both ends reported the same phase, the field
+    would be a constant dressed as a measurement.
+    """
+    body = await resource_body(seeded, "agentprops://orientation")
+    assert body["published_agents"] == ["location-onboarding"]
+    assert "Phase 4" in body["you_are_here"]
+
+
+async def test_the_catalogue_reaches_the_orientation(seeded: ServiceContext) -> None:
+    """The index promises every other URI is reachable from it; this is one of them.
+
+    Without this the orientation is discoverable only by ``resources/list``, and
+    the catalogue's own claim to be the index would be false.
+    """
+    body = await resource_body(seeded, "agentprops://catalogue")
+    assert body["start_here"]["orientation"] == "agentprops://orientation"

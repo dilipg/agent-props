@@ -82,15 +82,19 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 ```
 
 Then restart your harness so it picks up the server, and confirm you can see **27 tools, 4
-prompts, 3 resources and 2 resource templates**. If the tools are there but the prompts are not,
+prompts, 4 resources and 2 resource templates**. If the tools are there but the prompts are not,
 your harness does not surface MCP prompts in its UI — that is fine, the protocol still serves
 them. Call `prompts/list` and `prompts/get` directly and follow what comes back.
 
-**Orient yourself before authoring anything.** `resources/list` gives you
-`agentprops://catalogue`, which names what this store already holds, plus
-`agentprops://examples/blueprint` and `agentprops://examples/dataset`. Read those two — they are
-real documents from this store, not fixtures, so imitating their structure is safe. There are also
-templates, `agentprops://blueprint/{agent_id}/{version}` and
+**Orient yourself before authoring anything.** Read `agentprops://orientation` first: it
+carries the five phases, the tools each one calls, the practices worth knowing up front, and
+which phase this store has reached. It is served rather than written down, so it cannot fall
+out of step with the tool surface — everything below is the part it does not cover.
+
+`resources/list` gives you three more: `agentprops://catalogue`, which names what this store
+already holds, plus `agentprops://examples/blueprint` and `agentprops://examples/dataset`. Read
+those two — they are real documents from this store, not fixtures, so imitating their structure
+is safe. There are also templates, `agentprops://blueprint/{agent_id}/{version}` and
 `agentprops://dataset/{agent_id}/example`, for fetching a specific one.
 
 ---

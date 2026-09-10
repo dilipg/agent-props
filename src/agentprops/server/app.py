@@ -99,6 +99,16 @@ payload under one named key. Read `rule` and `pointer`, not `message`.
 
 Warnings never block anything. A policy problem, an archived dataset, a missing
 blueprint version in a diff - all arrive as warnings on a successful response.
+
+New here? Read the resource `agentprops://orientation` before calling anything
+else. Twenty-seven tools carry no ordering between them, and that resource is
+where the ordering lives: the five phases, which tools belong to each, and which
+phase this store has reached. In short - author a blueprint, author datasets
+against it, then run_start / fetch_step / record_step / run_finish while the
+agent works, then run_evidence to read the result back.
+
+The four prompts hold the authoring detail and read this store as they render,
+so call prompts/list even where your interface shows no prompts of its own.
 """
 
 mcp: Final = MCPServer(name=SERVER_NAME, version=SERVER_VERSION, instructions=INSTRUCTIONS)
