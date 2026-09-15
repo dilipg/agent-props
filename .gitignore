@@ -34,3 +34,6 @@ client/typescript/dist/
 
 # The OTel collector's file exporter writes here (docker-compose `otel` profile).
 .otel/
+
+# Scratch dumps from ad-hoc scripts run at the repo root.
+evidence_bundle.json
