@@ -27,7 +27,7 @@ Why position is the only disambiguator
 PRD 5.5's rule 3 - "among nodes reachable from the current path head, pick the
 one declaring that tool" - is what makes the run id load-bearing for tool-name
 addressing: *without a known position, a repeated tool is unresolvable*. The
-golden blueprint is the case in point. ``delightree.stores.get`` is declared by
+golden blueprint is the case in point. ``acme.stores.get`` is declared by
 both ``fetch_store_profile`` and ``recheck_store``, and the M8 script calls it
 twice by tool name expecting two different answers:
 

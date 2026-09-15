@@ -5,7 +5,7 @@ A blueprint-driven narrative fixture and golden-dataset service for agentic syst
 Revision: v0.5
 Date: 2026-09-08
 Owner: Dilipg
-Home: Delightree, Astra AI unit (eval infrastructure)
+Home: an internal AI platform team (eval infrastructure)
 
 ---
 
@@ -57,17 +57,17 @@ Positioning line to test: *record-and-replay can only test what already happened
 | Real data | **Fake only in phase 1.** | No PII means no redaction, no residency question, no security review. |
 | Access control | **None. Flat, single-tenant, no auth.** | Internal tool for dev, product and QA. Enforced by the fake-only rule and internal-only deployment, not by permissions. |
 | CI behaviour | **Never gates. Records only.** | It provisions data and records what happened. Teams build their own gates on top. |
-| Client library | **Python only in phase 1.** ~~TypeScript client is the closing milestone.~~ **The TypeScript client was descoped by the owner on 2026-09-09 — see `docs/spec-rulings.md` R-68. Phase 1 ends at M10.** | Astra's eval side is Python. TS follows for the product stack. |
+| Client library | **Python only in phase 1.** ~~TypeScript client is the closing milestone.~~ **The TypeScript client was descoped by the owner on 2026-09-09 — see `docs/spec-rulings.md` R-68. Phase 1 ends at M10.** | The eval side is Python. TS follows for the product stack. |
 | Authoring UI | **JSON editor with live schema validation**, not a graph builder. | Cheapest thing that works. Library recommendation in 10.4. |
 | CLI | **Deferred out of phase 1.** | The MCP server, the Python client and the web app cover the phase 1 jobs. No daemon-mode question to answer yet. |
-| Distribution | **Delightree internal first**, open source later. | Astra is the design partner and the requirement source. |
+| Distribution | **Internal first**, open source later. | The platform team is the design partner and the requirement source. |
 | Design partner | **A cross-domain ops workflow** (onboarding a new location: tasks, training, compliance). | The hardest coherence test, therefore the best proof. |
 
 ## 4. Users
 
 | User | Job | Touchpoint |
 |---|---|---|
-| Agent developer (Astra + domain pods) | Author a blueprint; develop against realistic data instead of production | React app, CLI, MCP |
+| Agent developer (platform and domain teams) | Author a blueprint; develop against realistic data instead of production | React app, CLI, MCP |
 | Coding agent (Claude Code, Codex) | Fetch a skeleton, write the story, post the filled dataset back | MCP tools |
 | Runtime agent | Fetch step data during an execution | Client library, MCP |
 | QA / eval engineer | Select datasets by label; grade runs against expected outcomes; compare model versions | CLI, MCP, exported experiments |
@@ -93,7 +93,7 @@ Blueprint {
 
 Node {
   id: string                  // "fetch_store_profile"
-  tool_name?: string          // "delightree.stores.get" — enables tool-name addressing
+  tool_name?: string          // "acme.stores.get" — enables tool-name addressing
   kind: "tool_call" | "llm" | "decision" | "loop" | "terminal"
   input_schema: JSONSchema
   output_schema: JSONSchema
@@ -336,8 +336,8 @@ One adapter interface, three implementations.
 | Target | Use | Config |
 |---|---|---|
 | SQLite | Local dev, CI, zero setup | file path |
-| Postgres | Delightree default, matches the rebuild | DSN or discrete credentials |
-| Mongo | Legacy Delightree, document-native fit for fixtures | connection URI |
+| Postgres | The team default, matches the rebuild | DSN or discrete credentials |
+| Mongo | Legacy deployments, document-native fit for fixtures | connection URI |
 
 Config accepts a connection string or discrete credentials, plus Docker parameters so the service can stand up its own store for local and CI use. Blueprints, datasets and runs are separable: a team may keep blueprints in git and only datasets in the store.
 
@@ -385,7 +385,7 @@ Stated explicitly so they do not creep back in:
 
 ## 10. Phasing
 
-**Phase 1: the fixture factory** (internal, Astra)
+**Phase 1: the fixture factory** (internal)
 Blueprint CRUD, validation and versioning. Full-graph topology. Entity-based coherence with optional revisions. Typed labels. Outcome schema and expected outcomes. Skeleton handoff with partial fills and validated submit. Label query retrieval. Dataset versioning, copy-on-write and archive. Three storage adapters. Shared and local-container deployment with an export and import promotion path. **Python client** issuing idempotent run ids and shipping the three comparison helpers as pure functions. React browsing app with a JSON editor and live validation. Read-only step fetch. Run linkage and fixture chain published outward to Langfuse or OTel.
 
 Exit criteria: the location-onboarding workflow has a published blueprint; at least 20 datasets covering the declared label space, each with an expected outcome; a domain pod develops against fixtures instead of production for a full sprint without falling back.

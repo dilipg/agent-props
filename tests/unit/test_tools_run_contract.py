@@ -34,7 +34,7 @@ AGENT = "location-onboarding"
 RUN_ID = "m6-wire-run"
 PRIYA = "3f8c1a20-0000-4000-8000-000000000001"
 POOL_NODE = "request_docs"
-REPEATED_TOOL = "delightree.stores.get"
+REPEATED_TOOL = "acme.stores.get"
 
 
 @pytest.fixture
@@ -285,7 +285,7 @@ async def test_record_step_and_run_finish_over_the_wire(seeded: ServiceContext) 
             "record_step",
             run_id=RUN_ID,
             actual={"store_id": "store_bengaluru_04", "franchisee": "priya"},
-            tool_name="delightree.onboarding.intake",
+            tool_name="acme.onboarding.intake",
         )
         assert recorded["ok"] is True
         assert set(recorded["data"]) == {"record"}

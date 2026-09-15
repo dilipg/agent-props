@@ -11,18 +11,19 @@ service directly — ruling R-70 measured it (`OPTIONS /mcp` → 405, no `access
 headers), so same-origin is the only shape that works.
 
 Drive the UI with the committed driver:
-**`.claude/skills/run-agent-props/driver.py`** (Playwright over the Chrome already on
-disk). `chromium-cli` is **not** installed on this machine, which is why a driver exists.
+**`.claude/skills/run-agent-props/driver.py`** (Playwright, reusing an installed Chrome
+when it finds one). The driver exists because the app has no router, so no URL can
+reach any state but the landing one - see the first gotcha.
 
 All paths below are relative to the repo root.
 
 ## Prerequisites
 
-`uv`, `node`/`npx`, and Chrome at
-`C:/Program Files/Google/Chrome/Application/chrome.exe` (override with
-`AGENTPROPS_CHROME`). No `apt-get` needed — this is a Windows host with Git Bash.
+`uv` and `node`/`npx`. The driver looks for an installed Chrome in the usual places per
+platform, honours `AGENTPROPS_CHROME` if set, and otherwise falls back to Playwright's
+own Chromium (`playwright install chromium`).
 
-`web/node_modules` was already present here. If yours is empty, install in `web/` first.
+Run `npm install` in `web/` first if `web/node_modules` is missing.
 
 ## Run (agent path)
 
@@ -51,8 +52,8 @@ store ready at demo.db
 
 ```bash
 nohup uv run python -m agentprops.server --transport http --store demo.db \
-  --host 127.0.0.1 --port 8000 > /tmp/svc.log 2>&1 &
-cd web && nohup npx vite --host 127.0.0.1 --port 5173 --strictPort > /tmp/web.log 2>&1 &
+  --host 127.0.0.1 --port 8000 > .shots/svc.log 2>&1 &
+cd web && nohup npx vite --host 127.0.0.1 --port 5173 --strictPort > ../.shots/web.log 2>&1 &
 ```
 
 **Both will report "completed" immediately** — `nohup` detaches them. Do not trust that;
@@ -120,8 +121,8 @@ judging design; useless headless.
 ## Test
 
 ```bash
-uv run pytest -q                 # 1609 passed / 31 skipped, containerless
-cd web && npx vitest run         # 72 passed / 7 files
+uv run pytest -q                 # containerless; backend suites skip with a reason
+cd web && npx vitest run         # the web app's own suite
 ```
 
 Backend suites need containers on the **non-default** ports 27117 / 5442 (ruling R-60 —
@@ -141,14 +142,14 @@ backend count** — a backend number without its URL is not a claim.
   taken with different `?q=` / `?view=` came back **byte-identical** (82343 bytes each).
   You must interact with the page; `--screenshot` alone cannot reach any state but the
   landing one. This is why the driver exists.
-- **`chromium-cli` is absent, and the `playwright` on PATH is a Node CLI** (v1.40.1, via
-  bun) — not the Python package. `uv run --with playwright` installs the Python one
-  ephemerally without touching `pyproject.toml`, and the driver passes `executable_path`
-  so Playwright does not download a second browser.
-- **`/tmp` is ambiguous here.** It resolves to a different directory under Git Bash than
-  under Python, so screenshots the driver wrote could not be found by a shell `ls`. The
-  driver uses repo-relative `.shots/` for exactly this reason. Do not "simplify" it back
-  to `/tmp`.
+- **A `playwright` on PATH may be the Node CLI, not the Python package.** `uv run --with
+  playwright` installs the Python one ephemerally without touching `pyproject.toml`, and
+  the driver reuses an installed Chrome when it finds one so Playwright need not download
+  a second browser.
+- **`/tmp` is ambiguous under Git Bash on Windows.** It resolves to a different directory
+  in the shell than in Python, so screenshots the driver wrote could not be found by a
+  shell `ls`. The driver uses repo-relative `.shots/` for exactly this reason. Do not
+  "simplify" it back to `/tmp`.
 - **The favicon 404's console text never names the file.** Chrome logs
   `Failed to load resource: ... 404`, so a filter on `"favicon.ico"` matches nothing and
   every clean run looks like it has an error. The driver filters on the response URL as
@@ -167,7 +168,7 @@ backend count** — a backend number without its URL is not a claim.
 
 | Symptom | Fix |
 |---|---|
-| `not listening: web :5173` from the driver | The Vite process died. `tail /tmp/web.log`. |
+| `not listening: web :5173` from the driver | The Vite process died. `tail .shots/web.log`. |
 | Driver screenshots exist but `ls` cannot find them | You edited `SHOTS` back to `/tmp`. See the path gotcha. |
 | `ModuleNotFoundError: No module named 'playwright'` | You dropped `--with playwright` from the `uv run`. |
 | Every driver run reports one console error | The favicon filter was removed; see the 404 gotcha. |

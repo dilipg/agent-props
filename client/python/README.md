@@ -48,7 +48,7 @@ with connect("http://localhost:8000/mcp", agent_id="location-onboarding") as cli
     step = client.fetch_step(node_id="receive_request")
     step.output  # what the world returns to the agent
 
-    step = client.fetch_step(tool_name="delightree.stores.get")
+    step = client.fetch_step(tool_name="acme.stores.get")
     step.resolved_node_id  # 'fetch_store_profile' — resolved by position
 
     client.record_step({"store_id": "ST-4471"}, node_id="receive_request")

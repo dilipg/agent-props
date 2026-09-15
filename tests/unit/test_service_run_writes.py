@@ -76,7 +76,7 @@ RUN_ID = "m8-priya-run"
 PRIYA = "3f8c1a20-0000-4000-8000-000000000001"
 
 #: The tool name ``fetch_store_profile`` and ``recheck_store`` share.
-REPEATED_TOOL = "delightree.stores.get"
+REPEATED_TOOL = "acme.stores.get"
 
 POOL_NODE = "request_docs"
 POOL_LENGTH = len(load_document("datasets/priya-missing-docs.json")["pools"][POOL_NODE])
@@ -149,7 +149,7 @@ def test_the_record_key_is_the_resolved_one(started: ServiceContext) -> None:
     """Ruling R-64's "the same key means the same step", on the write side.
 
     The step is fetched by **tool name** from the entry node - where
-    ``delightree.stores.get`` resolves to ``fetch_store_profile`` - and recorded
+    ``acme.stores.get`` resolves to ``fetch_store_profile`` - and recorded
     by **node id**. One step, one row, one actual. A ``record_step`` that keyed
     on the argument shape rather than on the resolved node would report
     ``AP-004`` here.
@@ -280,7 +280,7 @@ def test_the_unserved_pointer_follows_the_argument_the_caller_used(
     request - and ``resolved_node_id`` in the context is how the caller learns
     which node the key was built from.
     """
-    reply = record(started, {"compliant": True}, tool_name="delightree.compliance.check")
+    reply = record(started, {"compliant": True}, tool_name="acme.compliance.check")
     assert rules(reply) == ["AP-004"]
     finding = findings(reply)[0]
     assert finding.pointer == "/tool_name"

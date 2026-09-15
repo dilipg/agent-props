@@ -206,7 +206,7 @@ def test_the_node_kind_and_tool_name_come_from_the_blueprint(walked: ServiceCont
     live = data(evidence(walked, RUN_ID))["evidence"]
     kinds = {node["node_id"]: (node["kind"], node["tool_name"]) for node in live["nodes"]}
     assert kinds["check_docs"] == ("decision", None)
-    assert kinds["fetch_store_profile"] == ("tool_call", "delightree.stores.get")
+    assert kinds["fetch_store_profile"] == ("tool_call", "acme.stores.get")
     assert kinds["complete"] == ("terminal", None)
 
 

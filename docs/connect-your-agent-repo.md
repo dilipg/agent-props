@@ -5,10 +5,13 @@ one machine, so it can read this path directly rather than being sent a copy —
 it cannot drift from the tool surface it describes.
 
 ```text
-C:/Users/Dilip/Documents/GitHub/agent-props/docs/connect-your-agent-repo.md
+/path/to/agent-props/docs/connect-your-agent-repo.md
 ```
 
-Revision 1.0 · 2026-09-10 · written against phase 1 (M0–M10 plus M9.5)
+Throughout this file, replace `/path/to/agent-props` with wherever this repository is
+checked out on your machine, and use your platform's own path form.
+
+Revision 1.1 · 2026-09-15 · written against phase 1 (M0–M10 plus M9.5)
 
 ---
 
@@ -41,10 +44,10 @@ One command runs it. `--directory` is what lets it execute against its own envir
 repository's working directory:
 
 ```text
-uv run --directory C:/Users/Dilip/Documents/GitHub/agent-props \
+uv run --directory /path/to/agent-props \
   python -m agentprops.server \
   --transport stdio \
-  --store C:/Users/Dilip/Documents/GitHub/agent-props/demo.db
+  --store /path/to/agent-props/demo.db
 ```
 
 Put that in whichever MCP config your harness reads. The shape below is Claude Code's
@@ -58,10 +61,10 @@ location, but the `command` and `args` are the same everywhere.**
     "agent-props": {
       "command": "uv",
       "args": [
-        "run", "--directory", "C:/Users/Dilip/Documents/GitHub/agent-props",
+        "run", "--directory", "/path/to/agent-props",
         "python", "-m", "agentprops.server",
         "--transport", "stdio",
-        "--store", "C:/Users/Dilip/Documents/GitHub/agent-props/demo.db"
+        "--store", "/path/to/agent-props/demo.db"
       ]
     }
   }
@@ -77,7 +80,7 @@ capabilities:
 
 ```bash
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
-  | uv run --directory C:/Users/Dilip/Documents/GitHub/agent-props \
+  | uv run --directory /path/to/agent-props \
       python -m agentprops.server --transport stdio --store demo.db | head -c 100
 ```
 
@@ -150,7 +153,7 @@ The client is a separate package and depends on nothing of the service's. Add to
 dependencies = ["agent-props-client"]
 
 [tool.uv.sources]
-agent-props-client = { path = "C:/Users/Dilip/Documents/GitHub/agent-props/client/python" }
+agent-props-client = { path = "/path/to/agent-props/client/python" }
 ```
 
 ```bash
@@ -183,8 +186,8 @@ reimplement in ~100 lines. The Python client is the reference for their semantic
 Start the service over HTTP so your agent's process can reach it:
 
 ```bash
-uv run --directory C:/Users/Dilip/Documents/GitHub/agent-props python -m agentprops.server \
-  --transport http --port 8000 --store C:/Users/Dilip/Documents/GitHub/agent-props/demo.db
+uv run --directory /path/to/agent-props python -m agentprops.server \
+  --transport http --port 8000 --store /path/to/agent-props/demo.db
 ```
 
 Then run **`wire-an-agent`** (optional `agent_id`, optional `url`). It describes the seam: one

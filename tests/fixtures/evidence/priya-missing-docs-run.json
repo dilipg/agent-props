@@ -112,7 +112,7 @@
           "store_id": "ST-4471"
         }
       },
-      "tool_name": "delightree.onboarding.intake"
+      "tool_name": "acme.onboarding.intake"
     },
     {
       "actual": {
@@ -157,7 +157,7 @@
           }
         }
       },
-      "tool_name": "delightree.stores.get"
+      "tool_name": "acme.stores.get"
     },
     {
       "actual": null,
@@ -238,7 +238,7 @@
           ]
         }
       },
-      "tool_name": "delightree.docs.request"
+      "tool_name": "acme.docs.request"
     },
     {
       "actual": {
@@ -287,7 +287,7 @@
           ]
         }
       },
-      "tool_name": "delightree.docs.request"
+      "tool_name": "acme.docs.request"
     },
     {
       "actual": {
@@ -332,7 +332,7 @@
           }
         }
       },
-      "tool_name": "delightree.stores.get"
+      "tool_name": "acme.stores.get"
     },
     {
       "actual": {
@@ -373,7 +373,7 @@
           ]
         }
       },
-      "tool_name": "delightree.training.assign"
+      "tool_name": "acme.training.assign"
     },
     {
       "actual": {
@@ -406,7 +406,7 @@
           "findings": []
         }
       },
-      "tool_name": "delightree.compliance.check"
+      "tool_name": "acme.compliance.check"
     },
     {
       "actual": {

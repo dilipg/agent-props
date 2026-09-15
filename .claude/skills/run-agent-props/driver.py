@@ -31,12 +31,25 @@ from pathlib import Path
 WEB = "http://127.0.0.1:5173"
 SERVICE_PORT = 8000
 WEB_PORT = 5173
-# NOT /tmp: on this host `/tmp` resolves differently under Git Bash than under
-# Python, so a screenshot the driver wrote could not be found by a shell `ls`.
-# Repo-relative is unambiguous for both. Gitignored.
+# NOT /tmp: under Git Bash on Windows, `/tmp` resolves to a different
+# directory in the shell than it does in Python, so a screenshot the driver
+# wrote could not be found by a shell `ls`. Repo-relative is unambiguous on
+# every platform. Gitignored.
 SHOTS = Path(__file__).resolve().parents[3] / ".shots"
-# The Chrome that ships with Windows/WSL hosts. Override with AGENTPROPS_CHROME.
-CHROME = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+# Where an already-installed Chrome usually lives, per platform. Tried in order;
+# AGENTPROPS_CHROME overrides all of them, and if none exists the driver falls
+# back to Playwright's own bundled Chromium (`playwright install chromium`).
+# Using a browser already on disk is only an optimisation - it avoids a second
+# ~150 MB download - so it must not be a requirement.
+CHROME_CANDIDATES = (
+    "C:/Program Files/Google/Chrome/Application/chrome.exe",
+    "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
+)
 
 
 def listening(port: int) -> bool:
@@ -59,15 +72,32 @@ def require_up() -> None:
         )
 
 
+def chrome_path() -> str | None:
+    """An installed Chrome, or None to let Playwright use its own Chromium.
+
+    Returns None rather than raising when nothing matches: a missing system
+    Chrome is not an error, it just means Playwright downloads one. Raising here
+    would make the driver unusable on any machine but the one it was written on.
+    """
+    import os
+
+    override = os.environ.get("AGENTPROPS_CHROME")
+    if override:
+        return override
+    for candidate in CHROME_CANDIDATES:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
 def browser(pw):
     # `pw` is untyped on purpose: playwright is an ephemeral --with install,
     # so importing its types at module scope would break `up`, which must run
     # without it.
-    import os
-
+    found = chrome_path()
     return pw.chromium.launch(
-        executable_path=os.environ.get("AGENTPROPS_CHROME", CHROME),
         headless=True,
+        **({"executable_path": found} if found else {}),
     )
 
 

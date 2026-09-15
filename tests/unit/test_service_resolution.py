@@ -7,7 +7,7 @@ without walking it there.
 
 The property M8's script exists to prove is
 :func:`test_one_tool_name_resolves_to_two_nodes_depending_on_position`, and it
-asserts **both** directions in one test on purpose: ``delightree.stores.get``
+asserts **both** directions in one test on purpose: ``acme.stores.get``
 must resolve to ``fetch_store_profile`` early and to ``recheck_store`` after the
 loop. Either half passing alone would be satisfied by a resolver that always
 answered the same node.
@@ -29,11 +29,11 @@ from agentprops.service.resolution import candidates_for, head_of, resolve, succ
 #: ``fetch_store_profile`` and on ``recheck_store``. Position is the only thing
 #: that can tell them apart, which is why the run id matters even for tool-name
 #: addressing (PRD 5.5's rule 3).
-REPEATED_TOOL = "delightree.stores.get"
+REPEATED_TOOL = "acme.stores.get"
 
 #: A tool name exactly one node declares, so it resolves at step 2 without any
 #: position at all.
-UNIQUE_TOOL = "delightree.docs.request"
+UNIQUE_TOOL = "acme.docs.request"
 
 FROZEN_AT = datetime(2026, 9, 8, 12, 0, 0, tzinfo=UTC)
 
@@ -106,7 +106,7 @@ def test_a_unique_tool_name_resolves_without_a_position(blueprint: Blueprint) ->
 
 
 def test_an_unknown_tool_name_is_rt_e02(blueprint: Blueprint) -> None:
-    resolved, findings = resolve(blueprint, run_at(), tool_name="delightree.stores.list")
+    resolved, findings = resolve(blueprint, run_at(), tool_name="acme.stores.list")
     assert resolved is None
     assert [finding.rule for finding in findings] == [RT_E02]
     assert findings[0].pointer == "/tool_name"
@@ -186,10 +186,10 @@ def test_two_candidates_reachable_in_one_hop_are_also_rt_e01(
     document = copy.deepcopy(blueprint_document)
     for node in document["nodes"]:
         if node["id"] in {"request_docs", "assign_training"}:
-            node["tool_name"] = "delightree.both.ways"
+            node["tool_name"] = "acme.both.ways"
     graph = Blueprint.model_validate(document)
 
-    resolved, findings = resolve(graph, run_at("check_docs"), tool_name="delightree.both.ways")
+    resolved, findings = resolve(graph, run_at("check_docs"), tool_name="acme.both.ways")
     assert resolved is None
     assert [finding.rule for finding in findings] == [RT_E01]
     assert findings[0].context["candidates"] == ["request_docs", "assign_training"]

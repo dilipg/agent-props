@@ -97,7 +97,7 @@ BLUEPRINT_VERSION: Final = "1.0.0"
 
 #: The tool name ``fetch_store_profile`` and ``recheck_store`` share. Step 7's
 #: two tool-name calls are both this, and they must resolve to different nodes.
-REPEATED_TOOL: Final = "delightree.stores.get"
+REPEATED_TOOL: Final = "acme.stores.get"
 
 POOL_NODE: Final = "request_docs"
 

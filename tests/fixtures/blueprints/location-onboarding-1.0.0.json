@@ -39,7 +39,7 @@
   "nodes": [
     {
       "id": "receive_request",
-      "tool_name": "delightree.onboarding.intake",
+      "tool_name": "acme.onboarding.intake",
       "kind": "tool_call",
       "pool": false,
       "notes": "The opening beat. Who is opening what, and where.",
@@ -61,7 +61,7 @@
     },
     {
       "id": "fetch_store_profile",
-      "tool_name": "delightree.stores.get",
+      "tool_name": "acme.stores.get",
       "kind": "tool_call",
       "pool": false,
       "notes": "First read of the store. Status here sets up whether the loop runs.",
@@ -101,7 +101,7 @@
     },
     {
       "id": "request_docs",
-      "tool_name": "delightree.docs.request",
+      "tool_name": "acme.docs.request",
       "kind": "loop",
       "pool": true,
       "max_iterations": 3,
@@ -124,7 +124,7 @@
     },
     {
       "id": "recheck_store",
-      "tool_name": "delightree.stores.get",
+      "tool_name": "acme.stores.get",
       "kind": "tool_call",
       "pool": false,
       "notes": "Second read of the store, after documents arrive. Same tool as the first read.",
@@ -143,7 +143,7 @@
     },
     {
       "id": "assign_training",
-      "tool_name": "delightree.training.assign",
+      "tool_name": "acme.training.assign",
       "kind": "tool_call",
       "pool": false,
       "notes": "Assigns onboarding modules. Count should reflect whether this is a first or repeat location.",
@@ -167,7 +167,7 @@
     },
     {
       "id": "verify_compliance",
-      "tool_name": "delightree.compliance.check",
+      "tool_name": "acme.compliance.check",
       "kind": "tool_call",
       "pool": false,
       "notes": "The gate before completion. Non-compliance routes to escalation.",

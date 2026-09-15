@@ -19,7 +19,7 @@ Date: 2026-09-08
 | Two terminal states | `complete` and `escalate` |
 | Entity revisions and timeline validation | `store` changes state mid-run; `franchisee` does not |
 | Constant-entity enforcement | `franchisee` has no revisions, so DS-008 requires byte-identity |
-| Tool-name disambiguation by position | `fetch_store_profile` and `recheck_store` share `delightree.stores.get` |
+| Tool-name disambiguation by position | `fetch_store_profile` and `recheck_store` share `acme.stores.get` |
 | Pool draw and exhaustion | The pool has 2 entries against `max_iterations: 3` |
 | Unreached branches still filled | `escalate` has a fixture even though `expected_path` never visits it |
 | Mandatory provenance | Title, intent, complete labels and a named author, with intent distinct from both narrative and rationale |
@@ -32,7 +32,7 @@ If the implementation handles this blueprint, it handles the phase 1 feature set
 ```
 receive_request
       |
-fetch_store_profile                      (tool: delightree.stores.get)
+fetch_store_profile                      (tool: acme.stores.get)
       |
   check_docs  <-------------------+
    /       \                      |
@@ -42,7 +42,7 @@ fetch_store_profile                      (tool: delightree.stores.get)
 request_docs  assign_training     |
   |  (loop)         |             |
   v                 |             |
-recheck_store ------+             |     (tool: delightree.stores.get, same name)
+recheck_store ------+             |     (tool: acme.stores.get, same name)
   |                               |
   +-------------------------------+
                     |
@@ -97,7 +97,7 @@ recheck_store ------+             |     (tool: delightree.stores.get, same name)
   "nodes": [
     {
       "id": "receive_request",
-      "tool_name": "delightree.onboarding.intake",
+      "tool_name": "acme.onboarding.intake",
       "kind": "tool_call",
       "pool": false,
       "notes": "The opening beat. Who is opening what, and where.",
@@ -119,7 +119,7 @@ recheck_store ------+             |     (tool: delightree.stores.get, same name)
     },
     {
       "id": "fetch_store_profile",
-      "tool_name": "delightree.stores.get",
+      "tool_name": "acme.stores.get",
       "kind": "tool_call",
       "pool": false,
       "notes": "First read of the store. Status here sets up whether the loop runs.",
@@ -159,7 +159,7 @@ recheck_store ------+             |     (tool: delightree.stores.get, same name)
     },
     {
       "id": "request_docs",
-      "tool_name": "delightree.docs.request",
+      "tool_name": "acme.docs.request",
       "kind": "loop",
       "pool": true,
       "max_iterations": 3,
@@ -182,7 +182,7 @@ recheck_store ------+             |     (tool: delightree.stores.get, same name)
     },
     {
       "id": "recheck_store",
-      "tool_name": "delightree.stores.get",
+      "tool_name": "acme.stores.get",
       "kind": "tool_call",
       "pool": false,
       "notes": "Second read of the store, after documents arrive. Same tool as the first read.",
@@ -201,7 +201,7 @@ recheck_store ------+             |     (tool: delightree.stores.get, same name)
     },
     {
       "id": "assign_training",
-      "tool_name": "delightree.training.assign",
+      "tool_name": "acme.training.assign",
       "kind": "tool_call",
       "pool": false,
       "notes": "Assigns onboarding modules. Count should reflect whether this is a first or repeat location.",
@@ -225,7 +225,7 @@ recheck_store ------+             |     (tool: delightree.stores.get, same name)
     },
     {
       "id": "verify_compliance",
-      "tool_name": "delightree.compliance.check",
+      "tool_name": "acme.compliance.check",
       "kind": "tool_call",
       "pool": false,
       "notes": "The gate before completion. Non-compliance routes to escalation.",
@@ -493,7 +493,7 @@ Its job in the suite is to prove that a dataset which never enters the loop stil
 
     { "id": "BP-014-ambiguous-tool", "target": "blueprint", "expect": ["BP-014"],
       "mutate": [ { "op": "replace", "path": "/nodes/5/tool_name",
-                    "value": "delightree.docs.request" } ] },
+                    "value": "acme.docs.request" } ] },
 
     { "id": "BP-017-loop-without-pool", "target": "blueprint", "expect": ["BP-017"],
       "mutate": [ { "op": "replace", "path": "/nodes/3/pool", "value": false } ] },

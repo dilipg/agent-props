@@ -55,10 +55,10 @@ repo**, add `.mcp.json`:
     "agent-props": {
       "command": "uv",
       "args": [
-        "run", "--directory", "c:/Users/Dilip/Documents/GitHub/agent-props",
+        "run", "--directory", "/path/to/agent-props",
         "python", "-m", "agentprops.server",
         "--transport", "stdio",
-        "--store", "c:/Users/Dilip/Documents/GitHub/agent-props/demo.db"
+        "--store", "/path/to/agent-props/demo.db"
       ]
     }
   }
@@ -70,7 +70,7 @@ environment. Verify it answers before relying on it:
 
 ```bash
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
-  | uv run --directory c:/Users/Dilip/Documents/GitHub/agent-props \
+  | uv run --directory /path/to/agent-props \
       python -m agentprops.server --transport stdio --store demo.db | head -c 80
 ```
 
@@ -124,7 +124,7 @@ Install the client into your agent repo. Its `pyproject.toml`:
 dependencies = ["agent-props-client"]
 
 [tool.uv.sources]
-agent-props-client = { path = "c:/Users/Dilip/Documents/GitHub/agent-props/client/python" }
+agent-props-client = { path = "/path/to/agent-props/client/python" }
 ```
 
 ```bash
@@ -153,7 +153,7 @@ with connect("http://127.0.0.1:8000/mcp", agent_id="location-onboarding") as pro
     print("pinned", start.pin)
 
     props.fetch_step(node_id="receive_request")
-    profile = props.fetch_step(tool_name="delightree.stores.get")  # resolves by position
+    profile = props.fetch_step(tool_name="acme.stores.get")  # resolves by position
     for i in (0, 1, 2):
         drawn = props.fetch_step(node_id="request_docs", iteration=i)
         print(i, [w.code for w in drawn.warnings])
@@ -309,7 +309,7 @@ started = call(
 pin = started["data"]["start"]["pin"]  # {dataset_id, dataset_version, blueprint_version}
 
 call("fetch_step", run_id=run_id, node_id="receive_request")
-call("fetch_step", run_id=run_id, tool_name="delightree.stores.get")  # resolved by position
+call("fetch_step", run_id=run_id, tool_name="acme.stores.get")  # resolved by position
 call("fetch_step", run_id=run_id, node_id="request_docs", iteration=1)  # a pool draw
 call("run_get", run_id=run_id)  # the run, its steps, and its reconstructed path
 ```
@@ -360,7 +360,7 @@ from agentprops_client import connect, grade
 
 with connect("http://localhost:8000/mcp", agent_id="location-onboarding") as client:
     client.run_start({"labels": {"scenario": "missing-documents"}})
-    step = client.fetch_step(tool_name="delightree.stores.get")
+    step = client.fetch_step(tool_name="acme.stores.get")
     step.resolved_node_id  # 'fetch_store_profile' — resolved by position
     client.record_step(step.output, node_id=step.resolved_node_id)
     run = client.run_finish({"onboarding_status": "complete", "outstanding_tasks": 0})

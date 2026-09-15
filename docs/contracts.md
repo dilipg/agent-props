@@ -80,7 +80,7 @@ Pydantic v2 in `models/`. JSON Schemas are emitted from these at build time into
   "nodes": [
     {
       "id": "fetch_store_profile",
-      "tool_name": "delightree.stores.get", // optional, enables tool-name addressing
+      "tool_name": "acme.stores.get", // optional, enables tool-name addressing
       "kind": "tool_call" | "llm" | "decision" | "loop" | "terminal",
       "input_schema": { },                  // JSON Schema; may $ref an entity
       "output_schema": { },

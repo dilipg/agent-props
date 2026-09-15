@@ -274,13 +274,13 @@ async def test_the_two_clients_send_identical_requests() -> None:
     asynchronous = async_client(async_recorder)
 
     sync.run_start({"dataset_id": "d"}, run_class="eval")
-    sync.fetch_step(tool_name="delightree.stores.get")
+    sync.fetch_step(tool_name="acme.stores.get")
     sync.fetch_step(node_id="request_docs", iteration=1)
     sync.record_step({"a": 1}, node_id="request_docs", iteration=1)
     sync.run_finish({"onboarding_status": "complete"}, status=STATUS_ABANDONED)
 
     await asynchronous.run_start({"dataset_id": "d"}, run_class="eval")
-    await asynchronous.fetch_step(tool_name="delightree.stores.get")
+    await asynchronous.fetch_step(tool_name="acme.stores.get")
     await asynchronous.fetch_step(node_id="request_docs", iteration=1)
     await asynchronous.record_step({"a": 1}, node_id="request_docs", iteration=1)
     await asynchronous.run_finish({"onboarding_status": "complete"}, status=STATUS_ABANDONED)

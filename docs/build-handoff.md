@@ -47,7 +47,7 @@ Locked. Rationale given so you understand the constraint, not so you can relitig
 
 | Concern | Choice | Notes |
 |---|---|---|
-| Language | Python 3.12+ | Astra's eval side is Python. |
+| Language | Python 3.12+ | The eval side is Python. |
 | Packaging | `uv` with `pyproject.toml` | Fast, lockfile-based. |
 | MCP server | Official SDK, `pip install mcp` (v2.x) | v2 renamed `FastMCP` to `MCPServer`: `from mcp import MCPServer`, tools via `@mcp.tool()` with input schemas derived from type hints. Supports stdio and streamable HTTP, ships built-in OpenTelemetry tracing, and supports in-memory testing by passing the server object straight to a `Client`. v1.x is in maintenance. |
 | Models | Pydantic v2 | Envelope models, request and response types. |

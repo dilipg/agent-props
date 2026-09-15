@@ -80,7 +80,7 @@
 
     { "id": "BP-014-ambiguous-tool", "target": "blueprint", "expect": ["BP-014"],
       "mutate": [ { "op": "replace", "path": "/nodes/5/tool_name",
-                    "value": "delightree.docs.request" } ] },
+                    "value": "acme.docs.request" } ] },
 
     { "id": "BP-015-duplicate-entity-id", "target": "blueprint", "expect": ["BP-015"],
       "mutate": [ { "op": "add", "path": "/entities/-",

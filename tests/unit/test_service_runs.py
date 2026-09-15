@@ -65,7 +65,7 @@ PRIYA = "3f8c1a20-0000-4000-8000-000000000001"
 ARUN = "3f8c1a20-0000-4000-8000-000000000002"
 
 #: The tool name ``fetch_store_profile`` and ``recheck_store`` share.
-REPEATED_TOOL = "delightree.stores.get"
+REPEATED_TOOL = "acme.stores.get"
 
 #: The golden loop node and the length of its pool. **Two** entries, so
 #: exhaustion begins at iteration 2 (ruling R-52 corrects `worked-example.md`
