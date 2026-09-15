@@ -3,6 +3,8 @@ name = "agentprops"
 version = "0.1.0"
 description = "Blueprint-driven narrative fixture service for agentic systems."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
   "mcp>=2.2.0",

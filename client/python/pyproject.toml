@@ -3,6 +3,8 @@ name = "agent-props-client"
 version = "0.1.0"
 description = "Python client for agent-props: run ids, step fetching, and the three comparison helpers."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 # Two dependencies, and the split between them is the point.
 #

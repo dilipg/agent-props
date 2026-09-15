@@ -90,3 +90,7 @@ anything.
 
 Python 3.12+, MCP over stdio or streamable HTTP, SQLite / PostgreSQL / MongoDB behind one storage
 protocol.
+
+## Licence
+
+[MIT](LICENSE). Use it, fork it, ship it.
