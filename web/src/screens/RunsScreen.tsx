@@ -19,7 +19,7 @@
  * drawn on 0.3.0's topology would show nodes that did not exist when it ran.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { BlueprintGraph } from "@/components/BlueprintGraph";
 import type { RunOverlay } from "@/components/BlueprintGraph";
@@ -69,7 +69,13 @@ function Field({
  * means. Under `subset` the two are allowed to differ; a reviewer told only
  * "expected" and "actual" would read a passing run as a failing one.
  */
-function RunHeader({ bundle }: { readonly bundle: EvidenceBundle }): React.JSX.Element {
+function RunHeader({
+  bundle,
+  onOpenDataset,
+}: {
+  readonly bundle: EvidenceBundle;
+  readonly onOpenDataset?: ((datasetId: string, version: number) => void) | undefined;
+}): React.JSX.Element {
   return (
     <div data-testid="run-header" className="border-b border-slate-200 bg-white px-3 py-2">
       <dl className="grid grid-cols-2 gap-x-4 gap-y-1 md:grid-cols-5">
@@ -77,7 +83,20 @@ function RunHeader({ bundle }: { readonly bundle: EvidenceBundle }): React.JSX.E
         <Field label="status">{bundle.run.status}</Field>
         <Field label="blueprint">{bundle.pin.blueprint_version}</Field>
         <Field label="dataset">
-          {bundle.pin.dataset_id.slice(0, 8)} v{bundle.pin.dataset_version}
+          {onOpenDataset === undefined ? (
+            `${bundle.pin.dataset_id.slice(0, 8)} v${String(bundle.pin.dataset_version)}`
+          ) : (
+            <button
+              type="button"
+              data-testid="run-dataset-link"
+              onClick={() => {
+                onOpenDataset(bundle.pin.dataset_id, bundle.pin.dataset_version);
+              }}
+              className="text-sky-700 underline underline-offset-2 hover:text-sky-900"
+            >
+              {bundle.pin.dataset_id.slice(0, 8)} v{bundle.pin.dataset_version}
+            </button>
+          )}
         </Field>
         <Field label="comparison">{bundle.comparison}</Field>
       </dl>
@@ -116,10 +135,31 @@ function RunOutcome({ bundle }: { readonly bundle: EvidenceBundle }): React.JSX.
   );
 }
 
-export function RunsScreen({ agentId }: { readonly agentId: string | undefined }): React.JSX.Element {
+export function RunsScreen({
+  agentId,
+  focus,
+  onOpenDataset,
+}: {
+  readonly agentId: string | undefined;
+  /** A run another screen asked this one to open. */
+  readonly focus?: string | undefined;
+  /**
+   * Open a dataset elsewhere in the app. Given the **pinned** version, not the
+   * lineage's latest: a run reads one frozen version for its whole life, so the
+   * latest may be a document this run never saw.
+   */
+  readonly onOpenDataset?: ((datasetId: string, version: number) => void) | undefined;
+}): React.JSX.Element {
   const [selectedRun, setSelectedRun] = useState<string | undefined>(undefined);
   const [view, setView] = useState<View>("sequence");
   const [selectedNode, setSelectedNode] = useState<string | undefined>(undefined);
+
+  // A focus is a request from another screen, so it wins over local selection.
+  useEffect(() => {
+    if (focus === undefined) return;
+    setSelectedRun(focus);
+    setSelectedNode(undefined);
+  }, [focus]);
 
   const runs = useRuns(agentId);
   const evidence = useRunEvidence(selectedRun);
@@ -168,7 +208,7 @@ export function RunsScreen({ agentId }: { readonly agentId: string | undefined }
           </p>
         ) : (
           <>
-            <RunHeader bundle={bundle} />
+            <RunHeader bundle={bundle} onOpenDataset={onOpenDataset} />
             <Warnings warnings={evidence.data?.warnings ?? []} />
 
             <nav className="flex shrink-0 gap-1 border-b border-slate-200 bg-white px-3 py-1.5 text-xs">

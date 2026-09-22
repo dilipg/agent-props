@@ -183,8 +183,15 @@ export async function datasetValidate(document: JsonDocument): Promise<readonly 
  * (`run_start`, `run_finish`) are not named anywhere in `web/src`: a run is
  * created by the agent under test, never by a reviewer looking at one.
  */
-export async function runFind(agentId?: string): Promise<readonly RunSummary[]> {
-  const args = agentId === undefined || agentId === "" ? {} : { agent_id: agentId };
+export async function runFind(
+  agentId?: string,
+  datasetId?: string,
+): Promise<readonly RunSummary[]> {
+  const args: Record<string, unknown> = {};
+  if (agentId !== undefined && agentId !== "") args["agent_id"] = agentId;
+  // Sent to the service rather than filtered here: `run_find` pages at 50, so a
+  // browser-side filter would quietly show a truncated set on a busy store.
+  if (datasetId !== undefined && datasetId !== "") args["dataset_id"] = datasetId;
   return payload("run_find", await callTool("run_find", args));
 }
 

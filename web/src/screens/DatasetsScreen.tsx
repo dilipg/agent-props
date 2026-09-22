@@ -9,11 +9,12 @@
  * ones under test.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { DatasetDetail } from "@/components/DatasetDetail";
 import { DatasetFilters } from "@/components/DatasetFilters";
 import { DatasetList } from "@/components/DatasetList";
+import { DatasetRuns } from "@/components/DatasetRuns";
 import { DocumentEditor } from "@/components/DocumentEditor";
 import { Warnings } from "@/components/Findings";
 import type { DatasetFilter } from "@/mcp/types";
@@ -29,10 +30,43 @@ import { useDataset, useDatasets, useLabelVocabulary, useSaveDataset } from "@/q
  */
 const PAGE_SIZE = 50;
 
-export function DatasetsScreen({ agentId }: { readonly agentId: string | undefined }): React.JSX.Element {
+/** A dataset another screen has asked this one to open, at a given version. */
+export interface DatasetFocus {
+  readonly datasetId: string;
+  /** The version to open. A run pins one, and that is the one worth showing. */
+  readonly version: number;
+}
+
+export function DatasetsScreen({
+  agentId,
+  focus,
+  onOpenRun,
+}: {
+  readonly agentId: string | undefined;
+  readonly focus?: DatasetFocus | undefined;
+  readonly onOpenRun?: ((runId: string) => void) | undefined;
+}): React.JSX.Element {
   const [filter, setFilter] = useState<DatasetFilter>({});
   const [selected, setSelected] = useState<string | undefined>(undefined);
+  /**
+   * The version to request, when one was asked for.
+   *
+   * Undefined for a dataset opened from the list, which is what makes
+   * `dataset_get` serve the lineage's latest - the meaning every other part of
+   * this screen already assumes. Set only by a `focus`, and cleared the moment
+   * the reviewer picks a different row, because the pin belongs to the run they
+   * arrived from and not to whatever they browse to next.
+   */
+  const [version, setVersion] = useState<number | undefined>(undefined);
   const [editing, setEditing] = useState(false);
+
+  // A focus is a request from another screen, so it wins over local selection.
+  useEffect(() => {
+    if (focus === undefined) return;
+    setSelected(focus.datasetId);
+    setVersion(focus.version);
+    setEditing(false);
+  }, [focus]);
 
   const scoped = useMemo<DatasetFilter>(
     () => ({
@@ -44,7 +78,7 @@ export function DatasetsScreen({ agentId }: { readonly agentId: string | undefin
   );
   const datasets = useDatasets(scoped);
   const vocabulary = useLabelVocabulary(agentId);
-  const detail = useDataset(selected);
+  const detail = useDataset(selected, version);
   const dataset = detail.data?.value;
   /**
    * The agent id comes from the **dataset's own blueprint reference**, not from
@@ -61,6 +95,16 @@ export function DatasetsScreen({ agentId }: { readonly agentId: string | undefin
     [vocabulary.data],
   );
   const rows = datasets.data ?? [];
+  /**
+   * The latest version of the selected lineage, read off the list rather than
+   * fetched: `dataset_find` returns one row per lineage **at its latest
+   * version**, so the number is already here. Undefined when the dataset is not
+   * in the current page, in which case no claim is made rather than a wrong one.
+   */
+  const latestVersion = useMemo(
+    () => datasets.data?.find((row) => row.id === selected)?.version,
+    [datasets.data, selected],
+  );
 
   return (
     <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[minmax(360px,1fr)_1.4fr]">
@@ -73,6 +117,9 @@ export function DatasetsScreen({ agentId }: { readonly agentId: string | undefin
             selectedId={selected}
             onSelect={(id) => {
               setSelected(id);
+              // Back to the lineage's latest: the pinned version belonged to the
+              // run the reviewer arrived from, not to this row.
+              setVersion(undefined);
               setEditing(false);
             }}
             isLoading={datasets.isLoading}
@@ -167,7 +214,29 @@ export function DatasetsScreen({ agentId }: { readonly agentId: string | undefin
                       following a link needs telling it has been withdrawn.
                     */}
                     <Warnings warnings={detail.data?.warnings ?? []} />
+                    {latestVersion !== undefined && dataset.version !== latestVersion && (
+                      <p
+                        data-testid="dataset-version-note"
+                        className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-900"
+                      >
+                        Viewing v{dataset.version}; the latest is v{latestVersion}. This is the
+                        document a run pinned, not the current one — edits here save as a new
+                        version on top of the latest.
+                      </p>
+                    )}
                     <DatasetDetail dataset={dataset} dimensions={dimensions} />
+                    <section data-testid="dataset-runs-section" className="mt-5">
+                      <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                        runs against this dataset
+                      </h3>
+                      <div className="rounded border border-slate-200 bg-white">
+                        <DatasetRuns
+                          agentId={agentId}
+                          datasetId={dataset.id}
+                          onOpenRun={onOpenRun ?? (() => {})}
+                        />
+                      </div>
+                    </section>
                   </>
                 )}
               </div>

@@ -52,9 +52,16 @@ afterEach(() => {
   server.restore();
 });
 
-async function pickTheRun(): Promise<void> {
+type Opened = { readonly datasetId: string; readonly version: number };
+
+async function pickTheRun(onOpenDataset?: (datasetId: string, version: number) => void): Promise<void> {
   const user = userEvent.setup();
-  renderWithQuery(<RunsScreenForTest agentId={GOLDEN_EVIDENCE.run.agent_id} />);
+  renderWithQuery(
+    <RunsScreenForTest
+      agentId={GOLDEN_EVIDENCE.run.agent_id}
+      {...(onOpenDataset ? { onOpenDataset } : {})}
+    />,
+  );
   await waitFor(() => {
     expect(screen.getByTestId("run-row")).toBeInTheDocument();
   });
@@ -179,6 +186,25 @@ describe("the runs screen", () => {
       expect(screen.getByTestId("step-evidence")).toBeInTheDocument();
     });
     expect(screen.getByTestId("step-actual").textContent).toBe(sequenceOutput);
+  });
+
+  it("hands the navigation callback the PINNED dataset version, not just the id", async () => {
+    // The whole point of the link. A run reads one frozen version for its life,
+    // so opening the lineage's latest would show a document this run never saw -
+    // and when the dataset has never been edited the two coincide, which is why
+    // nothing on screen would reveal the mistake.
+    const user = userEvent.setup();
+    const opened: Opened[] = [];
+    await pickTheRun((datasetId, version) => opened.push({ datasetId, version }));
+
+    await user.click(screen.getByTestId("run-dataset-link"));
+
+    expect(opened).toEqual([
+      {
+        datasetId: GOLDEN_EVIDENCE.pin.dataset_id,
+        version: GOLDEN_EVIDENCE.pin.dataset_version,
+      },
+    ]);
   });
 
   it("never names a run-writing tool — a reviewer reads runs, it does not make them", async () => {

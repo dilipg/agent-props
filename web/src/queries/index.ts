@@ -151,10 +151,13 @@ export function useSaveDataset(
  * Runs for the selected agent. Undefined agent means every run in the store,
  * which is the right answer for a reviewer who has not chosen one yet.
  */
-export function useRuns(agentId: string | undefined): UseQueryResult<readonly RunSummary[]> {
+export function useRuns(
+  agentId: string | undefined,
+  datasetId?: string,
+): UseQueryResult<readonly RunSummary[]> {
   return useQuery({
-    queryKey: ["run_find", agentId ?? null],
-    queryFn: () => runFind(agentId),
+    queryKey: ["run_find", agentId ?? null, datasetId ?? null],
+    queryFn: () => runFind(agentId, datasetId),
     ...NO_RETRY,
   });
 }

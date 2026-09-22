@@ -6003,3 +6003,37 @@ Three defects the work surfaced, all in the graph and all invisible without a cl
   work: React dispatches at the root container, after the pane's native listener has run.
 - `fitView` will not zoom out past `minZoom`, default `0.5`. A ten-node vertical topology in half a
   pane therefore rendered clipped at both ends, silently. Now `0.15`.
+
+## [post-M10] Datasets and runs point at each other, and the pin decides which version
+A dataset's detail view answered "what is this world and why is it in the suite" and stopped there,
+so nothing on screen said whether anything had ever been run through it — the shape of a dataset
+authored once and then forgotten. The runs screen had the mirror gap: it named a dataset id and
+gave no way to read it.
+
+Chosen: a **focus** held in `App.tsx` — a request to open one document, handed to the target screen
+as a prop and cleared once consumed. Each screen keeps owning its own selection. No router: PRD 10.4
+scopes phase 1 to browse-and-edit, and a router would be a sixth library in a locked five-library
+stack. Clearing on consumption is deliberate — a focus that persisted would yank a reviewer back to
+the first dataset every time they switched tabs, because an event that outlives its moment becomes
+state that fights the user.
+
+**The pinned version, not the latest.** A run reads one frozen dataset version for its whole life,
+so following its link opens *that* version. The trap is that on a store where nothing has been
+edited the pinned version and the latest coincide, so the wrong behaviour looks correct until the
+first edit and then silently shows a document the run never saw.
+`DatasetsScreen.test.tsx` asserts the `dataset_get` **argument**, which is the only place the
+difference is visible, and a second test asserts the version note does *not* render when the two
+agree — without it, a note rendered unconditionally would pass the first test while telling every
+reviewer their current dataset was stale.
+
+**Filtering belongs to the service.** `run_find` already took `dataset_id`; the web client simply
+was not passing it. A browser-side `filter()` over the run list would have looked right on a small
+store and silently truncated on a busy one, because `run_find` pages at fifty — so the test asserts
+the request carries `dataset_id` rather than asserting the rendered rows.
+
+**`App.test.tsx` is new, and it is the point.** Every component test here would still have passed if
+`App` had never wired the callbacks up: the shell is where a working feature and a dead link look
+identical from below. Both directions are driven end to end there.
+
+No service change, and no new writing tool — `run_find` is a read, so
+`test_web_writes_through_tools.py`'s allowlist is untouched.
